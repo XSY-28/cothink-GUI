@@ -1,0 +1,145 @@
+name: Publish npm with trusted publishing
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact package.json version on main
+        required: true
+        type: string
+      dist-tag:
+        description: npm channel to update
+        type: choice
+        options: [latest, next]
+        default: latest
+      publish:
+        description: Publish after verification (false only rehearses)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the private development main branch
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+        run: |
+          test "$SOURCE_REPOSITORY" = XSY-28/cothink-gui
+          test "$SOURCE_REF" = refs/heads/main
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Check the requested version and registry before building
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const pkg = JSON.parse(fs.readFileSync('package.json'));
+          assert.equal(pkg.name, 'cothink-v2');
+          assert.equal(pkg.version, process.env.EXPECTED_VERSION);
+          assert.equal(pkg.repository.url, 'git+https://github.com/XSY-28/cothink-gui.git');
+          if (process.env.PUBLISH === 'true') {
+            const versions = JSON.parse(execFileSync('npm', ['view', pkg.name, 'versions', '--json',
+              '--registry=https://registry.npmjs.org'], { encoding: 'utf8' }));
+            assert.ok(![versions].flat().includes(pkg.version), 'This version is already published; prepare a new version first');
+          }
+          NODE
+
+  verify:
+    needs: preflight
+    uses: ./.github/workflows/gui.yml
+
+  publish:
+    needs: [preflight, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      EXPECTED_VERSION: ${{ inputs.version }}
+      DIST_TAG: ${{ inputs.dist-tag }}
+      # npm cannot generate provenance for a private source repository.
+      NPM_CONFIG_PROVENANCE: 'false'
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unified-linux-arm64-candidate
+          path: candidate
+      - name: Verify the exact previously installed candidate
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          const entries = JSON.parse(fs.readFileSync('candidate/pack-result.json'));
+          assert.equal(entries.length, 1);
+          const [packed] = entries;
+          assert.equal(packed.version, process.env.EXPECTED_VERSION);
+          assert.equal(packed.filename, `cothink-v2-${packed.version}.tgz`);
+          assert.equal(packed.filename, path.basename(packed.filename));
+          const tarball = path.resolve('candidate/dist', packed.filename);
+          const bytes = fs.readFileSync(tarball);
+          for (const [algorithm, encoding, field, prefix] of [
+            ['sha512', 'base64', 'integrity', 'sha512-'],
+            ['sha256', 'hex', 'sha256', ''],
+            ['sha1', 'hex', 'shasum', ''],
+          ]) assert.equal(prefix + createHash(algorithm).update(bytes).digest(encoding), packed[field]);
+          const pkg = JSON.parse(execFileSync('tar', ['-xOf', tarball, 'package/package.json'], { encoding: 'utf8' }));
+          assert.equal(pkg.name, 'cothink-v2');
+          assert.equal(pkg.version, process.env.EXPECTED_VERSION);
+          assert.equal(pkg.repository.url, 'git+https://github.com/XSY-28/cothink-gui.git');
+          assert.equal(pkg.overrides, undefined);
+          assert.ok(['latest', 'next'].includes(process.env.DIST_TAG));
+          fs.appendFileSync(process.env.GITHUB_ENV, `COTHINK_TARBALL=${tarball}\n`);
+          NODE
+      - name: Rehearse publishing without changing the registry
+        if: ${{ !inputs.publish }}
+        run: npm publish "$COTHINK_TARBALL" --dry-run --ignore-scripts --access public --tag "$DIST_TAG" --registry=https://registry.npmjs.org
+      - name: Publish the verified tarball using OIDC
+        if: ${{ inputs.publish }}
+        run: |
+          test -n "$ACTIONS_ID_TOKEN_REQUEST_URL"
+          test -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
+          npm publish "$COTHINK_TARBALL" --ignore-scripts --access public --tag "$DIST_TAG" --registry=https://registry.npmjs.org
+      - name: Check public registry integrity and the requested channel
+        if: ${{ inputs.publish }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const [packed] = JSON.parse(fs.readFileSync('candidate/pack-result.json'));
+          const view = (...args) => JSON.parse(execFileSync('npm', ['view', ...args, '--json',
+            '--registry=https://registry.npmjs.org'], { encoding: 'utf8' }));
+          const dist = view(`cothink-v2@${packed.version}`, 'dist');
+          assert.equal(dist.integrity, packed.integrity);
+          assert.equal(dist.shasum, packed.shasum);
+          assert.equal(view('cothink-v2', 'dist-tags')[process.env.DIST_TAG], packed.version);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `Published cothink-v2@${packed.version} to ${process.env.DIST_TAG}; registry integrity matches the verified artifact.\n`);
+          NODE

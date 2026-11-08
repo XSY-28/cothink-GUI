@@ -1,0 +1,35 @@
+.panel {min-width:0; padding:22px 26px 24px; max-height:min(620px,calc(100dvh - 180px)); overflow:auto; scrollbar-gutter:stable;}
+.intro {display:flex;align-items:flex-start;gap:16px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:16px;}
+.intro>div {flex:1;min-width:0;}
+.intro h3 {margin:5px 0;}
+.intro p,.card p {font-size:13px;line-height:1.6;overflow-wrap:anywhere;margin:6px 0;}
+.intro small,.heading small,.actions small,.footer {color:var(--muted);}
+.heading {display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.list {display:flex;flex-direction:column;gap:10px;margin:12px 0;}
+.card {border:1px solid var(--line);border-radius:8px;padding:14px;display:flex;gap:12px;align-items:center;}
+.card>div:first-child {flex:1;min-width:0;}
+.selected {border-color:var(--accent);}
+.tag {font-size:12px;color:var(--accent);padding-left:10px;}
+.actions {display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0;}
+.actions small {flex:1;}
+.thinking,.auth {border-bottom:1px solid var(--line);padding:12px 0;font-size:13px;}
+.thinking p {margin:0 0 10px;}
+.fields {border:0;padding:0;min-width:0;}
+.model {border-top:1px solid var(--line);margin-top:16px;padding-top:16px;}
+.parameters {margin-top:10px;}
+.parameters summary {cursor:pointer;font-size:13px;color:var(--muted);}
+.notice,.confirm {padding:12px;border:1px solid var(--line);border-radius:6px;margin:12px 0;overflow-wrap:anywhere;}
+.confirm {border-color:var(--accent);}
+.confirm button {margin-right:8px;}
+.footer {font-size:12px;line-height:1.6;border-top:1px solid var(--line);padding-top:14px;}
+@media(max-width:620px){.intro,.card{flex-direction:column;align-items:stretch}.heading{align-items:flex-start}.actions button{flex:0 1 auto}}
+
+.list {max-height:280px;overflow:auto;padding:2px 4px 2px 0;scrollbar-width:thin;}
+.card {padding:12px;gap:12px;}
+.card .actions {margin:0;gap:6px;}
+.card p {display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;}
+.thinking label {display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:16px;}
+.thinking select {width:auto;max-width:240px;}
+@media(max-width:620px){.panel{padding:18px;max-height:calc(100dvh - 140px)}.thinking label{align-items:flex-start;flex-direction:column;gap:6px}.thinking select{width:100%;max-width:none}.list{max-height:none;overflow:visible}}
+
+.thinking summary{cursor:pointer;font-size:13px;padding:3px 0;color:var(--muted)}.thinking[open] summary{margin-bottom:14px}

@@ -1,0 +1,3 @@
+# npm normalizes a CLI shebang to LF during installation. Keep the source and
+# packed entrypoint identical on Windows as well as POSIX.
+bin/cothink.js text eol=lf

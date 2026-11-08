@@ -1,0 +1,169 @@
+name: Unified CLI and GUI verification
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+env:
+  COTHINK_NO_UPDATE_CHECK: "1"
+jobs:
+  linux:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+      - name: Read the independent source version
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_ENV, 'COTHINK_EXPECT_VERSION=' + require('./package.json').version + '\n')"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pyte==0.8.2
+      - name: Provide the existing search tool dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+          rg --version
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node --test test/ci-candidate.test.js
+      - name: Require real Docker execution
+        run: |
+          docker info
+          image="$(node --input-type=module -e "import fs from 'node:fs'; console.log(JSON.parse(fs.readFileSync('packages/agent-sync/execution-manifest.json')).execution.image)")"
+          expected_platform="$(node --input-type=module -e "import fs from 'node:fs'; console.log(JSON.parse(fs.readFileSync('packages/agent-sync/execution-manifest.json')).platform)")"
+          docker pull "$image"
+          actual_platform="$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')"
+          test "$actual_platform" = "$expected_platform"
+          docker run --rm --network none "$image" node --version
+      - name: Prepare the fixed Linux PROJECT plugin runtime
+        run: |
+          runtime="$RUNNER_TEMP/cothink-project-runtime-source"
+          node scripts/prepare-project-plugin-runtime.mjs "$runtime"
+          echo "COTHINK_TEST_PLUGIN_RUNTIME=$runtime" >> "$GITHUB_ENV"
+          echo "COTHINK_PACK_PLUGIN_RUNTIME=$runtime" >> "$GITHUB_ENV"
+      - name: Prepare the original native plugin test package
+        run: |
+          native_home="$RUNNER_TEMP/cothink-native-fixture"
+          COTHINK_HOME="$native_home" node bin/cothink.js install npm:pi-subagents@0.84.0 --json
+          echo "COTHINK_TEST_NATIVE_HOME=$native_home/pi" >> "$GITHUB_ENV"
+      - name: Build the offline browser image and record its actual digest
+        run: node scripts/build-visual-preview.mjs
+      - name: Install the host browser for GUI acceptance
+        run: npx --no-install playwright install --with-deps chromium
+      - run: npm run build:gui
+      - run: npm test
+      - run: npm run test:agent-sync-core
+      - run: npm run test:gui
+      - run: npm run test:visual
+      - run: npm run test:pi-terminal
+      - name: Build and pack the candidate
+        run: npm run --silent pack:npm -- dist > pack-result.json
+      - name: Read the exact candidate path
+        run: node scripts/npm-candidate.mjs
+      - name: Install in an isolated prefix
+        run: npm install --prefix "$RUNNER_TEMP/CoThink GUI 中文 prefix" --ignore-scripts --no-audit --no-fund "$COTHINK_TARBALL"
+      - name: Verify actual installed CLI, assets and runtime bytes
+        run: |
+          node test/helpers/gui-installed.mjs "$RUNNER_TEMP/CoThink GUI 中文 prefix/node_modules/cothink-v2" "$GITHUB_WORKSPACE"
+          node test/helpers/npm-installed.mjs "$RUNNER_TEMP/CoThink GUI 中文 prefix/node_modules/cothink-v2"
+      - name: Exercise installed HTTP, CLI PTY and Docker integration
+        env:
+          COTHINK_TEST_PACKAGE_ROOT: ${{ runner.temp }}/CoThink GUI 中文 prefix/node_modules/cothink-v2
+          COTHINK_TEST_CLI: ${{ runner.temp }}/CoThink GUI 中文 prefix/node_modules/cothink-v2/bin/cothink.js
+        run: node --test test/pi-kimi.test.js test/agent-sync-dispatch.test.js test/agent-sync-dispatch-docker.test.js test/gui-integration.test.js test/gui-history.test.js test/gui-partial.test.js
+      - name: Prepare and exercise the installed PROJECT plugin runtime offline
+        env:
+          COTHINK_TEST_PACKAGE_ROOT: ${{ runner.temp }}/CoThink GUI 中文 prefix/node_modules/cothink-v2
+          COTHINK_TEST_CLI: ${{ runner.temp }}/CoThink GUI 中文 prefix/node_modules/cothink-v2/bin/cothink.js
+        run: |
+          runtime="$RUNNER_TEMP/cothink-project-runtime-installed"
+          node "$COTHINK_TEST_PACKAGE_ROOT/scripts/prepare-project-plugin-runtime.mjs" "$runtime"
+          COTHINK_TEST_PLUGIN_RUNTIME="$runtime" node --test --test-concurrency=1 test/agent-sync-project-plugins.test.js test/agent-sync-project-native.test.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unified-linux-arm64-candidate
+          path: |
+            dist/*.tgz
+            pack-result.json
+          if-no-files-found: error
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+          - os: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          architecture: ${{ matrix.arch }}
+      - name: Select the job PowerShell for the native file-lock fixture
+        shell: pwsh
+        run: |
+          $lockerShell = Join-Path $PSHOME 'pwsh.exe'
+          if (-not (Test-Path -LiteralPath $lockerShell -PathType Leaf)) { throw 'The job PowerShell executable is unavailable' }
+          "COTHINK_TEST_POWERSHELL=$lockerShell" >> $env:GITHUB_ENV
+      - name: Read the independent source version
+        shell: bash
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_ENV, 'COTHINK_EXPECT_VERSION=' + require('./package.json').version + '\n')"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node --test test/ci-candidate.test.js
+      - run: npm run test:windows
+      - run: node --test test/pi-updates.test.js test/gui-updates.test.js test/gui-view.test.js test/gui-projection.test.js test/gui-components.test.js test/final-display.test.js test/gui-package.test.js
+      - name: Build and pack on Windows
+        shell: pwsh
+        run: |
+          npm.cmd run --silent pack:npm -- dist > pack-result.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Read the exact candidate path
+        run: node scripts/npm-candidate.mjs
+      - name: Verify an isolated Windows installation
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'CoThink GUI 中文 prefix'
+          npm.cmd install --prefix $prefix --ignore-scripts --no-audit --no-fund $env:COTHINK_TARBALL
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $packageRoot = Join-Path $prefix 'node_modules/cothink-v2'
+          node test/helpers/gui-installed.mjs $packageRoot $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node test/helpers/npm-installed.mjs $packageRoot
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node test/helpers/windows-installed.mjs $packageRoot
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "COTHINK_TEST_PACKAGE_ROOT=$packageRoot" >> $env:GITHUB_ENV
+          "COTHINK_TEST_CLI=$packageRoot/bin/cothink.js" >> $env:GITHUB_ENV
+      - name: Exercise installed portable dispatch and observe worker exit
+        run: node --test test/agent-sync-dispatch.test.js
+      - name: Exercise installed real HTTP history and partial results
+        run: node --test test/pi-kimi.test.js test/gui-history.test.js test/gui-partial.test.js
+      - uses: actions/setup-python@v5
+        if: matrix.arch == 'x64'
+        with:
+          python-version: '3.12'
+      - name: Installed Windows x64 ConPTY
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          python -m pip install pywinpty==3.0.5 pyte==0.8.2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python test/windows_conpty_checks.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unified-windows-${{ matrix.arch }}-candidate
+          path: |
+            dist/*.tgz
+            pack-result.json
+          if-no-files-found: error
