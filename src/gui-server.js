@@ -11,9 +11,9 @@ const actions = new Set([
   "session.create", "session.fork", "session.archive", "session.pin", "session.close", "session.name", "session.draft", "session.mode",
   "session.team", "session.thinking", "session.view", "team.save", "team.remove",
   "workspace.create", "workspace.update", "workspace.bind",
-  "provider.save", "settings.work", "releaseNotes.ack", "project.inspect",
+  "provider.save", "settings.work", "settings.builtinSkills", "releaseNotes.ack", "project.inspect",
   "extension.commands", "extension.command", "extension.reload", "extension.respond",
-  "task.submit", "task.cancel", "task.reveal", "updates.check", "updates.configure",
+  "context.organize", "task.submit", "task.confirmWork", "task.cancel", "task.reveal", "updates.check", "updates.configure",
 ]);
 const mime = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -67,9 +67,9 @@ function pageNumber(value, fallback, positive = false) {
 }
 
 /** Loopback transport only; controller owns all durable task and session facts. */
-export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open = true, controller, assetDirectory = fileURLToPath(new URL("../gui/dist", import.meta.url)) }) {
+export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open = true, suggestedProject = cwd, installation = "browser", controller, assetDirectory = fileURLToPath(new URL("../gui/dist", import.meta.url)) }) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error("GUI 端口必须是 0—65535 的整数。");
-  controller ??= await createGuiController({ home, cwd });
+  controller ??= await createGuiController({ home, cwd, suggestedProject, installation });
   const token = randomBytes(32).toString("base64url"),
     bearer = Buffer.from(`Bearer ${token}`),
     clients = new Set();
@@ -78,7 +78,7 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
     try { return await controller[method](...args); }
     catch (error) {
       // The controller's public methods redact credentials, including newly entered keys.
-      const codes = ["SESSION_STATE_CONFLICT", "SESSION_BUSY", "SESSION_NOT_PERSISTED", "SESSION_STATE_UNAVAILABLE", "CURSOR_EXPIRED", "WORKSPACE_CONFLICT", "WORKSPACE_UNAVAILABLE", "WORKSPACE_ARCHIVED", "DRAFT_CONFLICT", "VIEW_CONFLICT"];
+      const codes = ["HOST_SHUTTING_DOWN", "SHUTDOWN_UNSETTLED", "SESSION_STATE_CONFLICT", "SESSION_BUSY", "SESSION_NOT_PERSISTED", "SESSION_STATE_UNAVAILABLE", "CURSOR_EXPIRED", "WORKSPACE_CONFLICT", "WORKSPACE_UNAVAILABLE", "WORKSPACE_ARCHIVED", "DRAFT_CONFLICT", "VIEW_CONFLICT"];
       const fileCodes = ["FILE_UNSUPPORTED", "FILE_UNAVAILABLE", "FILE_PATH_INVALID", "FILE_IDENTITY_MISMATCH", "FILE_TOO_LARGE", "FILE_ENCODING_UNSUPPORTED", "FILE_TYPE_MISMATCH", "FILE_DIFF_UNSUPPORTED", "FILE_VERSION_MISMATCH", "FILE_NOT_FOUND", "FILE_DELETED", "FILE_PREVIEW_UNSUPPORTED", "FILE_PURPOSE_INVALID", "STATIC_PREVIEW_UNSUPPORTED"];
       const pluginCodes = ["EXTENSION_COMMAND", "EXTENSION_UI_UNSUPPORTED", "COMMAND_UNAVAILABLE", "UNADAPTED_PLUGIN"];
       const code = [...codes,...fileCodes,...pluginCodes].includes(error.code) ? error.code : undefined;
@@ -129,9 +129,17 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
           notify();
           return;
         }
+        if (url.pathname === "/api/shutdown") {
+          query(url, []);
+          return send(res, 200, await call("shutdownState"));
+        }
+        if(url.pathname === '/api/context-operation') {query(url,['operationId'],['operationId']);return send(res,200,await call('readContextOperation',url.searchParams.get('operationId')));}
         if (url.pathname === "/api/bootstrap") {
           query(url, []);
           return send(res, 200, await call("bootstrap"));
+        }
+        if(url.pathname==='/api/capabilities') {
+          query(url,['sessionId']);return send(res,200,await call('getSessionCapabilities',url.searchParams.get('sessionId')));
         }
         if (url.pathname === "/api/sessions") {
           query(url, ["query", "project", "workspaceId", "archived", "cursor", "limit"], []);
@@ -197,14 +205,24 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
       send(res, error.status ?? 400, { error: message, ...(error.code ? {code:error.code} : {}), ...(error.workspace && {workspace:error.workspace}) });
     }
   });
+  const beginShutdown = () => controller.beginShutdown?.() ?? Promise.resolve({settled:true});
+  const shutdownState = () => controller.shutdownState?.() ?? {settled:false};
+  let finalizing;
   async function close() {
-    if (!closing) closing = (async () => {
-      for (const client of clients) client.end();
-      const stopped = new Promise((yes, no) => server.close((e) => e && e.code !== "ERR_SERVER_NOT_RUNNING" ? no(e) : yes()));
-      try { await controller.close(); }
-      finally { server.closeAllConnections(); await stopped; }
+    if (closing) return closing;
+    if (finalizing) return finalizing;
+    finalizing=(async()=>{
+      const state=await beginShutdown();
+      if (!state.settled) throw Object.assign(Error(state.reason || "宿主停止尚未确认。"),{code:"SHUTDOWN_UNSETTLED"});
+      await controller.close();
+      closing = new Promise((yes, no) => {
+        for (const client of clients) client.end();
+        server.close(e=>e && e.code !== "ERR_SERVER_NOT_RUNNING" ? no(e) : yes());
+        server.closeAllConnections();
+      });
+      return closing;
     })();
-    return closing;
+    try {return await finalizing;} finally {finalizing=null;}
   }
   try {
     await new Promise((yes, no) => { server.once("error", no); server.listen(port, "127.0.0.1", () => { server.off("error", no); yes(); }); });
@@ -216,7 +234,7 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
       try { await openBrowser(url); }
       catch { process.stderr.write("无法自动打开浏览器，请使用本次启动链接手动打开。\n"); }
     }
-    return { url, token, close, server };
+    return { url, token, origin, beginShutdown, shutdownState, close, server };
   } catch (error) {
     await close();
     throw error;

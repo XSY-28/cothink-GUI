@@ -62,9 +62,16 @@ export function Modal({ title, onClose, children, wide = false, className = "" }
         }
       }
     };
+    // A removed menu row or final pagination button can leave focus on body.
+    // Keep the existing modal trap active without intercepting another control.
+    const orphanedKey = event => {
+      if (event.target === document.body && node.isConnected && !node.closest("[inert]")) key(event);
+    };
     node.addEventListener("keydown", key);
+    document.addEventListener("keydown", orphanedKey);
     return () => {
       node.removeEventListener("keydown", key);
+      document.removeEventListener("keydown", orphanedKey);
       const fallback = document.querySelector(".conversation-picker-trigger");
       if (previous?.isConnected && previous.getClientRects().length && !previous.closest("[inert]"))
         previous.focus();

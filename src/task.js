@@ -38,6 +38,8 @@ export function createTask({
   workRequest,
   project,
   projectPolicy,
+  flow, constraints, budget, rootTaskId, rootOwner, frozenConfig, workspace, readAuthorization, confirmationSource, budgetSource, editorEditId,
+  origin, sourceLeaf, sourceSnapshot, inputDigest,
 }) {
   const controller = new AbortController(),
     runtimes = new Set(),
@@ -50,9 +52,14 @@ export function createTask({
     formatVersion: 2,
     id,
     ...(submissionId ? { submissionId } : {}),
+    ...(editorEditId ? {editorEditId} : {}),
+    ...(origin ? {origin,sourceLeaf,sourceSnapshot:structuredClone(sourceSnapshot),inputDigest} : {}),
     createdAt: new Date().toISOString(),
     input,
     singleModel,
+    ...(flow ? {flow, constraints:structuredClone(constraints), budget:structuredClone(budget), frozenConfig:structuredClone(frozenConfig), workspace:structuredClone(workspace), readAuthorization:structuredClone(readAuthorization ?? null)} : {}),
+    ...(rootTaskId ? {rootTaskId} : {}),
+    ...(confirmationSource ? {confirmationSource:structuredClone(confirmationSource),budgetSource:structuredClone(budgetSource)} : {}),
     ...(project ? { project: structuredClone(project) } : {}),
     ...(workRequest ? { workRequest: structuredClone(workRequest) } : {}),
     models: structuredClone(models),
@@ -62,7 +69,7 @@ export function createTask({
     mode: workRequest || project ? "work" : "answer",
     phase: "created",
     status: "running",
-    maxCalls: workRequest || project ? null : singleModel ? 1 : 3,
+    maxCalls: flow === "unified" ? budget?.maxCalls ?? null : workRequest || project ? null : singleModel ? 1 : 3,
     stages: [],
     requestIds: [],
     finalCallId: null,
@@ -78,6 +85,7 @@ export function createTask({
   const task = {
     home,
     ...(projectPolicy ? { projectPolicy } : {}),
+    ...(rootOwner ? {rootOwner} : {}),
     record,
     signal: controller.signal,
     save,
@@ -196,7 +204,7 @@ export function createTask({
       record.status = status;
       record.error = error;
       record.endedAt = new Date().toISOString();
-      record.usage = task.usage();
+      record.usage = task.rootOwner?.rootTask===task ? task.rootOwner.usage() : task.usage();
       try { save(); } finally { closeJournals(); }
     },
     stop(error) {
@@ -208,6 +216,11 @@ export function createTask({
       }
     },
     async cancel() {
+      if (task.cancelPromise) return task.cancelPromise;
+      task.cancelPromise = task.cancelOwned();
+      return task.cancelPromise;
+    },
+    async cancelOwned() {
       if (terminal.has(record.status)) return;
       record.cancelRequestedAt = new Date().toISOString();
       record.status = "cancelled";
@@ -224,13 +237,16 @@ export function createTask({
         controller.abort(problem("CANCELLED", "用户取消整条任务；远端结果可能未知，不自动重发。"));
       }
       // Helper tools may be what a parent abort is waiting on; propagate their stop first.
+      const executionStop = task.rootOwner?.rootTask === task ? task.rootOwner.stopAndDrain({cause:"cancel"}) : null;
       const helperStop = task.helperLifecycle?.close();
       const stopped = await Promise.allSettled([...runtimes].map((r) => r.session.abort()));
       if(stopped.some(result=>result.status==='rejected')) record.cancelStopError='One or more runtime aborts did not confirm stop';
       try {await helperStop;}catch(error){record.cancelStopError=error.message;}
-      record.cancelSettledAt=new Date().toISOString();
+      try {await executionStop;}catch(error){record.cancelStopError=error.message;}
+      try {await task.contextLifecycle;}catch(error){record.cancelStopError=error.message;}
+      if (!record.cancelStopError) record.cancelSettledAt=new Date().toISOString();
       closeJournals();
-      record.usage = task.usage();
+      record.usage = task.rootOwner?.rootTask===task ? task.rootOwner.usage() : task.usage();
       try {
         save();
       } catch (error) {

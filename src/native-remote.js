@@ -1,3 +1,4 @@
+import {getTaskSkillResources} from "./skill-resources.js";
 // Consumer adapter for the existing task owner. Herdr/Pi still own native execution;
 // this module stages private copies and observes their actual process/result evidence.
 import {readFileSync,realpathSync,mkdirSync,writeFileSync,chmodSync,mkdtempSync,rmSync} from 'node:fs';
@@ -145,7 +146,7 @@ async function executeRemoteDocker({task,h,profile,contract,execution,invoke,roo
    snapshot=await invoke(executeCopy,{action:'scan',root,owner:h.helperId});validateRemoteFiles(snapshot.files);
    temp=realpathSync(mkdtempSync(join(tmpdir(),'cothink-remote-volume-')));const source=join(temp,'source'),resources=join(temp,'resources');materialize(source,snapshot.files);
    // Frozen resource bytes came from the registered task, never from arbitrary host mounts.
-   const frozen=task.record.work.skillResources??[];const files={};for(const skill of frozen)for(const [path,value] of Object.entries(readRemoteTree(realpathSync(skill.root))))files[skill.name+'/'+path]=value;materialize(resources,files);
+   const frozen=getTaskSkillResources(task);const files={};for(const skill of frozen)for(const [path,value] of Object.entries(readRemoteTree(realpathSync(skill.root))))files[skill.name+'/'+path]=value;materialize(resources,files);
    sourceVolume=await run(['volume','create','--label','cothink.helper='+h.helperId,id+'-source']);resourceVolume=await run(['volume','create','--label','cothink.helper='+h.helperId,id+'-resources']);
    trace.volumes=[sourceVolume,resourceVolume];task.save();
    seedId=await run(['create','--network','none','--cap-drop','ALL','--cap-add','CHOWN','--security-opt','no-new-privileges','--label','cothink.helper='+h.helperId,'--mount','type=volume,src='+sourceVolume+',dst=/workspace','--mount','type=volume,src='+resourceVolume+',dst=/resources',execution.image,'chown','-R','0:0','/workspace','/resources']);

@@ -435,7 +435,7 @@ test("PROJECT resource freeze survives deleted sources and read records frozen p
   const guide=await f.call("read","skill-ref",{path:join(directory[0].path,"../references/guide.md")});assert.match(JSON.stringify(guide),/FROZEN_GUIDE_V1/);
   const image=await f.call("read","skill-image",{path:join(directory[0].path,"../references/sample.png")});assert.ok(image.content.some(p=>p.type==="image"&&p.mimeType==="image/png"),"frozen visual assets must remain images: "+JSON.stringify(image));
   const provenance=f.task.record.tools.find(x=>x.toolCallId==="skill-ref");assert.equal(provenance.resourceName,"project-method");assert.equal(provenance.resourceHash,createHash("sha256").update("FROZEN_GUIDE_V1").digest("hex"));
-  const root=f.task.record.work.skillResources[0].root;
+  const root=f.task.record.skillResources[0].root;
   await assert.rejects(f.call("read","secret",{path:join(root,"private.txt")}));
   const outside=join(f.home,"outside");writeFileSync(outside,"BAD");rmSync(join(root,"references/guide.md"));symlinkSync(outside,join(root,"references/guide.md"));
   await assert.rejects(f.call("read","swapped",{path:join(root,"references/guide.md")}),{code:"SKILL_CHANGED"});
@@ -497,7 +497,7 @@ test("PROJECT resource execution rejects readonly callers, foreign review, scope
   writeFileSync(join(dir,"SKILL.md"),"---\nname: bounded-script\ndescription: Test actual scoped execution\n---\nUse scripts/write.mjs or scripts/missing.mjs.\n");
   writeFileSync(join(dir,"scripts/write.mjs"),"import {writeFileSync} from 'node:fs';writeFileSync('outside.txt','FORBIDDEN');");writeFileSync(join(dir,"scripts/missing.mjs"),"import missing from './unavailable.mjs';");
   f.task.record.project={id:"recorded-project"};f.task.frozenSkills=freezeAnswerSkills({cwd:f.project,home:f.home,paths:[dir],project:true});freezeTaskSkillResources({task:f.task});
-  assert.ok(f.task.record.work.skillResources[0].unavailable.some(x=>x.path==="./unavailable.mjs"));
+  assert.ok(f.task.record.skillResources[0].unavailable.some(x=>x.path==="./unavailable.mjs"));
   const p=await createPluginWork({task:f.task,versioning:f.v,execution});t.after(()=>p.close());
   const defs=p.resourceTools({actor:"main",binding:f.binding});const call=(name,id,args)=>defs.find(d=>d.name===name).execute(id,args,f.task.signal);
   const ro=p.resourceTools({actor:"readonly",binding:{current:{...f.binding.current,readOnly:true},role:"readonly"}});
@@ -537,11 +537,11 @@ test("PROJECT reconstruction reuses persisted skill bytes and employee results r
   const f=await managed(t,{execution}),dir=join(f.home,"restore-skill");mkdirSync(dir);writeFileSync(join(dir,"SKILL.md"),"---\nname: restore-skill\ndescription: Original frozen description\n---\nORIGINAL_BODY\n");
   f.task.record.project={id:"project"};f.task.frozenSkills=freezeAnswerSkills({cwd:f.project,home:f.home,paths:[dir],project:true});resources.freezeTaskSkillResources({task:f.task});
   writeFileSync(join(dir,"SKILL.md"),"---\nname: restore-skill\ndescription: CHANGED LIVE DESCRIPTION\n---\nLIVE_BODY\n");
-  const original=f.task.record.work.skillResources[0];
+  const original=f.task.record.skillResources[0];
   const pending={name:"resource_exec",kind:"employee_script_result",resultId:"original-result",parentActorId:"main",changeId:f.binding.current.changeId,toolCallId:"original-tool",command:"original script",status:"running",executions:[{id:"original-container",status:"running",stdout:"KNOWN_PARTIAL_OUTPUT"}],inputVersion:f.binding.current.privateVersion};
   f.task.record.tools=[pending];
   const restored={home:f.home,record:JSON.parse(JSON.stringify(f.task.record)),signal:f.task.signal,save(){}};
-  resources.freezeTaskSkillResources({task:restored});assert.equal(restored.record.work.skillResources.length,1);assert.equal(resources.taskSkillDirectory(restored)[0].description,"Original frozen description");assert.match(resources.readTaskSkillResource(restored,original.path).bytes.toString(),/ORIGINAL_BODY/);
+  resources.freezeTaskSkillResources({task:restored});assert.equal(restored.record.skillResources.length,1);assert.equal(resources.taskSkillDirectory(restored)[0].description,"Original frozen description");assert.match(resources.readTaskSkillResource(restored,original.path).bytes.toString(),/ORIGINAL_BODY/);
   const plugin=await createPluginWork({task:restored,versioning:f.v,execution});t.after(()=>plugin.close());assert.equal(helperBlockers(restored).length,1);assert.throws(()=>plugin.assertHandled(),{code:"RESOURCE_PENDING"});
   const defs=plugin.resourceTools({actor:"main",binding:f.binding}),call=(name,id,args)=>defs.find(d=>d.name===name).execute(id,args,f.task.signal);
   const inspected=JSON.parse((await call("resource_result","inspect-original",{resultId:"original-result",decision:"inspect"})).content[0].text);assert.equal(inspected.status,"outcome_unknown");assert.equal(inspected.executions[0].stdout,"KNOWN_PARTIAL_OUTPUT");

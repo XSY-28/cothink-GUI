@@ -51,6 +51,9 @@ test("elapsed display receives only existing task timestamps, without inferring 
   const running = projection.projectGuiTask(record);
   assert.equal(running.createdAt, "2026-10-23T00:00:00.000Z");
   assert.equal(running.endedAt, null);
+  assert.equal(running.cancelSettledAt, null);
+  record.cancelSettledAt = "2026-10-23T00:00:11.000Z";
+  assert.equal(projection.projectGuiTask(record).cancelSettledAt, record.cancelSettledAt);
   record.status = "completed";
   record.endedAt = "2026-10-23T00:00:08.000Z";
   assert.equal(

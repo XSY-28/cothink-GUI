@@ -1,3 +1,5 @@
+import {validateWorkRequest} from "./visual-preview.js";
+import {assertRootOwner, digest, resolveHandoffContext} from "./project-turn.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -17,7 +19,7 @@ import {
 } from "./storage.js";
 import { legacyGit } from "./git-versioning.js";
 import { assertProjectPathSpellings, createVersioning, inScope, projectScopesOverlap, validProjectPath } from "./versioning.js";
-import { readTask, readRequests, taskDisplayStatus } from "./task.js";
+import { readTask, readRequests, taskDisplayStatus, problem } from "./task.js";
 import { loadConfig, validateConfig } from "./config.js";
 import { resolveTeamConfig } from "./teams.js";
 import { runTurn } from "./discussion.js";
@@ -226,11 +228,13 @@ function initialState(plan, location) {
     id: location.id,
     repo: location.repo,
     ...projectSelections(plan),
+    ...(plan.workRequest ? {workRequest:validateWorkRequest(plan.workRequest)} : {}),
     originalGoal: goal,
     goal,
     revision: 1,
     revisions: [],
     scope,
+    ...(plan.readScope ? {readScope:paths(plan.readScope,true)} : {}),
     steps,
     budget: validateProjectBudget(plan.budget ?? {}),
     staff: [],
@@ -266,6 +270,7 @@ async function locate(home, cwd) {
   return {
     id,
     repo,
+    commonDir:common,
     store,
     dir,
     file: join(dir, "state.json"),
@@ -333,7 +338,7 @@ export async function projectChatState(home, cwd) {
   const loc = await locate(home, cwd);
   const state = existsSync(loc.file) ? stored(loc) : null;
   if (state && state.repo !== loc.repo) throw Error("这个项目属于另一个工作树：" + state.repo);
-  return {repo:loc.repo, state};
+  return {repo:loc.repo, commonDir:loc.commonDir, projectId:loc.id, state};
 }
 export function validateChatPlan(plan) {
   initialState(plan, {id:"preview", repo:""});
@@ -401,7 +406,9 @@ function control(s, command) {
     if (
       revised.goal !== goal ||
       !equal(revised.scope, s.scope) ||
+      !equal(revised.readScope, s.readScope) ||
       !equal(revised.budget, s.budget) ||
+      !equal(revised.workRequest, s.workRequest) ||
       !equal(
         revised.steps.map((x) => x.id),
         s.steps.map((x) => x.id),
@@ -532,6 +539,7 @@ function ownHost(home, loc, lock, initial) {
         if (!Object.hasOwn(state.commands, c.id)) {
           let error;
           try {
+            if(state.entryPolicy==="unified")throw Error("Legacy inbox controls cannot mutate a unified project");
             if (c.action === "route") {
               host.update((s) => {
                 s.commands[c.id] = { at: now(), status: "in_flight" };
@@ -1041,33 +1049,35 @@ async function verifyDelivery(host, s, signal) {
     host.finalController = null;
   }
 }
-function nextConfig(home, step) {
-  const loaded = loadConfig(home);
+function nextConfig(home, step, frozen) {
+  const loaded = frozen ? structuredClone(frozen) : loadConfig(home);
   if (!loaded)
     throw Error("Set up a Team with cothink init before resuming this project");
   const cfg =
-    loaded.formatVersion === 3
+    loaded.formatVersion === 3 && !frozen
       ? resolveTeamConfig(loaded)
       : structuredClone(loaded);
   cfg.work = { ...cfg.work, checks: step.checks };
   return validateConfig(cfg);
 }
-function snapshot(s, step, attempt) {
+function snapshot(s, step, attempt, home) {
   return {
     id: s.id,
     projectId: s.id,
     taskId: attempt.taskId,
+    ...(attempt.rootTaskId ? {rootTaskId:attempt.rootTaskId,commandId:attempt.commandId,constraints:attempt.constraints,contextRef:attempt.contextRef,handoffContext:resolveHandoffContext(home,attempt.rootTaskId,attempt.contextRef,{commandId:attempt.commandId})} : {}),
     plugins: s.plugins ?? [],
     mcp: s.mcp ?? [],
     explicitSkills: s.explicitSkills ?? [],
     projectPluginRuntime: attempt.projectPluginRuntime ?? null,
+    ...(s.workRequest ? {workRequest:s.workRequest} : {}),
     originalGoal: s.originalGoal,
     goal: s.goal,
     revision: step.revision,
     stepId: step.id,
     subgoal: step.goal,
     scope: step.scope,
-    readScope: ["."],
+    readScope: s.readScope??["."],
     startVersion: attempt.startVersion,
     inputArtifacts: attempt.inputArtifacts,
     deliverables: step.deliverables,
@@ -1115,9 +1125,10 @@ async function reconcileAttempt(
   }
   if (
     rec.submissionId !== attempt.submissionId ||
-    rec.input !== host.read().originalGoal ||
+    rec.input !== (attempt.contextRef ? resolveHandoffContext(home,attempt.rootTaskId,attempt.contextRef,{commandId:attempt.commandId}).input : host.read().originalGoal) ||
     rec.project?.id !== host.read().id ||
-    rec.project?.stepId !== step.id
+    rec.project?.stepId !== step.id ||
+    (attempt.rootTaskId && (rec.rootTaskId!==attempt.rootTaskId || rec.project?.commandId!==attempt.commandId))
   )
     throw Error(
       "Task does not match its saved project intent; inspect " + attempt.taskId,
@@ -1330,7 +1341,7 @@ async function schedule(host, signal, uiContext) {
       });
       continue;
     }
-    const config = nextConfig(home, step);
+    let config = nextConfig(home, step, host.unified?.frozenConfig);
     const current = host.read();
     const latest = current.steps.find((x) => x.id === step.id);
     if (
@@ -1355,6 +1366,7 @@ async function schedule(host, signal, uiContext) {
       host.update((state) => {
         const job = state.steps.find((x) => x.id === step.id);
         const attempt = {
+          ...(host.unified ? {rootTaskId:host.unified.rootTaskId,commandId:host.unified.commandId,frozenConfig:structuredClone(config),constraints:host.unified.rootOwner.rootTask.record.constraints,contextRef:structuredClone(host.unified.contextRef)} : {}),
           taskId: randomUUID(),
           submissionId: randomUUID(),
           revision: job.revision,
@@ -1375,10 +1387,12 @@ async function schedule(host, signal, uiContext) {
       attempt = job.attempts.at(-1);
     if (attempt.startVersion !== f.version || attempt.status !== "intent")
       throw Error("Saved start intent does not match the current version");
+    if(host.unified && attempt.rootTaskId!==host.unified.rootTaskId)throw Error("Unsettled attempt belongs to an earlier root; inspect its original result before resuming");
+    if(attempt.frozenConfig)config=structuredClone(attempt.frozenConfig);
     // A proven-unsent restart retains its authorized checks and execution environment.
     if (attempt.execution) config.work.execution = attempt.execution;
     config.work.projectPluginRuntime = attempt.projectPluginRuntime ?? undefined;
-    const binding = snapshot(active, job, attempt);
+    const binding = snapshot(active, job, attempt, home);
     const staff = createProjectStaff(host);
     const projectPolicy = createProjectPolicy({ host, binding, staff, home });
     const controller = new AbortController();
@@ -1396,12 +1410,14 @@ async function schedule(host, signal, uiContext) {
       await runTurn({
         home,
         cwd: s.repo,
-        input: s.originalGoal,
+        input: binding.handoffContext?.input ?? s.originalGoal,
         config,
         id: attempt.taskId,
         submissionId: attempt.submissionId,
         project: binding,
+        workRequest:binding.workRequest,
         projectPolicy,
+        ...(host.unified?{rootOwner:host.unified.rootOwner,rootTaskId:host.unified.rootTaskId,frozenSkillSource:host.unified.rootOwner.rootTask.record,packageSnapshot:host.unified.rootOwner.rootTask.record.packageSnapshot,frozenPackageSnapshot:host.unified.rootOwner.rootTask.record.packageSnapshot}:{}),
         ...(uiContext?{uiContext,uiMode:'rpc'}:{}),
         signal: AbortSignal.any([controller.signal, signal]),
       });
@@ -1431,8 +1447,10 @@ export async function runProjectCommand({
   expectedRevision,
   uiContext,
   report = () => {},
+  unified,
   signal = new AbortController().signal,
 }) {
+  if(unified)assertRootOwner(unified.rootOwner,unified.rootTaskId);
   const { positionals, values } = parseArgs({
     args,
     allowPositionals: true,
@@ -1479,6 +1497,14 @@ export async function runProjectCommand({
     throw Error("Plan repo differs from --repo");
   if (action === "status")
     return rendered(await view(home, loc), values.json, 0, home);
+  const existing=existsSync(loc.file)?stored(loc):null;
+  if(existing && existing.repo!==loc.repo)throw Error("This project belongs to another canonical worktree: "+existing.repo);
+  if(existing?.entryPolicy==="unified"&&!unified)throw Error("Unified project mutations require the owning GUI root; CLI status remains available");
+  if(unified && existing?.commands?.[unified.commandId]) {
+    const receipt=existing.commands[unified.commandId];
+    if(receipt.rootTaskId!==unified.rootTaskId||receipt.operationDigest!==unified.operationDigest)throw Error("Command identity conflict");
+    return rendered(existing,values.json,receipt.error?1:0,home);
+  }
   if (action !== "start" && !existsSync(loc.file))
     throw Error("No project started for this repository");
   privateDirectory(loc.dir);
@@ -1491,9 +1517,10 @@ export async function runProjectCommand({
     ...(expectedRevision !== undefined ? {expectedRevision} : {}),
     steps: values.step ?? [],
     ...(action === "revise" && plan ? { plan } : {}),
-    id: randomUUID(),
+    id: unified?.commandId ?? randomUUID(),
+    ...(unified ? {rootTaskId:unified.rootTaskId} : {}),
   };
-  if (action !== "start")
+  if (action !== "start" && !unified)
     writePrivateJson(join(loc.inbox, command.id + ".json"), command);
   const finish = (s, code = 0) => rendered(s, values.json, code, home);
   let writer;
@@ -1526,9 +1553,23 @@ export async function runProjectCommand({
       throw Error(
         "This repository already has a project; use status or resume",
       );
+    if(unified){
+      const observed=await formal(home,loc.repo),proposal=unified.rootOwner.rootTask.record.proposal;
+      const current=existsSync(loc.file)?stored(loc):null;
+      if(proposal.canonicalRepo!==loc.repo||proposal.version!==observed.version||(current?.revision??null)!==(expectedRevision??null))throw Error("Confirmed project version/revision changed before dispatch");
+      signal.throwIfAborted();
+    }
     const state = action === "start" ? initialState(plan, loc) : stored(loc);
     host = ownHost(home, loc, writer, state);
-    if (action === "start") host.update(() => {});
+    if(unified){
+      host.unified=unified;
+      host.update(s=>{
+        if(action!=="start")control(s,command);
+        assertProjectReviewRequirement(s,unified.rootOwner.rootTask.record.constraints);
+        s.entryPolicy="unified";s.readScope??=s.scope;s.commands[command.id]={status:"in_flight",rootTaskId:unified.rootTaskId,operationDigest:unified.operationDigest,at:now()};
+      });
+      host.runRequested=true;
+    } else if (action === "start") host.update(() => {});
     onStop = () => {
       try {
         host.update((s) => {
@@ -1539,6 +1580,7 @@ export async function runProjectCommand({
       }
     };
     signal.addEventListener("abort", onStop, { once: true });
+    if(signal.aborted)onStop();
     await host.drain();
     const receipt = host.read().commands[command.id];
     if (receipt?.error) throw Error(receipt.error);
@@ -1566,6 +1608,15 @@ export async function runProjectCommand({
       } else host.runRequested = false;
       await host.drain();
     } while (host.runRequested && !signal.aborted);
+    if(unified && unified.rootOwner.rootTask.record.constraints.requireDifferentModelReview && host.read().status==='completed'){
+      const delivered=host.read();
+      assertProjectReviewRequirement(delivered,unified.rootOwner.rootTask.record.constraints);
+      const reviews=[];
+      await provePrevious(home,delivered,delivered.delivery.version,undefined,reviews);
+      if(!reviews.length)throw problem('PROJECT_REVIEW_REQUIRED','当前交付缺少可核验的异型号独立评审证据。');
+      if(signal.aborted)onStop();
+    }
+    if(unified)host.update(s=>{if(s.delivery){s.delivery.taskIds=s.steps.filter(step=>step.status==="completed").map(step=>step.attempts.at(-1).taskId);(s.deliveries??={})[s.delivery.revision]=structuredClone(s.delivery);}s.commands[command.id]={...s.commands[command.id],status:"settled",resultStatus:s.status,endedAt:now()};});
     const result = host.read();
     return finish(
       result,
@@ -1625,4 +1676,45 @@ function rendered(s, asJson, code, home) {
         .filter(Boolean)
         .join("\n") + "\n";
   return { text: asJson ? text : safeText(text), code };
+}
+
+/** Programmatic adapter shares the CLI scheduler; it cannot be authorized by a string ID alone. */
+export async function runProjectOperation({home,cwd,action,commandId,rootTaskId,expectedRevision,providedPlan,frozenConfig,contextRef,rootOwner,signal,onProgress=()=>{}}) {
+  assertRootOwner(rootOwner,rootTaskId);
+  if(!["start","resume","revise"].includes(action)||!/^[\da-f-]{36}$/.test(commandId))throw Error("Invalid unified operation");
+  if(providedPlan?.repo)throw Error("Model plan may not choose the repository");
+  const root=rootOwner.rootTask.record, saved=root.projectOperation;
+  if(!saved||saved.commandId!==commandId||saved.action!==action||!saved.registered)throw Error("Operation must be durably registered before dispatch");
+  const args=[action,"--json"];
+  if(action==="revise"){
+    args.push("--goal",providedPlan.goal);
+    for(const step of providedPlan.steps??[{id:"main"}])args.push("--step",step.id);
+  }
+  resolveHandoffContext(home,rootTaskId,contextRef,{commandId});
+  if(digest(saved.frozenConfigRef)!==digest({taskId:rootTaskId,field:"frozenConfig",sha256:digest(frozenConfig)})||digest(saved.planRef)!==digest({taskId:rootTaskId,field:"proposal",sha256:digest(root.proposal)}))throw Error("Frozen operation sources changed");
+  const operationDigest=digest({action,providedPlan:providedPlan??null,expectedRevision:expectedRevision??null,rootTaskId,contextRef});
+  const result=await runProjectCommand({home,cwd,args,providedPlan,expectedRevision,signal,report:onProgress,
+    unified:{commandId,rootTaskId,rootOwner,frozenConfig,contextRef,operationDigest}});
+  const loc=await locate(home,cwd),state=stored(loc);
+  return {state,executionBinding:{projectId:state.id,canonicalRepo:loc.repo,commonDir:loc.commonDir,formalRef:state.integrationRef??null},code:result.code};
+}
+export async function queryProjectOperation({home,cwd,commandId}) {
+  const loc=await locate(home,cwd);
+  if(!existsSync(loc.file)) {
+    if(existsSync(join(loc.inbox,commandId+".json")))throw Error("Command inbox exists without project state");
+    return {exists:false,projectId:loc.id};
+  }
+  const state=stored(loc);if(state.repo!==loc.repo)throw Error("Canonical repository mismatch");
+  return {exists:Boolean(state.commands[commandId]),receipt:state.commands[commandId]??null,state};
+}
+
+export function validateProjectRevision(state,plan){
+ const copy=structuredClone(state);control(copy,{action:'revise',goal:plan.goal,steps:(plan.steps??[{id:'main'}]).map(s=>s.id),plan,expectedRevision:state.revision});
+}
+
+/** A root may tighten acceptance, but resume cannot silently rewrite the saved plan. */
+export function assertProjectReviewRequirement(state,constraints){
+ if(!constraints?.requireDifferentModelReview)return;
+ const missing=!state?.steps?.length||state.steps.some(step=>!step.works?.length||[...step.works,...(step.subworks??[])].some(work=>work.independentReview!==true));
+ if(missing)throw problem('PROJECT_REVIEW_REQUIREMENT','本条要求异型号独立评审，但当前项目修订没有覆盖全部交付的评审要求。请提交 independentReview:true 的明确 revise 计划并确认；旧交付不视为满足新要求。');
 }

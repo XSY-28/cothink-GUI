@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "skills": [
+    {
+      "name": "doc-maintenance",
+      "version": "0.1.0-cothink.1",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "0feec3fb1be7ea122ad6eaa8da918c6c17b9c732e9c896d7bb3f3da204561adc",
+          "mode": 420
+        },
+        {
+          "path": "assets/LICENSE",
+          "sha256": "4522866ea7a6f098f8b7341be701d853a738488a49ad61a66fd1007c0ecf37cf",
+          "mode": 420
+        },
+        {
+          "path": "assets/NOTICE.md",
+          "sha256": "c777be254e5069b5b3720ff8a0dfab2cc392a9d46aa1f8a87fa2adcc503c9070",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/argparse/LICENSE",
+          "sha256": "de4d1f2d2ad5ad0cfd1657a106476b31cb5db5ef9d1ff842b237c0c81f0c8a23",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/entities/LICENSE",
+          "sha256": "cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/github-slugger/LICENSE",
+          "sha256": "542aefa99456832996da0cc63b14d8b89f04a30ba403e241dbe3e5aaf49fa372",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/linkify-it/LICENSE",
+          "sha256": "95e3f7f0e81e9b4940cdfaa1956aaff5e4dfd2fb1565041e7c78eb9a606f23e3",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/markdown-it/LICENSE",
+          "sha256": "792c48c5a849a15fdf9e37e8bcf9e6d1dd13b32b46c642a748a0a46a9919d473",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/mdurl/LICENSE",
+          "sha256": "6b6a356c4337e2446841f30f3cdf7e7023af8c5260b5e347c0f987b9f6aa2644",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/picomatch/LICENSE",
+          "sha256": "d0cd141b0c322fded5dfad1d4645bb2fedfc05b7321fe1009469638190d59ef9",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/punycode.js/LICENSE-MIT.txt",
+          "sha256": "483acb265f182907d1caf6cff9c16c96f31325ed23792832cc5d8b12d5f88c8a",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/uc.micro/LICENSE.txt",
+          "sha256": "483acb265f182907d1caf6cff9c16c96f31325ed23792832cc5d8b12d5f88c8a",
+          "mode": 420
+        },
+        {
+          "path": "assets/licenses/yaml/LICENSE",
+          "sha256": "5bba27375d93e9119f76c1015f7672cf9ad5f70952296e0842fb2243d6376869",
+          "mode": 420
+        },
+        {
+          "path": "assets/source.json",
+          "sha256": "3fca9e5e435eb011dd603d9d46cca25c88d637cb5db35fb412d037750a7fcb6e",
+          "mode": 420
+        },
+        {
+          "path": "references/bilingual.md",
+          "sha256": "32379e69b4f1af0b05d004229c783f5be7aa6d80b7204f9652a32e65b1d6da1f",
+          "mode": 420
+        },
+        {
+          "path": "references/checks.md",
+          "sha256": "17435c009f23a76a7c3906ab0fdf677b58f8ffcf9e27402303f433ac94b77eb7",
+          "mode": 420
+        },
+        {
+          "path": "references/editing.md",
+          "sha256": "cf4d394db7f9a8d7731e7f7dfb89637e75647cf52edb7a9a130a3eaa32af78db",
+          "mode": 420
+        },
+        {
+          "path": "references/organization.md",
+          "sha256": "409f7e311e61783fdd77a523380e4d3ebeaa23e623f3018e2757b616fc1e3049",
+          "mode": 420
+        },
+        {
+          "path": "references/verification.md",
+          "sha256": "fa8b21ab5deb2d5335112a6b5767cc6cd7ac824ca994b2c339abb678f7fda182",
+          "mode": 420
+        },
+        {
+          "path": "scripts/doc-maintenance.mjs",
+          "sha256": "b85b8bb397392ad8e7ac8a0746544b2ca9124064020d4d1bef96c3479e7077f1",
+          "mode": 493
+        }
+      ]
+    },
+    {
+      "name": "context-management",
+      "version": "0.1.0",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "3b64115a4fe8dbf6ebb5181bef50ffcf6300e17ea1f56485a7937aaf7a14601d",
+          "mode": 420
+        },
+        {
+          "path": "assets/LICENSE",
+          "sha256": "dff6e956dec93de481f4130e88c742b382f2b0ed361034e7da74cd4a5f39b768",
+          "mode": 420
+        },
+        {
+          "path": "assets/source.json",
+          "sha256": "f290f7e4db03550207eb13486ce8e7b4df1ec97ab55953f39af10ea0b6338b50",
+          "mode": 420
+        }
+      ]
+    }
+  ]
+}

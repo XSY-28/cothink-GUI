@@ -12,6 +12,12 @@ def wait(fn):
    except OSError:pass
   assert time.monotonic()<deadline, out.decode(errors='replace')[-4000:]
 try:
+ if '--expect-unified' in sys.argv:
+  wait(lambda:p.poll() is not None)
+  assert '统一项目会话'.encode() in out, out.decode(errors='replace')
+  assert p.returncode==2, p.returncode
+  print(json.dumps({'actualCliPty':True,'unifiedRefused':True}))
+  sys.exit(0)
  wait(lambda:'预算：纯答'.encode() in out)
  wait(lambda:'ONE · 单模型'.encode() in out)
  if len(sys.argv)>4:

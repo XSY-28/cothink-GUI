@@ -10,9 +10,11 @@ const pkg = JSON.parse(
 );
 test("candidate manifest explicitly distributes GUI source, shared final-answer and built assets", () => {
   for (const file of [
+    "src/project-turn.js",
     "src/conversation.js",
     "src/final-answer.js",
     "src/gui-controller.js",
+    "src/gui-turn-options.js",
     "src/gui-projection.js",
     "src/gui-server.js",
     "src/gui-settings.js",
@@ -25,6 +27,9 @@ test("candidate manifest explicitly distributes GUI source, shared final-answer 
     "src/gui-files.js",
     "gui/vite.config.js",
     "gui/THIRD_PARTY_NOTICES.txt",
+    "src/builtin-skills.js",
+    "resources/builtin-skills",
+    "scripts/build-builtin-skills.mjs",
   ])
     assert.ok(pkg.files.includes(file), file);
 });

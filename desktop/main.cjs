@@ -1,0 +1,158 @@
+const {app,BrowserWindow,Menu,ipcMain,dialog,shell}=require('electron');
+const {spawn}=require('node:child_process');
+const {join}=require('node:path');
+const {readFileSync}=require('node:fs');
+const {randomUUID}=require('node:crypto');
+app.setName('CoThink');
+let win,child,origin,ready=false,hostStopped=false,exiting=false,quitting=false,quitId;
+const directoryRequests=new Set();
+let pendingClose,drained=false,draftsSaved=false,pageLoaded=false,rendererCrashed=false,finalRequested=false,closedEditorId;
+const build=JSON.parse(readFileSync(join(__dirname,'build.json'),'utf8'));
+const validId=value=>typeof value==='string' && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(value);
+const trusted=event=>win && !win.isDestroyed() && event.sender===win.webContents &&
+  event.senderFrame===win.webContents.mainFrame && origin && new URL(event.senderFrame.url).origin===origin;
+function focus() {if(win && !win.isDestroyed()){win.show();win.restore();win.focus();}}
+function explain(message) {focus();void dialog.showMessageBox(win && !win.isDestroyed()?win:undefined,{type:'warning',title:'CoThink',message,buttons:['返回核对']});}
+function send(message) {if(child?.connected)child.send(message,()=>{});}
+function trustedExternal(value) {
+  try {const url=new URL(value);if(['http:','https:'].includes(url.protocol) && !url.username && !url.password) void shell.openExternal(url.href).catch(()=>explain('无法打开外部链接，请在浏览器中手动打开。'));} catch {}
+}
+function resumeEditing() {
+  if(closedEditorId && win && !win.isDestroyed()) {
+    win.webContents.send('cothink:prepare-close',{requestId:closedEditorId,phase:'resume'});
+    closedEditorId=null;
+  }
+}
+function finishQuit() {
+  if(!quitting || !drained || !child?.connected || finalRequested) return;
+  if(!draftsSaved) {
+    if(!pageLoaded) draftsSaved=true;
+    else if(rendererCrashed) {
+      if(pendingClose)return;
+      pendingClose={requestId:quitId,kind:'crashed'};
+      void dialog.showMessageBox(win,{type:'warning',message:'页面已崩溃，无法刷新未保存输入。只保留宿主已保存草稿并退出？',buttons:['返回核对','退出'],defaultId:0,cancelId:0}).then(result=>{
+        pendingClose=null;
+        if(result.response===1){draftsSaved=true;finishQuit();}
+      });
+      return;
+    } else {flushForClose('quit');return;}
+  }
+  finalRequested=true;
+  send({type:'prepareShutdown',requestId:quitId,finalize:true});
+}
+function flushForClose(kind) {
+  if(pendingClose) return;
+  if(!ready || rendererCrashed) {
+    explain('页面未就绪或已经崩溃。仅宿主已保存的草稿可恢复；请通过菜单明确重新打开页面，再核对退出。');return;
+  }
+  const requestId=randomUUID();
+  const timer=setTimeout(()=>{
+    if(pendingClose?.requestId!==requestId)return;
+    pendingClose=null;resumeEditing();explain('未收到草稿保存确认，窗口继续保留。请核对连接和未保存输入后再次退出。');
+  },15000);
+  pendingClose={requestId,kind,timer};closedEditorId=requestId;
+  win.webContents.send('cothink:prepare-close',{requestId,phase:'prepare'});
+}
+function requestQuit() {
+  if(exiting)return;
+  // After an unconfirmed child death, a later explicit user Quit may exit.
+  // The in-progress guard only applies while that child is still running.
+  if(!child || hostStopped){exiting=true;app.quit();return;}
+  if(quitting && (pendingClose || finalRequested))return;
+  quitting=true;quitId ??=randomUUID();drained=false;draftsSaved=false;finalRequested=false;
+  // Freeze and drain immediately; keep reads and draft persistence until both acknowledge.
+  send({type:'prepareShutdown',requestId:quitId,finalize:false});
+  if(pendingClose) {clearTimeout(pendingClose.timer);pendingClose=null;}
+  resumeEditing();
+  // Edits remain available during drain. The only authoritative draft flush
+  // happens after phase one, with the renderer kept inert until final close.
+
+}
+if(!app.requestSingleInstanceLock()) app.quit();
+else {
+  app.on('second-instance',focus);
+  app.on('activate',focus);
+  app.on('before-quit',event=>{if(!exiting){event.preventDefault();requestQuit();}});
+  app.on('window-all-closed',()=>{if(process.platform!=='darwin')requestQuit();});
+  app.whenReady().then(()=>{
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      {label:'CoThink',submenu:[{label:'关于 CoThink',click:()=>dialog.showMessageBox({title:'CoThink',message:`CoThink ${build.backendVersion}`,detail:'独立桌面本地候选；尚未签名、公证或发布。'})},{type:'separator'},{role:'hide',label:'隐藏 CoThink'},{role:'hideOthers',label:'隐藏其他应用'},{role:'unhide',label:'全部显示'},{type:'separator'},{label:'退出 CoThink',accelerator:'CmdOrCtrl+Q',click:requestQuit}]},
+      {label:'编辑',submenu:[{role:'undo',label:'撤销'},{role:'redo',label:'重做'},{type:'separator'},{role:'cut',label:'剪切'},{role:'copy',label:'复制'},{role:'paste',label:'粘贴'},{role:'selectAll',label:'全选'}]},
+      {label:'窗口',submenu:[{role:'minimize',label:'最小化'},{label:'显示 CoThink',click:focus},{label:'重新打开已保存页面',click:async()=>{
+        if(pendingClose || finalRequested){explain('正在确认最终保存与停止，请等待结果后再重新打开页面。');return;}
+        if(!ready || hostStopped) {explain('宿主已停止，请重新启动 CoThink；不会自动重发任何任务。');return;}
+        const result=await dialog.showMessageBox(win,{type:'warning',message:'重新打开页面仅恢复已保存内容。当前未保存的输入会丢失。',buttons:['取消','重新打开'],defaultId:0,cancelId:0});
+        if(result.response===1)win.webContents.reload();
+      }}]},
+    ]));
+    win=new BrowserWindow({width:1280,height:880,minWidth:760,minHeight:560,title:'CoThink',show:false,backgroundColor:'#fcfcfb',
+      ...(process.platform==='darwin'?{titleBarStyle:'hiddenInset',trafficLightPosition:{x:18,y:21}}:{}),
+      icon:join(__dirname,'assets/icon.png'),webPreferences:{preload:join(__dirname,'preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false,webviewTag:false,devTools:false}});
+    win.on('page-title-updated',event=>{event.preventDefault();win.setTitle('CoThink');});
+    win.on('show',()=>{if(!quitting)resumeEditing();});
+    win.on('close',event=>{if(!exiting){event.preventDefault();if(process.platform==='darwin'&&!quitting)flushForClose('hide');else requestQuit();}});
+    win.webContents.session.setPermissionRequestHandler((_wc,_permission,callback)=>callback(false));
+    win.webContents.session.setPermissionCheckHandler(()=>false);
+    win.webContents.on('will-attach-webview',event=>event.preventDefault());
+    win.webContents.on('will-navigate',(event,url)=>{
+      if(!origin || new URL(url).origin!==origin){event.preventDefault();trustedExternal(url);}
+    });
+    win.webContents.setWindowOpenHandler(({url})=>{trustedExternal(url);return {action:'deny'};});
+    win.webContents.on('did-finish-load',()=>{pageLoaded=true;rendererCrashed=false;});
+    win.webContents.on('render-process-gone',()=>{
+      rendererCrashed=true;
+      if(pendingClose){clearTimeout(pendingClose.timer);pendingClose=null;}
+      explain('页面进程已停止。宿主只保留已确认保存的草稿；任务不会因为页面重开而重发。请从窗口菜单重新打开已保存页面。');
+    });
+    ipcMain.handle('cothink:directory',async(event,{requestId}={})=>{
+      if(!trusted(event)||!validId(requestId)||quitting||directoryRequests.has(requestId))throw Error('目录选择请求无效。');
+      directoryRequests.add(requestId);
+      if(directoryRequests.size>256)directoryRequests.delete(directoryRequests.values().next().value);
+      const frame=event.senderFrame;
+      const result=await dialog.showOpenDialog(win,{title:'选择 CoThink 项目目录',properties:['openDirectory']});
+      if(!trusted(event)||frame!==win.webContents.mainFrame)throw Error('页面身份已改变。');
+      return result.canceled?null:result.filePaths[0]??null;
+    });
+    ipcMain.on('cothink:close-ack',(event,value)=>{
+      if(!trusted(event)||!pendingClose||!value||Object.keys(value).some(k=>!['requestId','saved'].includes(k))||value.requestId!==pendingClose.requestId||typeof value.saved!=='boolean')return;
+      const pending=pendingClose;clearTimeout(pending.timer);pendingClose=null;
+      if(!value.saved){resumeEditing();explain('草稿尚未保存，窗口继续保留。请处理页面上的保存错误，再次关闭或退出。');return;}
+      if(pending.kind==='hide'&&!quitting)win.hide();
+      else {draftsSaved=true;finishQuit();}
+    });
+    if(process.env.NODE_OPTIONS||process.env.NODE_PATH||process.env.ELECTRON_RUN_AS_NODE){
+      explain('检测到 Node 预加载环境。请移除 NODE_OPTIONS、NODE_PATH 或 ELECTRON_RUN_AS_NODE 后重新打开 App。');return;
+    }
+    const nonce=randomUUID();
+    child=spawn(join(process.resourcesPath,'node/bin/node'),[join(__dirname,'host.mjs')],{
+      cwd:__dirname,env:{...process.env,COTHINK_DESKTOP_NONCE:nonce,COTHINK_NO_UPDATE_CHECK:'1'},stdio:['ignore','ignore','ignore','ipc'],windowsHide:true,
+    });
+    const startupTimer=setTimeout(()=>{if(!ready){explain('后台未完成启动。请检查 App 资源是否完整；退出后重新打开，不会重发任务。');requestQuit();}},30000);
+    child.on('error',()=>{clearTimeout(startupTimer);hostStopped=true;explain('随包 Node 无法启动。请重新生成或取得完整的 CoThink App；不需要安装全局 Node。');});
+    child.on('exit',(code,signal)=>{
+      clearTimeout(startupTimer);hostStopped=true;
+      if(exiting)return;
+      resumeEditing();
+      if(pendingClose){clearTimeout(pendingClose.timer);pendingClose=null;}
+      explain(`本地宿主已停止（${signal || 'exit '+code}），未收到最终停止确认。已加载内容继续保留；新提交不可用。请核对后明确退出，重新打开仅恢复已保存事实。`);
+    });
+    child.on('message',message=>{
+      if(message?.type==='ready'&&!ready) {
+        let url;try {url=new URL(message.origin);}catch{return;}
+        if(message.nonce!==nonce||message.protocolVersion!==build.protocolVersion||message.buildId!==build.buildId||message.backendVersion!==build.backendVersion||url.protocol!=='http:'||url.hostname!=='127.0.0.1'||!url.port||url.pathname!=='/'||url.search||url.hash||url.username||url.password||!/^[A-Za-z0-9_-]{43}$/.test(message.token)){
+          explain('后台身份与 App 构建不匹配，未打开输入页面。请重新生成完整候选。');requestQuit();return;
+        }
+        clearTimeout(startupTimer);origin=url.origin;ready=true;
+        void win.loadURL(`${origin}/#token=${message.token}`).then(()=>{focus();}).catch(()=>explain('页面加载失败，请确认 App 内 GUI 资源完整。'));
+      } else if(message?.type==='startupError'&&message.nonce===nonce) {
+        clearTimeout(startupTimer);explain(message.code==='UNTRUSTED_STARTUP'?'后台拒绝预加载环境，请清除 Node 预加载配置后重开。':'后台启动失败。请检查数据根权限、配置与 App 资源；原记录保留。');
+      } else if(message?.requestId===quitId && message.type==='shutdownState') {
+        drained=message.settled===true;
+        if(drained)finishQuit();
+        else if(message.reason && message.reason!=='正在停止所属任务并保存。'){finalRequested=false;resumeEditing();explain('停止尚未确认，窗口和只读状态保留。请核对任务详情后再次退出。');}
+      } else if(message?.type==='stopped'&&message.requestId===quitId&&message.settled===true) {
+        hostStopped=true;exiting=true;app.quit();
+      }
+    });
+  }).catch(()=>{explain('CoThink 桌面初始化失败，请重新生成完整 App。');});
+}

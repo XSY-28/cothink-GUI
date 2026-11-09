@@ -20,11 +20,17 @@ function stableRead(root,path){
     return {bytes,mode:before.mode&0o111?0o755:0o644};
   }finally{closeSync(fd);}
 }
+export function getTaskSkillResources(task) {
+  const record=task.record??task,a=record.skillResources,b=record.work?.skillResources;
+  if(a!==undefined&&!Array.isArray(a)||b!==undefined&&!Array.isArray(b))throw problem('SKILL_CHANGED','Invalid skill manifest');
+  if(a!==undefined&&b!==undefined&&JSON.stringify(a)!==JSON.stringify(b))throw problem('SKILL_CHANGED','Conflicting generic and legacy skill manifests');
+  const records=a??b??[];if(!Array.isArray(records))throw problem('SKILL_CHANGED','Invalid skill manifest');return records;
+}
 /** One task resource freeze, shared by employees and optional plugin helpers. */
 export function freezeTaskSkillResources({task,skills=task.frozenSkills??task.answerSkills??[]}){
   const resourceRoot=join(task.home,'tasks',task.record.id+'-resources');
-  if(Object.hasOwn(task.record.work??{},'skillResources')){
-    const records=task.record.work.skillResources;
+  if(Object.hasOwn(task.record,'skillResources')||Object.hasOwn(task.record.work??{},'skillResources')){
+    const records=getTaskSkillResources(task);
     if(!Array.isArray(records))throw problem('SKILL_CHANGED','Saved skill manifest is invalid');
     for(const r of records){
       if(!safeRelative(r.name)||r.name.includes('/')||resolve(r.root)!==resolve(join(resourceRoot,r.name))||typeof r.sourceDirectory!=='string'||!isAbsolute(r.sourceDirectory)||!r.files?.['SKILL.md'])throw problem('SKILL_CHANGED','Saved skill provenance or path is invalid');
@@ -71,14 +77,26 @@ export function freezeTaskSkillResources({task,skills=task.frozenSkills??task.an
     }
     // Recheck original bytes after collection, so an edit cannot mix two versions.
     for(const [path,digest]of Object.entries(files))if(hash(stableRead(sourceDirectory,path==='SKILL.md'?basename(skill.path):path).bytes)!==digest)throw problem('SKILL_CHANGED','Skill changed during resource freeze: '+skill.name+'/'+path);
-    records.push({name:skill.name,description:skill.description,hash:skill.hash,disabledModelInvocation:!!skill.disabledModelInvocation,sourceDirectory,sourcePath:skill.path,root,path:join(root,'SKILL.md'),executionPath:'/resources/'+skill.name+'/SKILL.md',unavailable,files,modes});
+    records.push({name:skill.name,description:skill.description,version:skill.version??null,sourceKind:skill.sourceKind??'selected',sourceDigest:skill.sourceDigest??skill.hash,hash:skill.hash,disabledModelInvocation:!!skill.disabledModelInvocation,sourceDirectory,sourcePath:skill.path,root,path:join(root,'SKILL.md'),executionPath:'/resources/'+skill.name+'/SKILL.md',unavailable,files,modes});
   }
-  task.record.work??={};task.record.work.skillResources=records;task.skillResourceRoot=resourceRoot;task.save();return records;
+  task.record.skillResources=records;task.skillResourceRoot=resourceRoot;task.save();return records;
 }
-export function taskSkillDirectory(task){return (task.record.work?.skillResources??[]).map(({name,description,hash,disabledModelInvocation,sourcePath,path,executionPath,unavailable})=>({name,description,hash,disabledModelInvocation,sourcePath,path,executionPath,unavailable,resourceMode:'on-demand'}));}
+export function taskSkillDirectory(task){return (getTaskSkillResources(task)).map(({name,description,version,sourceKind,hash,disabledModelInvocation,unavailable})=>({name,description,version:version??null,sourceKind:sourceKind??'selected',hash,disabledModelInvocation,path:'skill:'+name+'/SKILL.md',executionPath:'/resources/'+name+'/SKILL.md',unavailable:unavailable?.map(x=>({reason:x.reason})),resourceMode:'on-demand'}));}
+/** Narrow model-facing reader; arbitrary source aliases remain internal to managed read. */
+export function readFrozenSkill(task,args,{actor,stageId,toolCallId,explicit=false}={}) {
+ if(task.signal?.aborted||task.record.status!=='running')throw problem('TASK_ENDED','Skill reading requires a running task');
+ if(!args||typeof args.name!=='string'||!safeRelative(args.name)||args.name.includes('/')||!safeRelative(args.path??'SKILL.md'))throw problem('SKILL_RESOURCE','Use a selected skill name and relative resource path');
+ const offset=args.offset??0,limit=args.limit??16000;
+ if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>32000)throw problem('SKILL_RESOURCE','Invalid skill read page');
+ let resource;try{resource=readTaskSkillResource(task,'skill:'+args.name+'/'+(args.path??'SKILL.md'));}catch{throw problem('SKILL_CHANGED','Frozen skill resource missing or changed: '+args.name);}
+ if(!resource)throw problem('SKILL_RESOURCE','Skill resource is not available in this task');
+ const text=resource.bytes.toString('utf8'),content=text.slice(offset,offset+limit),nextOffset=offset+content.length;
+ (task.record.tools??=[]).push({kind:'skill_resource_read',name:explicit?'skill_expansion':'read_skill',toolCallId,actor,stageId,resourceName:resource.record.name,resourcePath:resource.relativePath,resourceHash:resource.hash,skillHash:resource.record.hash,offset,characters:content.length,explicit,status:'completed'});task.save();
+ return {name:resource.record.name,path:resource.relativePath,skillHash:resource.record.hash,resourceHash:resource.hash,offset,nextOffset,eof:nextOffset>=text.length,content};
+}
 export function readTaskSkillResource(task,path){
   if(typeof path!=='string'||path.includes('\0')||path.includes('\\'))return null;
-  for(const r of task.record.work?.skillResources??[]){
+  for(const r of getTaskSkillResources(task)){
     let requested=path;
     if(requested.startsWith('skill:'+r.name+'/'))requested=join(r.root,requested.slice(('skill:'+r.name+'/').length));
     if(requested.startsWith('/resources/'+r.name+'/'))requested=join(r.root,requested.slice(('/resources/'+r.name+'/').length));
@@ -97,7 +115,7 @@ export function readTaskSkillResource(task,path){
   return null;
 }
 export function verifyTaskSkillResources(task){
-  const records=task.record.work?.skillResources??[],expectedNames=records.map(r=>r.name).sort();
+  const records=getTaskSkillResources(task),expectedNames=records.map(r=>r.name).sort();
   if(task.skillResourceRoot){const names=readdirSync(task.skillResourceRoot).sort();if(JSON.stringify(names)!==JSON.stringify(expectedNames))throw problem('SKILL_CHANGED','Task resource inventory changed');}
   for(const r of records){
     const inventory=[];function walk(directory,prefix=''){for(const name of readdirSync(directory).sort()){const path=prefix+name,stat=lstatSync(join(directory,name));if(stat.isSymbolicLink())throw problem('SKILL_CHANGED','Link in frozen resource inventory');if(stat.isDirectory())walk(join(directory,name),path+'/');else if(stat.isFile())inventory.push(path);else throw problem('SKILL_CHANGED','Unsupported frozen resource type');}}

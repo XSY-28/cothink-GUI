@@ -1,0 +1,8 @@
+{
+  "name": "cothink-desktop",
+  "productName": "CoThink",
+  "description": "CoThink desktop shell; version generated from the root package",
+  "main": "main.cjs",
+  "private": true,
+  "license": "MIT"
+}

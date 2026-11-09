@@ -27,7 +27,7 @@ function reviewFamily(id) {
     .replace(/^(claude-(?:opus|sonnet|haiku)-\d)\.(\d)$/, "$1-$2")
     .replace(/^(gpt-\d)\.0(?=-|$)/, "$1");
 }
-function observedIdentity(call) {
+export function observedIdentity(call) {
   let url;
   try {
     url = new URL(call.actualModel?.baseUrl);

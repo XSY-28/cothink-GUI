@@ -849,3 +849,9 @@ test("two supervisors competing for one work cannot obtain each other's handle, 
   assert.throws(() => staff.resume({...original,actor:second.staffId,actorRole:second.role,supervisorMemberId:second.dispatchId}));
   assert.equal(staff.assignment(original.dispatchId).candidate,"version");
 });
+
+test('explicit unified project read scope bounds root-appointed positions',()=>{
+ const {state,staff}=roster();state.readScope=['src'];
+ assert.throws(()=>staff.change('appoint',{id:'outside',responsibility:'outside reader',scope:[],readScope:['.']}),/readScope|scope|范围/i);
+ const inside=staff.change('appoint',{id:'inside',responsibility:'inside reader',scope:[]});assert.deepEqual(inside.readScope,['src']);
+});

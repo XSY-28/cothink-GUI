@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { privateDirectory, writePrivateJson, acquireSessionWriter } from "./storage.js";
 import { validateTeamConfig } from "./teams.js";
+import {validateBuiltinSkills} from './builtin-skills.js';
 
 export function positiveInteger(value, name) {
   const number = Number(value);
@@ -16,6 +17,7 @@ export function positiveInteger(value, name) {
 }
 
 export function validateConfig(config) {
+  validateBuiltinSkills(config);
   if (config?.formatVersion === 3) return validateTeamConfig(config);
   if (config?.formatVersion !== undefined && config.formatVersion !== 2)
     throw new Error("未知配置版本；原文件保留，请使用匹配版本。");

@@ -9,11 +9,11 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
   const [error, setError] = useState(""), [existing, setExisting] = useState(null), [uncertain, setUncertain] = useState(false);
   const request = useRef(0), saveBusy = useRef(false);
   useEffect(()=>()=>{++request.current;},[]);
-  async function inspect() {
+  async function inspect(candidate = path.trim()) {
     const token = ++request.current;
     setBusy(true); setError(""); setExisting(null); setResult(null);
     try {
-      const value = await commands.inspectProject(path.trim());
+      const value = await commands.inspectProject(candidate);
       if (token === request.current) setResult(value);
     } catch (e) {
       if (token === request.current) setError(e.message);
@@ -41,11 +41,11 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
       saveBusy.current = false; setSaving(false);
     }
   }
-  const saveLabel = binding ? "保存目录" : "创建 Team";
+  const saveLabel = binding ? "保存目录" : "创建";
   return <Modal title={title} onClose={()=>{if (!saveBusy.current) onClose();}}>
     <form onSubmit={save}>
-      <p>{binding ? "新对话可使用此目录。已有对话保留各自的目录与权限。" : "为持续进行的工作留一个位置。只填名称也可以开始讨论。"}</p>
-      {!binding && <label>Team 名称<input autoComplete="off" required maxLength={160} value={name} disabled={saving || uncertain}
+      <p>{binding ? "新对话可使用此目录。已有对话保留各自的目录与权限。" : "一个 Team 对应一个长期项目。只填名称也可以开始讨论。"}</p>
+      {!binding && <label>名称<input autoComplete="off" required maxLength={160} value={name} disabled={saving || uncertain}
         placeholder="例如：个人网站" onChange={event=>setName(event.target.value)}/></label>}
       <label>{binding ? "项目绝对路径" : "项目绝对路径（可选）"}
         <input aria-label="项目绝对路径" required={binding} autoComplete="off" value={path} list="recent-projects"
@@ -53,9 +53,16 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
             ++request.current; setBusy(false); setPath(event.target.value); setResult(null); setExisting(null); setError("");
           }}/>
       </label>
+      {window.cothinkDesktop && <button type="button" disabled={busy || saving || uncertain} onClick={async()=>{
+        try {
+          const selected=await window.cothinkDesktop.chooseProjectDirectory();
+          if(selected===null)return;
+          setPath(selected);setResult(null);setExisting(null);await inspect(selected);
+        } catch(error) {setError(error.message);}
+      }}>选择文件夹…</button>}
       <datalist id="recent-projects">{projects.map(project=><option key={project} value={project}/>)}</datalist>
-      {path.trim() && <button type="button" disabled={busy || saving || uncertain} onClick={inspect}>{busy ? "正在检查…" : "只读检查目录"}</button>}
-      {!binding && <p className="field-note">{defaultRoster ? "默认阵容：" + defaultRoster.name : "暂无默认阵容，可以先保存 Team，稍后配置。"}</p>}
+      {path.trim() && <button type="button" disabled={busy || saving || uncertain} onClick={()=>inspect()}>{busy ? "正在检查…" : "只读检查目录"}</button>}
+      {!binding && <p className="field-note">{defaultRoster ? "默认阵容：" + defaultRoster.name : "暂无默认阵容，可以先保存，稍后配置。"}</p>}
       {result && <div className="project-inspection">
         <p>{result.valid ? "目录已核对。执行仍使用正式版本和已配置的环境。" : "无法关联此目录。请选择具有有效 HEAD 的 Git 项目。"}</p>
         {result.error && <p role="alert" className="error-text">{result.error}</p>}
@@ -68,7 +75,7 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
         </dl></details>}
       </div>}
       {error && <p role="alert" className="error-text">{error}</p>}
-      {existing && <button type="button" onClick={()=>onOpenExisting(existing)}>打开已有 Team · {existing.name}</button>}
+      {existing && <button type="button" onClick={()=>onOpenExisting(existing)}>打开 · {existing.name}</button>}
       <div className="form-actions">
         <button type="button" onClick={onClose} disabled={saving}>取消</button>
         <button type="submit" className="primary" disabled={saving || busy || uncertain || (!binding && !name.trim()) ||

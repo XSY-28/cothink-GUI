@@ -47,6 +47,28 @@ export function App() {
   const [title, setTitle] = useState("");
   const [toast, setToast] = useState("");
   const [notesHidden, setNotesHidden] = useState(false);
+  const closeBoundary=useRef(null);
+  useEffect(()=>{
+    const bridge=window.cothinkDesktop;
+    if(!bridge)return;
+    return bridge.onPrepareClose(async({requestId,phase})=>{
+      if(phase === "resume") {
+        if(closeBoundary.current===requestId){closeBoundary.current=null;document.body.inert=false;}
+        return;
+      }
+      closeBoundary.current=requestId;
+      // Freeze all input/metadata controls across the final backend-confirmed
+      // save and acknowledgement. Native hide/show or failure resumes editing.
+      document.body.inert=true;
+      try {
+        await commands.flushAllDrafts();
+        if(closeBoundary.current===requestId)bridge.acknowledgeClose({requestId,saved:true});
+      } catch(error) {
+        if(closeBoundary.current===requestId){closeBoundary.current=null;document.body.inert=false;}
+        commands.setError(error.message);bridge.acknowledgeClose({requestId,saved:false});
+      }
+    });
+  },[commands]);
   const theme = view.theme;
   const [compact, setCompact] = useState(() => matchMedia("(max-width: 1179px)").matches);
   const [mobile, setMobile] = useState(() => matchMedia("(max-width: 899px)").matches);
@@ -65,7 +87,12 @@ export function App() {
     .find(id=>boot.teams.some(roster=>roster.id === id));
   const defaultRoster = boot.teams.find(roster=>roster.id === rosterId);
   const safely = operation => Promise.resolve(operation).catch(e => commands.setError(e.message));
-  const setOverlay = value => {overlayRef.current = value; dispatch({type: "overlay", overlay: value});};
+  const setOverlay = value => {
+    if (overlayRef.current?.kind === "picker" && value?.kind !== "picker")
+      commands.searchSessions({scope:"project",query:"",includeArchived:false});
+    overlayRef.current = value;
+    dispatch({type: "overlay", overlay: value});
+  };
   const teamPanel = useRef(null);
   const closeOverlay = () => {
     if (overlayRef.current !== overlay || overlay?.busy) return;
@@ -207,7 +234,7 @@ export function App() {
     try { await navigator.clipboard.writeText(text); setToast("已复制原文"); }
     catch { commands.setError("未能访问系统剪贴板，请手动选中文字复制。"); }
   }
-  return <div className={`app-shell ${detailOpen ? "detail-expanded" : ""}`}>
+  return <div className={`app-shell ${detailOpen ? "detail-expanded" : ""}`} data-desktop-platform={window.cothinkDesktop?.info?.platform}>
     {navOpen && <button className="nav-scrim" aria-label="关闭导航" onClick={dismissNavigation} />}
     <Navigation workspaces={boot.workspaces} workspaceId={state.workspaceId} ready={state.ready} mobileOpen={navOpen}
       onOpenWorkspace={openWorkspace} onSearch={()=>openPicker("all")} onCreate={()=>setOverlay({kind:"create-team"})}
@@ -276,22 +303,22 @@ export function App() {
       onOpenExisting={row=>{setOverlay(null);openWorkspace(boot.workspaces?.find(item=>item.id === row.id) ?? row);}}
       onSaved={saved=>{closeOverlay();if(overlay.kind === "bind-team")setToast(`已关联 ${saved.name}，可从对话菜单新建对话。`);}}
       onClose={closeOverlay} />}
-    {overlay?.kind === "workspace" && <Modal title={workspace?.name || (state.workspaceId === null ? "通用对话" : "归属待核对")} onClose={closeOverlay}>
+    {overlay?.kind === "workspace" && <Modal title={workspace?.name || (state.workspaceId === null ? "未分组对话" : "归属待核对")} onClose={closeOverlay}>
       {!workspace ? <p>{state.workspaceId === null ? "这里保存不属于项目的历史和随手提问。" :
         session?.workspaceError || "Team 归属暂时无法确认，仍可阅读已保存的历史。"}</p> : <>
         <p className="workspace-directory">{workspace.project || "未关联目录，可用于问答与讨论。"}</p>
         {workspace.project && workspace.projectAvailable === false && <p className="error-text">目录不可用。仍可阅读历史。</p>}
         <div className="form-actions">
-          {!workspace.archived && <button onClick={()=>{setTitle(workspace.name);setOverlay({kind:"rename-team"});}}>重命名 Team</button>}
+          {!workspace.archived && <button onClick={()=>{setTitle(workspace.name);setOverlay({kind:"rename-team"});}}>重命名</button>}
           {!workspace.project && !workspace.archived && <button onClick={()=>setOverlay({kind:"bind-team"})}>关联目录</button>}
-          <button disabled={overlay.busy} onClick={()=>updateWorkspace({archived:!workspace.archived})}>{workspace.archived ? "恢复 Team" : "归档 Team"}</button>
+          <button disabled={overlay.busy} onClick={()=>updateWorkspace({archived:!workspace.archived})}>{workspace.archived ? "恢复" : "归档"}</button>
         </div>
         {overlay.error && <p className="error-text" role="alert">{overlay.error}</p>}
       </>}
     </Modal>}
-    {overlay?.kind === "rename-team" && <Modal title="重命名 Team" onClose={closeOverlay}>
+    {overlay?.kind === "rename-team" && <Modal title="重命名" onClose={closeOverlay}>
       <form onSubmit={event=>{event.preventDefault();void updateWorkspace({name:title.trim()});}}>
-        <label>Team 名称<input required maxLength={160} value={title} onChange={event=>setTitle(event.target.value)}/></label>
+        <label>名称<input required maxLength={160} value={title} onChange={event=>setTitle(event.target.value)}/></label>
         <div className="form-actions"><button className="primary" disabled={overlay.busy || !title.trim()}>保存名称</button></div>
         {overlay.error && <p className="error-text" role="alert">{overlay.error}</p>}
       </form>

@@ -1,3 +1,4 @@
+import {validateEditorTurnOptions} from "./gui-turn-options.js";
 import { join, resolve, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -23,6 +24,12 @@ export function conversationTaskIds(manager) {
   ).filter(Boolean))];
 }
 
+export function readSessionFlow(manager) {
+  const entry=manager.getBranch().findLast(e=>e.type==='custom'&&e.customType==='cothink-flow');
+  if(!entry)return 'legacy';
+  if(entry.data?.flow!=='unified'||entry.data?.version!==1)throw Error('Unsupported conversation flow; open a compatible GUI');
+  return 'unified';
+}
 export function readSessionMode(manager) {
   return readTerminalMode(manager) === "one";
 }
@@ -184,7 +191,8 @@ export function readConversationMetadata(manager) {
   const draftEntry = entries.findLast(e => e.type === "custom" && e.customType === "cothink-draft");
   const data = draftEntry?.data;
   const editor = {text:data?.text ?? "", workRequest:data?.workRequest ?? null,
-    selectionId:data?.selectionId ?? null, editId:data?.editId ?? null};
+    selectionId:data?.selectionId ?? null, editId:data?.editId ?? null,
+    ...(data?.turnOptions!==undefined?{turnOptions:validateEditorTurnOptions(data.turnOptions)}:{})};
   if (typeof editor.text !== "string" || (editor.workRequest !== null &&
       (editor.workRequest.kind !== "html-svg" || Object.keys(editor.workRequest).length !== 1)) ||
       (editor.selectionId !== null && !isWorkspaceId(editor.selectionId)) ||

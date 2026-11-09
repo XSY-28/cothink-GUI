@@ -1,3 +1,4 @@
+import {getTaskSkillResources} from "./skill-resources.js";
 import {freezeTaskSkillResources,taskSkillDirectory,verifyTaskSkillResources} from "./skill-resources.js";
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, lstatSync, chmodSync, unlinkSync, cpSync, rmSync, existsSync, realpathSync, readlinkSync } from 'node:fs';
@@ -1057,6 +1058,7 @@ async function createManagedProjectContext({task,versioning,execution,state,sour
 
 export async function createPluginWork(options) {
   const {task,versioning}=options;
+  task.record.work??={}; // This is the work adapter; skill-only reads never enter it.
   freezeTaskSkillResources({task});
   // PROJECT must choose its isolated route before ordinary helpers can import
   // package JavaScript, prepare remote resources or copy model credentials.
@@ -1184,7 +1186,7 @@ export async function createPluginWork(options) {
   };
   return {context,
     resourceTools(state){
-      if(!task.record.project||!task.record.work.skillResources?.length)return [];
+      if(!task.record.project||!getTaskSkillResources(task).length)return [];
       const guard=()=>{state.assertAllowed?.();if(task.signal.aborted||state.signal?.aborted||task.record.status!=='running')throw problem('CANCELLED','Employee resource execution stopped');};
       const actor=()=>state.binding.role??state.actor;
       const owned=id=>{const r=resourceOperations.get(id);if(!r||r.parentActorId!==actor())throw problem('RESOURCE_PARENT','Only the actual creator may inspect or treat this result');return r;};

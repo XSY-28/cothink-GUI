@@ -924,7 +924,7 @@ for (const original of ['制作自行车骑鹈鹕的动画。', '制作鹈鹕骑
           assert.ok(!payload.includes('理由哨兵'));
           assert.ok(!payload.includes('伪造原题覆盖'));
           assert.match(payload,/中文技能原文/);
-          assert.deepEqual(c.body.tools.map(x=>x.function.name).sort(), ['find','grep','ls','read']);
+          assert.deepEqual(c.body.tools.map(x=>x.function.name).sort(), ['find','get_capabilities','grep','ls','read','read_skill']);
           return {text: '独立理解：'+original};
         }
         assert.ok(payload.includes(advice));

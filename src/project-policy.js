@@ -240,6 +240,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     if (!binding.plugins?.includes(spec.selection) || !spec.sessionId || !spec.actor || !spec.changeId || !spec.inputVersion || !spec.sourceDigest)
       fail("PROJECT_PLUGIN_UNBOUND", "A selected frozen source and owning session/change are required");
     ranges(spec.scope ?? [], binding.scope);
+    if(binding.rootTaskId)ranges(spec.readScope??[],binding.readScope);
     staff?.checkWork?.({taskId:binding.taskId,role:spec.actor,action:"read",scope:spec.scope,readScope:spec.readScope});
     const capability = Object.freeze({});
     pluginCapabilities.set(capability, Object.freeze({...spec,scope:[...(spec.scope ?? [])],readScope:[...(spec.readScope ?? [])]}));
@@ -256,6 +257,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     if (!["load","tool","command","event","host","resume","import"].includes(detail.operation)) fail("PROJECT_PLUGIN_UNBOUND", "Unsupported managed operation");
   }
   function issueNativeHelper(spec) {
+    if(binding.constraints && !binding.constraints.allowedSubtasks.includes("work"))fail("ROOT_SUBTASK","This root forbids plugin helpers");
     host.assertOwned();const state=host.read(),step=checkBinding(state,binding);
     const source=pluginCapabilities.get(spec.pluginCapability),parent=spec.parentHelperId?nativeByLaunch.get(spec.parentHelperId):nativeCapabilities.get(spec.parentCapability);
     if(!source||!binding.plugins?.includes(source.selection)||!spec.task||spec.task.record.id!==binding.taskId||
@@ -280,6 +282,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     nativeCapabilities.set(capability,grant);nativeByLaunch.set(spec.launchId,grant);return capability;
   }
   function checkNative(grant,operation='model',paths) {
+    if(binding.constraints?.readOnly && ['write','shell','launch'].includes(operation))fail('ROOT_READ_ONLY','Root forbids native effects');
     host.assertOwned();checkBinding(host.read(),binding);
     if(!grant||grant.closed||grant.task.signal?.aborted||grant.task.record.status!=='running')fail('PROJECT_NATIVE_STALE','Native helper no longer owns live task authority');
     if(grant.parent)checkNative(grant.parent,'read');
@@ -322,6 +325,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     if (!selected || !spec.actor || !spec.sessionId || !spec.sourceDigest || !spec.changeId || !spec.inputVersion)
       fail("PROJECT_MCP_UNBOUND", "MCP needs a confirmed server and an actual owning session/change");
     ranges(spec.scope ?? [], binding.scope);
+    if(binding.rootTaskId)ranges(spec.readScope??[],binding.readScope);
     staff?.checkWork?.({taskId:binding.taskId,role:spec.actor,action:"read",scope:spec.scope,readScope:spec.readScope});
     const capability=Object.freeze({});mcpCapabilities.set(capability,structuredClone(spec));return capability;
   }
@@ -336,6 +340,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     const capability=Object.freeze({});mcpCapabilities.set(capability,structuredClone(spec));return capability;
   }
   function admitMcp(detail) {
+    if(binding.constraints?.readOnly && ["write","start"].includes(detail.kind))fail("ROOT_READ_ONLY","Root forbids MCP effects");
     host.assertOwned();const state=host.read(), spec=mcpCapabilities.get(detail.capability);
     if (!spec) fail("PROJECT_MCP_UNBOUND", "MCP authority must be issued by the owning project");
     const recovery=["query","cancel","close"].includes(detail.kind);
@@ -444,6 +449,15 @@ export function createProjectPolicy({ host, binding, staff, home }) {
   // A repair authorizes one public mutation with an exact draft/basis; a Shell, helper,
   // new delegate or broader grant cannot stand in for that mutation.
   function admit(action, detail = {}) {
+    if(binding.constraints?.readOnly && ["write","shell","scope","accept"].includes(action))fail("ROOT_READ_ONLY","Root forbids file or shell effects");
+    if(action==="delegate" && binding.constraints && !binding.constraints.allowedSubtasks.includes("work")){
+      const control=detail.staffControl;
+      const metadata=control&&['list','register_work'].includes(control.action);
+      const review=binding.constraints.allowedSubtasks.includes('review') && (
+        detail.readOnly===true&&!detail.scope?.length&&detail.reviewOf&&detail.reviewSource?.candidate&&(detail.reviewKind??'independent')==='independent' ||
+        control?.action==='appoint'&&control.input.need==='review'&&Array.isArray(control.input.scope)&&control.input.scope.length===0);
+      if(!metadata&&!review)fail('ROOT_SUBTASK','Root forbids work delegation; only a bound independent read-only review may be allowed');
+    }
     host.assertOwned();
     const state = host.read(),
       step = checkBinding(state, binding);
@@ -508,6 +522,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
       }
     }
     ranges(detail.scope ?? [], step.scope);
+    if(binding.rootTaskId)ranges(detail.readScope??[],binding.readScope);
     if (detail.coordination && (action !== "feedback" || route?.status !== "repair"))
       routeError("Supervisor resumption needs an active repair of its original direct report");
     if (

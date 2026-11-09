@@ -80,13 +80,13 @@ export function FilePanel({task,selection,commands,onSelection,onRecords}) {
       {content?.url&&(content.representation==='static-preview'?<><p className="field-note">静态预览：脚本、表单、导航和外部资源未运行。</p><iframe sandbox="" referrerPolicy="no-referrer" src={content.url} title={`静态预览 ${item.name}`} className={styles.frame}/></>:<img className={styles.image} src={content.url} alt={item.name}/>)}
       {content?.text!==undefined&&(tab==='preview'&&item.previewKind==='markdown'?<div className={`prose ${styles.markdown}`}><Markdown text={content.text}/></div>:<pre className={styles.code} tabIndex={0}>{content.text}</pre>)}
     </>}
-    {task?.work&&<details className={styles.facts}><summary>检查、截图与版本详情</summary>
-      <p>{checkLabel(task.work.finalCheck)}。文件保存状态、截图生成情况与模型判断分别记录。</p>
-      <p>独立成果目录：{task.work.resultWorkspace||'尚未产生'}；原项目未写回。</p>
-      <dl><dt>起点</dt><dd>{list?.fromVersion||task.work.startVersion}</dd><dt>终点</dt><dd>{list?.toVersion||task.work.version}</dd></dl>
+    {(task?.executionTasks??(task?.work?[task]:[])).filter(source=>source.work).map(source=><details key={source.id} className={styles.facts}><summary>检查、截图与版本详情</summary>
+      <p>{checkLabel(source.work.finalCheck)}。文件保存状态、截图生成情况与模型判断分别记录。</p>
+      <p>独立成果目录：{source.work.resultWorkspace||'尚未产生'}；原项目未写回。</p>
+      <dl><dt>起点</dt><dd>{list?.fromVersion||source.work.startVersion}</dd><dt>终点</dt><dd>{list?.toVersion||source.work.version}</dd></dl>
       {content?.contentHash&&<p>返回内容 SHA-256：{content.contentHash}{content.representation==='static-preview'&&<>；原文件 SHA-256：{content.sourceContentHash}</>}</p>}
       {list?.limits&&<p>源码 {list.limits.textBytes} 字节；预览资源合计 {list.limits.previewBytes} 字节；下载 {list.limits.downloadBytes} 字节。最多 {list.limits.resources} 个资源，{list.limits.depth} 层。</p>}
-      <VisualEvidence work={task.work} taskId={task.id} commands={commands}/>
-    </details>}
+      <VisualEvidence work={source.work} taskId={source.id} commands={commands}/>
+    </details>)}
   </section>;
 }

@@ -415,6 +415,39 @@ function WorkSettings({ boot, onSave }) {
     </form>
   );
 }
+function SkillSettings({boot,session,commands,onSave}) {
+  const saved=boot.builtinSkills?.disabled??[],[disabled,setDisabled]=useState(saved),[capabilities,setCapabilities]=useState(null),[failure,setFailure]=useState('');
+  const savedKey=JSON.stringify(saved);
+  useEffect(()=>{setDisabled(saved);},[savedKey]);
+  useEffect(()=>{setCapabilities(null);},[session?.id,boot.active?.taskId]);
+  useEffect(()=>{let current=true;setFailure('');
+    if(session?.id)commands.getCapabilities(session.id).then(value=>{if(current)setCapabilities(value);}).catch(error=>{if(current){setFailure(error.message);setCapabilities(null);}});
+    return ()=>{current=false;};
+  },[session?.id,savedKey,boot.active]);
+  return <section aria-label="技能与实际能力">
+    <p>内置技能按需读取。修改只影响新任务，已有任务继续使用冻结版本。技能指导不增加文件或脚本权限。</p>
+    <form onSubmit={e=>{e.preventDefault();onSave({builtinSkills:{disabled}});}}>
+      {(boot.builtinSkills?.names??[]).map(name=><label className="checkbox" key={name}><input type="checkbox" checked={!disabled.includes(name)} onChange={e=>setDisabled(old=>e.target.checked?old.filter(n=>n!==name):[...old,name])}/>{name}</label>)}
+      <p className="field-note">使用外部同名技能前，先禁用内置项，再配置外部来源；两个启用来源同名时会拒绝新任务。</p>
+      <button className="primary" disabled={!boot.configured}>保存技能选择</button>
+    </form>
+    <h4>{capabilities?.scope==='coordinator'?'协调器与所属执行者的能力':capabilities?.phase==='next-turn'?'下一条对话的能力':'当前角色的能力'}</h4>
+    {!session?.id&&<p>打开一条对话后查看其实际能力。</p>}
+    {failure&&<p role="alert" className="error-text">{failure}</p>}
+    {capabilities&&<>
+      <ul>{capabilities.skills.map(skill=><li key={skill.name}><strong>{skill.name}</strong> {skill.version??'版本未声明'}{skill.explicitOnly?' · 仅用户显式选择':''}<p>{skill.description}</p></li>)}</ul>
+      {!capabilities.skills.length&&<p>当前没有可用技能。</p>}
+      {[{label:capabilities.scope==='coordinator'?'协调器':'当前角色',value:capabilities},...(capabilities.executors??[]).map(value=>({label:'所属执行者 '+value.source.role,value}))].map(({label,value},index)=><section key={value.source?.stageId??index} aria-label={'能力来源 '+label}>
+        {capabilities.scope==='coordinator'&&<h4>{label}{value.source?.taskId?' · '+value.source.taskId.slice(0,8):''}</h4>}
+        <p>工具：{value.tools.join('、')||'无'}</p>
+        <p className="field-note">{value.permissions.fileReadAuthorized?'当前可读取授权范围内的项目文件。':'当前未获项目文件读取权限。'}{value.permissions.fileWrite?'当前允许受管文件写入。':'当前未获文件写入权限。'}{value.permissions.scriptExecution?'当前允许受管脚本执行。':'当前未获脚本执行权限。'}{value.environment.managedExecutionConfigured?'已配置受管执行环境；实际可用性在执行时检查。':'未配置受管执行环境。'}</p>
+      </section>)}
+      {capabilities.scope==='coordinator'&&!capabilities.executors?.length&&<p className="field-note">尚无已绑定的活动执行者。协调器的权限不代表历史或其他任务的权限。</p>}
+      <p className="field-note">上下文检索与派生记要：{capabilities.environment.contextToolsAvailable?'当前分支可用':'当前角色不可用'}。手动整理：{capabilities.environment.contextOrganizationAvailable?'由用户单次触发，会调用模型':'当前角色不可用'}。自动压缩关闭。{capabilities.context?.summary?' 当前有派生摘要，原文仍保留。':''}</p>
+      {capabilities.diagnostics.map((d,i)=><p role="alert" key={i} className="error-text">{d.message}</p>)}
+    </>}
+  </section>;
+}
 export function Settings({
   boot,
   session,
@@ -452,6 +485,7 @@ export function Settings({
             ["archives", "已归档"],
             ["providers", "模型与认证"],
             ["work", "项目执行"],
+            ["skills", "技能与能力"],
             ["preferences", "偏好与更新"],
           ].map(([id, label]) => (
             <button
@@ -470,7 +504,7 @@ export function Settings({
           <small>
             CoThink {boot.version}
             <br />
-            页面连接本机宿主；查新由宿主访问 npm
+            {boot.updates?.channel === "desktop-local" ? "桌面仅显示本地版本与随包更新记录" : "页面连接本机宿主；查新由宿主访问 npm"}
           </small>
         </nav>
         <div className={`settings-body ${styles.body}`}>
@@ -480,6 +514,7 @@ export function Settings({
                 archives: "已归档",
                 providers: "模型与认证",
                 work: "项目执行",
+                skills: "技能与能力",
                 preferences: "偏好与更新",
               }[tab]
             }
@@ -518,6 +553,7 @@ export function Settings({
                 onSave={args=>act(commands.saveWorkSettings,args)}
               />
             )}
+            {tab === 'skills'&&<SkillSettings boot={boot} session={session} commands={commands} onSave={args=>act(commands.saveBuiltinSkills,args,'技能选择已保存；仅影响新任务。')}/>}
           </fieldset>
           {tab === "archives" && commands && <ArchivedSessions commands={commands} active={boot.active} workspaces={boot.workspaces} />}
           {boot.active && <button type="button" onClick={()=>commands.openSession(boot.active.sessionId,boot.active.status === "preparing" ? undefined : boot.active.taskId)}>返回运行任务</button>}
@@ -547,6 +583,7 @@ function UpdateSettings({state:s, busy, onCheck, onConfigure}) {
       else control.focus();
     }
   },[checking]);
+  if(s?.channel === "desktop-local") return <section aria-label="桌面版本"><p>CoThink {s.currentVersion}</p><p>{s.message}</p><p className="field-note">当前 App 不使用 npm 自动查新或安装指引。下方可查看随包更新记录。</p></section>;
   if(!s) return <p>尚未读取远端更新状态；当前安装版本见上方。关闭设置后可重新读取。</p>;
   return <section className="update-settings" aria-label="可用更新">
     <p className="update-result" role="status">{s.message}</p>
