@@ -12,6 +12,14 @@ import {
 import { validateModelRefs, selectModelRef } from "./setup.js";
 import { acquireSessionWriter, writePrivateJson } from "./storage.js";
 import { validateModelThinking } from "./thinking.js";
+import {validateBuiltinSkills} from './builtin-skills.js';
+export function saveGuiBuiltinSkills(home,value) {
+  validateBuiltinSkills({piResources:{builtinSkills:value}});
+  return updateConfig(home,current=>{
+    if(!current)throw Error('请先保存阵容。');
+    return {...current,piResources:{...current.piResources,builtinSkills:structuredClone(value)}};
+  }).piResources.builtinSkills;
+}
 export async function saveGuiTeam(home, { name, main, secondary }) {
   const team = {
     id: randomUUID(),

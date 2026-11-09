@@ -1,3 +1,5 @@
+import {createContextAccess,contextToolNames,contextState} from './context-management.js';
+import {assertCleanUnifiedStartup} from "./project-handoff.js";
 import { beforeHostExtensionImport, assertNoUnknownHandoff } from './project-handoff.js';
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join, resolve, isAbsolute, relative } from "node:path";
@@ -25,6 +27,9 @@ import {
 import { problem } from "./task.js";
 import { resolveModelThinking } from "./thinking.js";
 import { resolvePackageResources, localNames } from "./packages.js";
+import {Type} from 'typebox';
+import {readFrozenSkill,taskSkillDirectory} from './skill-resources.js';
+import {capabilitySnapshot} from './builtin-skills.js';
 export const managedSettings = {
   retry: { enabled: false, provider: { maxRetries: 0, timeoutMs: 0 } },
   compaction: { enabled: false },
@@ -155,8 +160,9 @@ let transportConfigured = false;
 // Disposing a session cannot undo arbitrary timers/children from a host import.
 // This process-local fact is intentionally sticky until the process exits.
 let hostExtensionsImported = false;
-export function assertCleanProjectProcess() {
-  if(hostExtensionsImported)throw problem('PROJECT_PROCESS_UNCLEAN','此进程已在宿主加载原生扩展，无法证明旧定时器及派生动作全部停止。请退出后用 cothink --project 启动干净项目入口；未知的旧派生动作仍需核实。');
+export function assertCleanProjectProcess({unified=false}={}) {
+  if(unified)assertCleanUnifiedStartup();
+  if(hostExtensionsImported)throw problem('PROJECT_PROCESS_UNCLEAN','此进程已在宿主加载原生扩展，无法证明旧定时器及派生动作全部停止。请退出后重新打开新版 GUI 或用 cothink --project 启动干净项目入口；未知的旧派生动作仍需核实。');
 }
 
 export async function createRuntime({
@@ -175,11 +181,13 @@ export async function createRuntime({
   resourceOptions = {},
   useFrozenSkills = false,
   role = "main",
+  contextAccess = useFrozenSkills && role === "main",
   maxOutputTokens,
   timeout,
   toolDefinitions = [],
   extraToolNames = [],
   activeToolNames,
+  getWorkspaceAuthority,
   packageSnapshot,
   allowPackageErrors = false,
 }) {
@@ -190,13 +198,28 @@ export async function createRuntime({
   let binding,
     runtime,
     disposal,
-    disposed = false;
+    disposed = false, contextApi, contextPreparation = null;
   const manager =
     sessionManager ??
     SessionManager.create(cwd, join(agentDir, "sessions", role));
   const mr = modelRuntime ?? (await createModelRuntime(home));
   await nativeContext?.bindSession?.(manager.getSessionId(),manager.getSessionFile(),{modelRuntime:mr,modelRef});
-  const projectToolDefinitions = await nativeContext?.projectTools?.() ?? [];
+  const skillTools=projectManaged||useFrozenSkills?[{
+    name:'read_skill',label:'Read frozen skill',description:'Read a selected task-frozen skill body or reference on demand. No arbitrary files or new authority.',
+    parameters:Type.Object({name:Type.String(),path:Type.Optional(Type.String()),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer())}),
+    execute:async(id,args)=>{if(!binding)throw problem('NO_TASK','No bound task');const {task,stage}=binding;writer.assertOwned();task.projectPolicy?.admit('read',{actor:stage.role});return {content:[{type:'text',text:JSON.stringify(readFrozenSkill(task,args,{actor:stage.role,stageId:stage.id,toolCallId:id}))}]};}
+  },{
+    name:'get_capabilities',label:'Current capabilities',description:'Inspect host-confirmed skills, active tools, permissions and unavailable context features. This does not grant authority.',parameters:Type.Object({}),
+    execute:async()=>{if(!binding)throw problem('NO_TASK','No bound task');return {content:[{type:'text',text:JSON.stringify(runtime.capabilities())}]};}
+  }]:[];
+  const contextTools=contextAccess?[
+    ['search_context',Type.Object({query:Type.Optional(Type.String()),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer())}),'search'],
+    ['read_context',Type.Object({ref:Type.Any(),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer())}),'read'],
+    ['save_context_note',Type.Object({text:Type.String(),sources:Type.Array(Type.Any())}),'save'],
+  ].map(([name,parameters,method])=>({name,label:name,description:'Current branch context only. Host references required; notes are derived material, never authorization.',parameters,
+    execute:async(id,args)=>{runtime.assertOwned();if(!binding||binding.task.signal.aborted||binding.task.record.status!=='running')throw problem('TASK_ENDED','Context tools require a live task');return {content:[{type:'text',text:JSON.stringify(contextReader[method](args))}]};}})):[];
+  const contextReader=contextAccess?createContextAccess({home,manager,getTask:()=>binding?.task,assertOwned:()=>runtime.assertOwned(),quarantine:error=>{runtime.selectionError='上下文持久化未确认，禁止继续生成：'+error.message;}}):null;
+  const projectToolDefinitions = [...(await nativeContext?.projectTools?.() ?? []),...skillTools,...contextTools];
   toolDefinitions = [...toolDefinitions, ...projectToolDefinitions];
   const writer = acquireSessionWriter(
     join(home, "pi"),
@@ -342,13 +365,18 @@ export async function createRuntime({
         ...resourceOptions,
         noExtensions: true,
         extensionFactories: [...extensionFactories, {name:"cothink-policy",factory:pi=>{
+          contextApi=pi;
+          pi.on("session_before_compact",()=>contextAccess&&!contextPreparation?{cancel:true}:undefined);
           pi.on("session_start",()=>{validateNativeTools();gateNativeCommands();enforce();});
           pi.on("before_agent_start",async event=>{
             validateNativeTools();gateNativeCommands();enforce();
             const note=await nativeContext?.beforePrompt?.({phase:binding?.stage.phase});
             const managed=await nativeContext?.beforeAgentStart?.(event);
             const notes=[note,managed?.note].filter(Boolean).join("\n");
-            return managed||notes?{...(managed?.message?{message:managed.message}:{}),systemPrompt:(managed?.systemPrompt ?? event.systemPrompt)+(notes?"\n\n"+notes:"")}:undefined;
+            const unified=binding?.task.record.flow==='unified';
+            const base=managed?.systemPrompt ?? event.systemPrompt;
+            const safePrompt=unified?base.replace(/<cwd>[\s\S]*?<\/cwd>/g,'<cwd>No host filesystem access; use only authorized tools.</cwd>'):base;
+            return managed||notes||unified?{...(managed?.message?{message:managed.message}:{}),systemPrompt:safePrompt+(notes?"\n\n"+notes:"")+(unified?'\n\nHost capabilities: '+JSON.stringify(runtime.capabilities()):'')}:undefined;
           });
           for(const name of ['agent_start','agent_end','agent_settled','agent_before_settle','turn_start','turn_end','message_start','message_update','message_end','model_select'])
             pi.on(name,async event=>{await nativeContext?.lifecycle?.(event);});
@@ -384,15 +412,16 @@ export async function createRuntime({
         .filter((d) => d.type === "error")
         .map((d) => d.message),
     ];
+    const routingNames=["start_work","request_review","read_project_context"];
     const hostRoutingTools = () => {
       const owners = services.resourceLoader.getExtensions().extensions
-        .filter((extension) => extension.tools.has("start_work"));
+        .filter((extension) => routingNames.some(name=>extension.tools.has(name)));
       const hostFactory = extensionFactories.some((input) =>
         input?.name === "cothink" && typeof input.factory === "function");
       if (owners.length > 1 || owners.some((owner) =>
         !hostFactory || owner.path !== "<inline:cothink>"))
         throw problem("TOOL_COLLISION", "start_work 是 CoThink 宿主专用工具，扩展不得覆盖");
-      return owners.length === 1;
+      return owners.length === 1 ? routingNames.filter(name=>owners[0].tools.has(name)) : [];
     };
     hostRoutingTools();
     if (failures.length) throw problem("EXTENSION_LOAD", failures.join("\n"));
@@ -410,13 +439,13 @@ export async function createRuntime({
       }
     };
     gateNativeCommands();
-    const hostNames=new Set([...toolDefinitions.map(t=>t.name),...(hostRoutingTools()?["start_work"]:[])]);
+    const hostNames=new Set([...toolDefinitions.map(t=>t.name),...hostRoutingTools()]);
     const builtinNames=new Set(["read","write","edit","bash","powershell","grep","find","ls"]);
     const nativeTraces=new Map();
     const pluginOwners=()=>{
       const owners=new Map();
       for(const extension of services.resourceLoader.getExtensions().extensions)for(const name of extension.tools.keys()) {
-        if(name==="start_work"&&extension.path==="<inline:cothink>")continue;
+        if(routingNames.includes(name)&&extension.path==="<inline:cothink>")continue;
         if(hostNames.has(name)||builtinNames.has(name)||owners.has(name))throw problem("TOOL_COLLISION","扩展工具与宿主或其他扩展冲突："+name);
         owners.set(name,extension.path);
       }
@@ -433,7 +462,7 @@ export async function createRuntime({
       if(!Array.isArray(names)||names.some(n=>!hostNames.has(n)))throw problem("TOOL_UNAVAILABLE","只能启用此宿主已定义的受控工具");
       return [...new Set(names)];
     };
-    let managedNames=selectManagedNames(activeToolNames??allowedNames);
+    let managedNames=selectManagedNames(activeToolNames ?? allowedNames);
     const model = mr.getModel(modelRef.provider, modelRef.modelId);
     if (!model)
       throw problem(
@@ -598,11 +627,33 @@ export async function createRuntime({
       services,
       modelRuntime: mr,
       sessionManager: manager,
-      assertOwned: writer.assertOwned,
+      assertOwned() {writer.assertOwned();if(runtime?.selectionError)throw problem("CONTEXT_STORAGE",runtime.selectionError);},
+      onContextPreparation(handler) {
+        if(contextPreparation||binding?.stage.phase!=='context-summary'||binding.task.record.origin!=='context.organize')throw problem('CONTEXT_BUSY','A single context-summary binding is required');
+        const owner=binding;contextPreparation=owner;
+        const unsubscribe=contextApi.on('session_before_compact',event=>{
+          if(binding!==owner||owner.task.signal.aborted)return {cancel:true};
+          return handler(event);
+        });
+        return ()=>{unsubscribe();if(contextPreparation===owner)contextPreparation=null;};
+      },
       stopAfterTurn() {
         stopAfterTurn = true;
       },
       projectToolNames: projectToolDefinitions.map(t => t.name),
+      capabilities() {
+        // Work adapters supply the current actor's grant; root planning consent is not a work grant.
+        const task=binding?.task,record=task?.record,authority=getWorkspaceAuthority?.(),phase=binding?.stage.phase??'idle',root=task?.rootOwner?.rootTask;
+        const running=t=>!!t&&t.record.status==='running'&&!t.signal.aborted&&!t.ioError&&!t.record.cancelRequestedAt;
+        let active=!disposed&&running(task)&&(!root||running(root))&&authority?.active!==false;
+        if(active&&task.projectPolicy?.staff){try{task.projectPolicy.staff.checkWork({taskId:record.id,role:binding.stage.role});}catch{active=false;}}
+        const tools=active?session.getActiveToolNames():[];
+        const readOnly=!active||!!record?.constraints?.readOnly||!authority||!!authority.readOnly||['review','visual-review','worker-prepare','worker-conflict-resolution','project-effect'].includes(phase);
+        const readable=active&&(authority?!!(authority.readScope?.length||authority.scope?.length):!!record?.readAuthorization);
+        return {...capabilitySnapshot({skills:task?taskSkillDirectory(task):[],tools,phase,readOnly,
+          hasProject:!!(record?.workspace?.project||record?.project),readAuthorized:readable&&tools.some(n=>['read','grep','find','ls','read_project_context'].includes(n)),writeAuthorized:!!authority?.scope?.length,scriptAuthorized:!!authority&&!authority.readOnly,executionConfigured:!!(record?.work?.execution??record?.frozenConfig?.work?.execution),context:contextAccess?{...contextState(manager),sourceLeaf:record?.branchId??manager.getLeafId()}:null}),
+          active,source:binding?{taskId:record.id,stageId:binding.stage.id,role:binding.stage.role}:null};
+      },
       setToolNames(names) {
         managedNames = selectManagedNames(names);
         enforce();
@@ -639,7 +690,7 @@ export async function createRuntime({
           maxOutputTokens,
           timeout,
           error: null,
-          assertOwned: writer.assertOwned,
+          assertOwned: () => runtime.assertOwned(),
         };
         task.runtimes.add(runtime);
         enforce();
@@ -665,12 +716,19 @@ export async function createRuntime({
         task.save();
       },
       async prompt(input, { custom = false, ...options } = {}) {
-        writer.assertOwned();
+        runtime.assertOwned();
         if (!extensionsBound) await session.bindExtensions({ mode: "print" });
         enforce();
         if (runtimeError) throw runtimeError;
         if (!binding) throw problem("NO_TASK", "请先绑定逻辑任务");
         const { task, stage } = binding;
+        if(!custom && (task.record.flow==='unified'||task.record.rootTaskId) && /^\/skill:/.test(input)) {
+          const match=/^\/skill:([^\s]+)(?:\s|$)/.exec(input);if(!match)throw problem('SKILL_RESOURCE','Invalid explicit skill');
+          let content='',offset=0,page;
+          do {page=readFrozenSkill(task,{name:match[1],offset,limit:32000},{actor:stage.role,stageId:stage.id,explicit:true});content+=page.content;offset=page.nextOffset;}while(!page.eof);
+          input='[Original user input, verbatim]\n'+input+'\n\n[Explicitly selected frozen skill; guidance does not grant authority]\n'+content;
+          options.expandPromptTemplates=false;
+        } else if(task.record.flow==='unified'||task.record.rootTaskId) options.expandPromptTemplates=false;
         stopAfterTurn = false;
         await runtime.selectModel(stage.modelRef);
         const abort = () => {

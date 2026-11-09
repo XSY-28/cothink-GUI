@@ -66,6 +66,21 @@ test("elapsed time uses persisted start/end and keeps absent terminal timestamps
     "用时未知",
   );
 });
+test("elapsed time follows root wall clock through preparation, cancellation and uncertain stops", () => {
+  const createdAt="2026-11-08T00:00:00Z", endedAt="2026-11-08T00:00:18Z", cancelSettledAt="2026-11-08T00:00:25Z";
+  const now=Date.parse("2026-11-08T00:00:30Z");
+  for(const status of ["running","preparing","cancelling"])
+    assert.equal(view.elapsedLabel({createdAt,endedAt,status},now),"30秒");
+  for(const status of ["completed","failed","partial","blocked"])
+    assert.equal(view.elapsedLabel({createdAt,endedAt,status},now),"18秒");
+  assert.equal(view.elapsedLabel({createdAt,endedAt,cancelSettledAt,status:"cancelled"},now),"25秒");
+  assert.equal(view.elapsedLabel({createdAt,endedAt,cancelSettledAt,status:"partial"},now),"25秒");
+  assert.equal(view.elapsedLabel({createdAt,endedAt,status:"cancelled"},now),"用时未知");
+  assert.equal(view.elapsedLabel({createdAt,endedAt,cancelSettledAt,status:"stop_unknown"},now),"用时未确认");
+  for(const values of [{status:"completed"},{status:"failed",endedAt:"invalid"},{status:"completed",endedAt:"2026-11-07T23:59:59Z"}])
+    assert.equal(view.elapsedLabel({createdAt,...values},now),"用时未知");
+  assert.equal(view.elapsedLabel({createdAt,endedAt,status:"completed",children:[{elapsedMs:99000}]},now),"18秒");
+});
 test("pending confirmation uses GET only and exact durable submission identity after reload", async () => {
   assert.equal(typeof api.createApi, "function", "API client exists");
   const requests = [];

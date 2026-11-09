@@ -90,92 +90,17 @@ async function run(command, args, env = {}) {
   });
 }
 
-test("blank HTTP setup -> three calls -> ONE -> actual CLI PTY -> GUI preserves null project and context", async (t) => {
-  const f = await fixture(t, (_, n) => ({ text: "ROUNDTRIP_REPLY " + n }));
-  writeFileSync(join(f.cwd, "AGENTS.md"), "UNBOUND_AGENTS_CANARY");
-  let h = await host(t, f);
-  assert.equal((await h.get("/api/bootstrap")).configured, false);
-  const team = await setup(h, f);
-  assert.equal(f.calls.length, 0);
-  const s = await h.action("session.create", { project: null });
-  const a = await h.action("task.submit", {
-    sessionId: s.id,
-    input: "GUI first question",
-    submissionId: "first",
-  });
-  assert.equal((await done(h, a.taskId)).status, "completed");
-  assert.deepEqual(
-    f.calls.map((x) => x.body.model),
-    ["main", "r1", "main"],
-  );
-  await h.action("session.mode", { sessionId: s.id, mode: "one" });
-  const b = await h.action("task.submit", {
-    sessionId: s.id,
-    input: "GUI ONE second question",
-    submissionId: "second",
-  });
-  await done(h, b.taskId);
-  assert.equal(f.calls.length, 4);
-  // Releasing host is essential: the CLI must acquire the same real writer lock.
-  await h.h.close();
-  const ready = join(f.home, "pty-writer-ready");
-  const cliPending = run("python3", [
-    fileURLToPath(new URL("./helpers/gui-cli-roundtrip.py", import.meta.url)),
-    f.home,
-    join(root, "bin/cothink.js"),
-    neutralDirectory(f.home),
-    ready,
-  ]);
-  for (let n = 0; n < 500 && !existsSync(ready); n++)
-    await new Promise((r) => setTimeout(r, 10));
-  assert.ok(existsSync(ready), "actual CLI writer acquired");
-  h = await host(t, f);
-  assert.equal((await h.get("/api/session?id=" + s.id)).readOnly, true);
-  const blocked = await fetch(h.origin + "/api/action", {
-    method: "POST",
-    headers: { ...h.headers, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "task.submit",
-      args: {
-        sessionId: s.id,
-        input: "must not race CLI",
-        submissionId: "writer-blocked",
-      },
-    }),
-  });
-  assert.equal(blocked.status, 409);
-  assert.equal((await blocked.json()).code, "SESSION_BUSY");
-  assert.equal(f.calls.length, 4);
-  rmSync(ready);
-  const cli = await cliPending;
-  assert.equal(cli.code, 0, cli.err);
-  assert.match(cli.out, /actualCliPty/);
-  assert.equal(f.calls.length, 5);
-  assert.match(JSON.stringify(f.calls[4].body.messages), /GUI first question/);
-  assert.match(
-    JSON.stringify(f.calls[4].body.messages),
-    /GUI ONE second question/,
-  );
-  assert.doesNotMatch(
-    JSON.stringify(f.calls),
-    /UNBOUND_AGENTS_CANARY|"name":"start_work"/,
-  );
-  const restored = await h.get("/api/session?id=" + s.id);
-  assert.equal(restored.project, null);
-  assert.equal(restored.mode, "one");
-  assert.equal(restored.team.id, team.id);
-  assert.equal(restored.turns.length, 3);
-  assert.equal(
-    (
-      await h.action("task.submit", {
-        sessionId: s.id,
-        input: "GUI first question",
-        submissionId: "first",
-      })
-    ).taskId,
-    a.taskId,
-  );
-  assert.equal(f.calls.length, 5);
+test("blank HTTP setup uses unified calls and actual new CLI PTY refuses continuation before generation",async t=>{
+ const f=await fixture(t,(_,n)=>({text:'ROUNDTRIP_REPLY '+n}));writeFileSync(join(f.cwd,'AGENTS.md'),'UNBOUND_AGENTS_CANARY');
+ let h=await host(t,f);assert.equal((await h.get('/api/bootstrap')).configured,false);const team=await setup(h,f);
+ const session=await h.action('session.create',{project:null});
+ const send=async(input,id)=>{const r=await h.action('task.submit',{sessionId:session.id,input,submissionId:id,protocolVersion:1});assert.equal((await done(h,r.taskId)).status,'completed');return r;};
+ const first=await send('GUI first question','first');await send('GUI second question','second');assert.equal(f.calls.length,2);
+ await h.h.close();
+ const cli=await run('python3',[fileURLToPath(new URL('./helpers/gui-cli-roundtrip.py',import.meta.url)),f.home,join(root,'bin/cothink.js'),neutralDirectory(f.home),'--expect-unified']);
+ assert.equal(cli.code,0,cli.err);assert.match(cli.out,/unifiedRefused/);assert.equal(f.calls.length,2);
+ h=await host(t,f);const restored=await h.get('/api/session?id='+session.id);assert.equal(restored.project,null);assert.equal(restored.team.id,team.id);assert.equal(restored.turns.length,2);assert.doesNotMatch(JSON.stringify(f.calls),/UNBOUND_AGENTS_CANARY/);
+ assert.equal((await send('GUI first question','first')).taskId,first.taskId);assert.equal(f.calls.length,2);
 });
 
 test("HTTP cancellation in real review/member saves partial content without extra calls after SSE disconnect", async (t) => {
@@ -196,9 +121,11 @@ test("HTTP cancellation in real review/member saves partial content without extr
       }
       if (member) {
         if (n === 1)
-          return tool("start_work", { reason: "member cancellation" });
-        if (n === 2)
+          return tool("start_work", {action:"start",reason:"member cancellation",plan:{goal:"member cancel",scope:["a.txt"],readScope:["."],deliverables:["a.txt"],checks:[{command:"node",args:["-e","require(\'fs\').accessSync(\'a.txt\')"]}]}});
+        if(n===2)return tool("project_staff",{action:"appoint",input:{id:"reader",responsibility:"Read source",scope:[],readScope:["."],models:["fixture/r1"],need:"deliverable",reason:"inspect"}});
+        if (n === 3)
           return tool("delegate", {
+            staffId:"reader",
             model: "fixture/r1",
             assignment: "slow member",
             implementationAdvice: "read only fixture",
@@ -209,20 +136,21 @@ test("HTTP cancellation in real review/member saves partial content without extr
           });
         return tool("collect");
       }
-      return { text: "saved draft" };
+      return n===1?tool("request_review",{reason:"inspect",draft:"saved draft"}):{text:"saved draft"};
     });
     const h = await host(t, f);
     await setup(h, f);
-    await h.action("settings.work", { work: { checks: [] } });
+    await h.action("settings.work", { work: {execution, checks: [] } });
     const repo = member ? repository(t) : null;
     const s = await h.action("session.create", {
       project: repo?.project ?? null,
     });
-    const a = await h.action("task.submit", {
+    let a = await h.action("task.submit", {
       sessionId: s.id,
       input: member ? "member cancel" : "review cancel",
-      submissionId: "cancel",
+      protocolVersion:1, submissionId: "cancel",
     });
+    if(member){const proposal=await done(h,a.taskId);a=await h.action("task.confirmWork",{sessionId:s.id,protocolVersion:1,submissionId:"confirm-member",proposalRef:proposal.proposalRef});}
     let timer;
     try {
       await Promise.race([
@@ -247,10 +175,11 @@ test("HTTP cancellation in real review/member saves partial content without extr
     assert.equal((await h.get("/api/task?id=" + a.taskId)).status, "running");
     const n = f.calls.length;
     await h.action("task.cancel", { taskId: a.taskId });
-    const task = await done(h, a.taskId);
+    let task = await done(h, a.taskId);
+    if(member)task=await done(h,task.projectOperation.childTaskIds[0]);
     assert.notEqual(task.status, "completed");
     assert.equal(f.calls.length, n);
-    assert.ok(task.messages.some((x) => x.text === "saved draft") || member);
+    assert.ok(task.messages.some((x) => x.text === "saved draft" || JSON.stringify(x).includes("saved draft")) || member || readFileSync(join(f.home,"requests",(JSON.parse(readFileSync(join(f.home,"tasks",a.taskId+".json"))).requestIds[0])+".json"),"utf8").includes("saved draft"));
     if (member)
       assert.ok(
         task.participants.some((x) => x.role === "member" && x.participated),
@@ -270,20 +199,19 @@ test("HTTP Docker work patch reconstructs binary/delete/mode and old task diff s
       round++;
       k = 0;
       return tool("start_work", {
-        reason: "full patch",
-        scope: ["a.txt", "b.txt", "asset.bin", "run.sh"],
-        readScope: ["."],
+        action:round===1?"start":"revise",reason:"full patch",plan:{goal:round===1?"first full patch":"second advance",scope:["a.txt","b.txt","asset.bin","run.sh"],readScope:["."],deliverables:["a.txt","asset.bin","run.sh"],works:[{id:"patch",scope:["a.txt","b.txt","asset.bin","run.sh"]}],checks:[{command:"node",args:["-e","if(!require(\'fs\').readFileSync(\'asset.bin\').equals(Buffer.from([0,255,1])))process.exit(1);console.log(\'PATCH_CHECK\')"]}]},
       });
     }
     k++;
-    if (k === 1)
+    if(k===1)return tool("next_change",{reason:"binary/delete/mode patch",scope:["a.txt","b.txt","asset.bin","run.sh"],readScope:["."]});
+    if (k === 2)
       return tool("bash", {
         command:
           round === 1
             ? "node -e \"const f=require('fs');f.writeFileSync('a.txt','first accepted\\n');f.unlinkSync('b.txt');f.writeFileSync('asset.bin',Buffer.from([0,255,1]));f.writeFileSync('run.sh','#!/bin/sh\\necho fixture\\n');f.chmodSync('run.sh',0o755)\""
             : "node -e \"require('fs').writeFileSync('a.txt','second accepted\\n')\"",
       });
-    if (k === 2 || k === 3) return tool("accept_change");
+    if (k === 3 || k === 4) return tool("accept_change");
     return { text: "delivered" };
   });
   const h = await host(t, f);
@@ -303,13 +231,15 @@ test("HTTP Docker work patch reconstructs binary/delete/mode and old task diff s
     },
   });
   const s = await h.action("session.create", { project: repo.project });
-  await h.action("session.mode", { sessionId: s.id, mode: "one" });
-  const a = await h.action("task.submit", {
+
+  let a = await h.action("task.submit", {
     sessionId: s.id,
     input: "first full patch",
-    submissionId: "patch1",
+    protocolVersion:1, submissionId: "patch1",
   });
-  const first = await done(h, a.taskId);
+  const proposed=await done(h,a.taskId);a=await h.action("task.confirmWork",{sessionId:s.id,protocolVersion:1,submissionId:"patch-confirm1",proposalRef:proposed.proposalRef});
+  const firstRoot=await done(h,a.taskId),first=await done(h,firstRoot.projectOperation.childTaskIds[0]);
+  if(first.status!=="completed")writeFileSync("work/gui/desktop-unified/d3-d4-evidence/patch-failure.json",JSON.stringify({first,calls:f.calls.map(c=>c.body)},null,2));
   assert.equal(first.status, "completed", first.error);
   assert.equal(first.work.finalCheck.verification, "passed");
   const d = await h.get("/api/diff?id=" + a.taskId);
@@ -328,9 +258,10 @@ test("HTTP Docker work patch reconstructs binary/delete/mode and old task diff s
   const b = await h.action("task.submit", {
     sessionId: s.id,
     input: "second advance",
-    submissionId: "patch2",
+    protocolVersion:1, submissionId: "patch2",
   });
-  assert.equal((await done(h, b.taskId)).status, "completed");
+  const secondProposal=await done(h,b.taskId),confirmed=await h.action("task.confirmWork",{sessionId:s.id,protocolVersion:1,submissionId:"patch-confirm2",proposalRef:secondProposal.proposalRef});
+  assert.equal((await done(h,confirmed.taskId)).status,"completed");
   assert.deepEqual(await h.get("/api/diff?id=" + a.taskId), d);
   const files = await h.get("/api/files?id=" + a.taskId);
   assert.equal(files.items.find(f=>f.name==='b.txt').status,'deleted');
@@ -373,7 +304,7 @@ test("HTTP distinguishes an empty unverified policy from configured checks witho
     const repo = repository(t);
     const f = await fixture(t, (_, n) =>
       n === 1
-        ? tool("start_work", { reason: "check boundary", scope: ["a.txt"] })
+        ? tool("start_work", {action:"start",reason:"check boundary",plan:{goal:"policy test",scope:["a.txt"],deliverables:["a.txt"],checks}})
         : n === 2
           ? tool("read", { path: "a.txt" })
           : n === 3
@@ -386,17 +317,18 @@ test("HTTP distinguishes an empty unverified policy from configured checks witho
     await setup(h, f);
     await h.action("settings.work", { work: { checks } });
     const s = await h.action("session.create", { project: repo.project });
-    await h.action("session.mode", { sessionId: s.id, mode: "one" });
+
     const a = await h.action("task.submit", {
       sessionId: s.id,
       input: "policy test",
-      submissionId: "policy",
+      protocolVersion:1, submissionId: "policy",
     });
-    const task = await done(h, a.taskId);
+    let task = await done(h, a.taskId);
     if (!checks.length) {
-      assert.equal(task.status, "completed", task.error);
-      assert.equal(task.work.finalCheck.verification, "unverified");
+      assert.equal(task.proposalRef,undefined,"formal plan requires nonempty checks");assert.equal(task.work,null);
+      assert.equal(readFileSync(join(repo.project,"a.txt"),"utf8"),"base A\n");
     } else {
+      const confirmed=await h.action("task.confirmWork",{sessionId:s.id,protocolVersion:1,submissionId:"policy-confirm",proposalRef:task.proposalRef});task=await done(h,confirmed.taskId);
       assert.notEqual(task.work?.finalCheck?.verification, "passed");
       assert.notEqual(task.status, "completed");
       assert.match(JSON.stringify(task), /Docker|EXECUTOR_CONFIG|execution/i);
@@ -430,7 +362,7 @@ test("missing Docker isolated child refuses host Shell fallback", async (t) => {
   let f;
   f = await fixture(t, (_, n) =>
     n === 1
-      ? tool("start_work", { reason: "unavailable executor", scope: ["a.txt"] })
+      ? tool("start_work", {action:"start",reason:"unavailable executor",plan:{goal:"missing engine",scope:["a.txt"],deliverables:["a.txt"],checks:[{command:"node",args:["-e","process.exit(0)"]}]}})
       : n === 2
         ? tool("bash", {
             command: `echo forbidden > '${join(f.home, "HOST_FALLBACK_CANARY")}'`,
@@ -446,13 +378,14 @@ test("missing Docker isolated child refuses host Shell fallback", async (t) => {
     },
   });
   const s = await h.action("session.create", { project: repo.project });
-  await h.action("session.mode", { sessionId: s.id, mode: "one" });
+
   const a = await h.action("task.submit", {
     sessionId: s.id,
     input: "missing engine",
-    submissionId: "missing",
+    protocolVersion:1, submissionId: "missing",
   });
-  const task = await done(h, a.taskId);
+  const proposal=await done(h,a.taskId),confirmed=await h.action("task.confirmWork",{sessionId:s.id,protocolVersion:1,submissionId:"missing-confirm",proposalRef:proposal.proposalRef});
+  const task=await done(h,confirmed.taskId);
   assert.equal(existsSync(join(f.home, "HOST_FALLBACK_CANARY")), false);
   assert.notEqual(task.work?.finalCheck?.verification, "passed");
   assert.notEqual(task.status, "completed");

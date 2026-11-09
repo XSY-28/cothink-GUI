@@ -153,10 +153,13 @@ export function projectGuiTask(record, requests = [], sessionEntries = []) {
       }
     : null;
   return {
+    origin:record.origin??null,contextResult:record.contextResult??null,preparation:record.preparation??null,
     id: record.id,
+    flow:record.flow,constraints:clone(record.constraints),budget:clone(record.budget),readAuthorization:clone(record.readAuthorization),projectOperation:clone(record.projectOperation),deliveryRef:clone(record.deliveryRef),
     sessionId: record.sessionId,
     createdAt: record.createdAt ?? null,
     endedAt: record.endedAt ?? null,
+    cancelSettledAt: record.cancelSettledAt ?? null,
     input: record.input,
     status: taskDisplayStatus(record),
     resultRevision: guiResultRevision(record, finalGuiText(record, requests)),
@@ -190,8 +193,8 @@ export function guiResultRevision(record, text) {
   ])).digest("hex");
 }
 
-export function finalGuiText(record, requests) {
-  return finalText(record, requests, {localArtifacts:false, hostFooter:false});
+export function finalGuiText(record, requests,home) {
+  return finalText(record, requests, {localArtifacts:false, hostFooter:false,home});
 }
 
 /** A handoff exists only when a saved tool call and its tool result agree. */

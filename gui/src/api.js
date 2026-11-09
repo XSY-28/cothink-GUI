@@ -79,6 +79,11 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
       }),
     async recover(pending) {
       const session = await read("session", { id: pending.sessionId });
+      if(pending.kind==='confirmation') {
+        const source=session.turns.find(t=>t.taskId===pending.proposalRef?.sourceTaskId);
+        const intent=source?.confirmationIntent;
+        return intent ? session.submissions.find(t=>t.taskId===intent.taskId)??null : null;
+      }
       return (
         (session.submissions ?? session.turns).find((t) => t.submissionId === pending.submissionId) ||
         null

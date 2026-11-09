@@ -21,6 +21,7 @@ try {
     execFileSync(process.execPath, [join(root, 'scripts/build-project-handoff.mjs')], {cwd:root,stdio:['ignore',2,2]});
   }
   // Fresh assets are mandatory, including when a previous dist already exists.
+  execFileSync(process.execPath, [npm, 'run', 'build:skills'], { cwd: root, stdio: ['ignore', 2, 2] });
   execFileSync(process.execPath, [npm, 'run', 'build:gui'], { cwd: root, stdio: ['ignore', 2, 2] });
   mkdirSync(output, { recursive: true });
   const [packed] = JSON.parse(run(process.execPath,

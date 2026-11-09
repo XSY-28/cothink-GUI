@@ -1,8 +1,11 @@
 export const modelName = (model) =>
   model ? `${model.provider} / ${model.modelId}` : "来源未记录";
 export function elapsedLabel(task, now = Date.now()) {
+  if (task?.status === "stop_unknown") return "用时未确认";
+  const active = ["running", "preparing", "cancelling"].includes(task?.status);
+  const endpoint = task?.cancelSettledAt ?? (task?.status === "cancelled" ? null : task?.endedAt);
   const start = Date.parse(task?.createdAt),
-    end = task?.status === "running" ? now : Date.parse(task?.endedAt);
+    end = active ? now : Date.parse(endpoint);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start)
     return "用时未知";
   const seconds = Math.floor((end - start) / 1000);
@@ -98,6 +101,7 @@ export function createDraftBook() {
         editId:crypto.randomUUID(),revision:prior.revision+1});
     },
     snapshot(id) { return structuredClone(drafts.get(id) ?? {}); },
+    pending() { return structuredClone([...drafts.values()].filter(draft=>draft.editId && draft.editId !== draft.savedEditId)); },
     confirmed(sent, saved) {
       const now=drafts.get(sent.sessionId);
       if (!now || saved.editor?.editId !== sent.editId) return false;
@@ -116,8 +120,9 @@ export function createDraftBook() {
       if (!now) return;
       const same = now.editId === sent.editId && (sent.editId !== null || now.revision === sent.revision);
       const consume = sent.selectionId && now.selectionId === sent.selectionId;
-      if (same || consume) drafts.set(sent.sessionId,{...now,...(same ? {text:""} : {}),
-        ...(consume ? {workRequest:null,selectionId:null} : {}),editId:crypto.randomUUID(),revision:now.revision+1});
+      const consumeOptions=sent.turnOptions?.id&&now.turnOptions?.id===sent.turnOptions.id;
+      if (same || consume || consumeOptions) drafts.set(sent.sessionId,{...now,...(same ? {text:""} : {}),
+        ...(consume ? {workRequest:null,selectionId:null} : {}),...(consumeOptions?{turnOptions:null}:{}),editId:crypto.randomUUID(),revision:now.revision+1});
     },
   };
 }

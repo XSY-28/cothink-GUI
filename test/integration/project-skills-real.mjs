@@ -64,7 +64,7 @@ test('real doc-maintenance is discovered/read by root, supervisor, worker and re
   const script=task.tools.find(x=>x.kind==='employee_script_result');assert.equal(script.parentActorId,'member:'+worker);assert.equal(script.treatment.decision,'adopted');
   assert.ok(task.members.find(m=>m.memberId===worker).supervisorMemberId===supervisor);
   assert.equal(task.work.acceptance.at(-1).status,'accepted');
-  t.diagnostic(JSON.stringify({requests:f.calls.length,roles:[...readers],skillHash:task.work.skillResources[0].hash,image:process.env.COTHINK_TEST_SKILL_IMAGE}));
+  t.diagnostic(JSON.stringify({requests:f.calls.length,roles:[...readers],skillHash:task.skillResources[0].hash,image:process.env.COTHINK_TEST_SKILL_IMAGE}));
 });
 
 test('real frontend-design guides an employee page and the existing preview returns actual images',{timeout:60000},async t=>{

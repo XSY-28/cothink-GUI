@@ -25,12 +25,12 @@ const cleanups = [];
 const lifecycle = { after: (fn) => cleanups.push(fn) };
 const repo = repository(lifecycle);
 const counts = new Map();
-let fileGeneration=0;
+let fileGeneration=0,projectRound=0;
 let f;
 const trace = [];
 const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
 const normal =
-  "# 本地演示 · GUI_NORMAL\n\n中文与 emoji 👩🏽‍💻。这是固定 fixture，不是模型质量结论。\n\n设 $x=2$，则\n\n$$\\sum_{k=1}^{3} k^2=14$$\n\n```js\nconst square = x => x * x;\nconsole.log(square(2));\n```\n\n| 路径 | 调用 |\n| --- | --- |\n| CoThink | 3 |\n| ONE | 1 |\n\n- [x] 本地固定回复\n\n## 对评审意见的处理说明\n保留推导与代码，并说明这只是机制演示。";
+  "# 本地演示 · GUI_NORMAL\n\n中文与 emoji 👩🏽‍💻。这是固定 fixture，不是模型质量结论。\n\n设 $x=2$，则\n\n$$\\sum_{k=1}^{3} k^2=14$$\n\n```js\nconst square = x => x * x;\nconsole.log(square(2));\n```\n\n| 路径 | 调用 |\n| --- | --- |\n| 直接答复 | 1 |\n| 按需评审 | 3 |\n\n- [x] 本地固定回复\n\n## 对评审意见的处理说明\n保留推导与代码，并说明这只是机制演示。";
 f = await fixture(lifecycle, async (call, n, req, res) => {
   const body = call.body,
     text = JSON.stringify(body.messages),
@@ -74,15 +74,17 @@ f = await fixture(lifecycle, async (call, n, req, res) => {
     if (isStart) {
       if(filesWork)fileGeneration++;
 
-      counts.set("work", 0);
-      return tool("start_work", {
-        reason: "isolated fixture project change",
-        scope: filesWork ? ["."] : ["a.txt"],
-        readScope: ["."],
-      });
+      counts.set("work", 0);projectRound++;
+      return tool("start_work", {action:projectRound===1?"start":"revise",reason:"isolated fixture project change",
+        plan:{goal:filesWork?'GUI_FILES '+fileGeneration:'GUI_WORK '+projectRound,scope:['.'],works:[{id:'delivery',scope:['.']}],
+          deliverables:filesWork?['a.txt','成果 页面/index.html','样式.css','说明.md','图形.svg','不安全.html','图片 空格.png','二进制.bin']:['a.txt'],
+          checks:[{command:'node',args:['-e',"if(require('fs').readFileSync('a.txt','utf8')!=='GUI fixture accepted output\\n')process.exit(1);console.log('GUI fixture Docker check passed')"]}]}});
+
     }
-    const k = (counts.get("work") ?? 0) + 1;
-    counts.set("work", k);
+    const turn = (counts.get("work") ?? 0) + 1;
+    counts.set("work", turn);
+    if(turn===1)return tool("next_change",{reason:"confirmed fixture delivery",scope:["."],readScope:["."]});
+    const k=turn-1;
     if(filesWork) {
       const files=[
         ['a.txt','GUI fixture accepted output\n'],
@@ -102,8 +104,10 @@ f = await fixture(lifecycle, async (call, n, req, res) => {
       if(k===operations.length+2||k===operations.length+3)return tool('accept_change');
       return {text:`# 本轮文件成果 ${fileGeneration}\n\n文件已保存到独立成果目录，原项目未写回。通过下方文件入口查看固定版本的网页、Markdown、SVG、二进制下载及删除差异。\n\n不安全 HTML 保留原字节，静态预览应明确拒绝。此轮使用本地 fixture，检查状态以宿主实际记录为准。`};
     }
-    if (k === 1)
+    if(k===1)return tool("project_staff",{action:"appoint",input:{id:"reader",responsibility:"Inspect original input",scope:[],readScope:["."],models:[args.includes("--empty")?"demo-review/review":"fixture/r1"],need:"deliverable",reason:"Independent inspection"}});
+    if (k === 2)
       return tool("delegate", {
+        staffId:"reader",
         model: args.includes("--empty") ? "demo-review/review" : "fixture/r1",
         assignment: "Inspect original a.txt",
         implementationAdvice: "read only fixture inspection",
@@ -112,18 +116,19 @@ f = await fixture(lifecycle, async (call, n, req, res) => {
         readScope: ["."],
         readOnly: true,
       });
-    if (k === 2) return tool("collect");
-    if (k === 3) return tool("read", { path: "a.txt" });
-    if (k === 4)
+    if (k === 3) return tool("collect");
+    if (k === 4) return tool("read", { path: "a.txt" });
+    if (k === 5)
       return tool("write", {
         path: "a.txt",
         content: "GUI fixture accepted output\n",
       });
-    if (k === 5 || k === 6) return tool("accept_change");
+    if (k === 6 || k === 7) return tool("accept_change");
     return {
       text: "# 项目成果\n\n已通过本地 Docker fixture 检查，独立成果中的 a.txt 已更新。原项目目录没有写回。",
     };
   }
+  if(/GUI_CANCEL_REVIEW/.test(text) && body.tools?.some(x=>x.function?.name==='request_review') && !text.includes('saved review draft'))return tool('request_review',{reason:'fixture review cancellation',draft:'saved review draft\n'+normal});
   return { text: normal };
 });
 if (args.includes("--empty")) rmSync(join(f.home, "pi/models.json"));

@@ -34,7 +34,7 @@ jobs:
           SOURCE_REPOSITORY: ${{ github.repository }}
           SOURCE_REF: ${{ github.ref }}
         run: |
-          test "$SOURCE_REPOSITORY" = XSY-28/cothink-gui
+          test "$SOURCE_REPOSITORY" = XSY-28/cothink-gui-workspace
           test "$SOURCE_REF" = refs/heads/main
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -55,7 +55,7 @@ jobs:
           const pkg = JSON.parse(fs.readFileSync('package.json'));
           assert.equal(pkg.name, 'cothink-v2');
           assert.equal(pkg.version, process.env.EXPECTED_VERSION);
-          assert.equal(pkg.repository.url, 'git+https://github.com/XSY-28/cothink-gui.git');
+          assert.equal(pkg.repository.url, 'git+https://github.com/XSY-28/cothink-gui-workspace.git');
           if (process.env.PUBLISH === 'true') {
             const versions = JSON.parse(execFileSync('npm', ['view', pkg.name, 'versions', '--json',
               '--registry=https://registry.npmjs.org'], { encoding: 'utf8' }));
@@ -112,7 +112,7 @@ jobs:
           const pkg = JSON.parse(execFileSync('tar', ['-xOf', tarball, 'package/package.json'], { encoding: 'utf8' }));
           assert.equal(pkg.name, 'cothink-v2');
           assert.equal(pkg.version, process.env.EXPECTED_VERSION);
-          assert.equal(pkg.repository.url, 'git+https://github.com/XSY-28/cothink-gui.git');
+          assert.equal(pkg.repository.url, 'git+https://github.com/XSY-28/cothink-gui-workspace.git');
           assert.equal(pkg.overrides, undefined);
           assert.ok(['latest', 'next'].includes(process.env.DIST_TAG));
           fs.appendFileSync(process.env.GITHUB_ENV, `COTHINK_TARBALL=${tarball}\n`);

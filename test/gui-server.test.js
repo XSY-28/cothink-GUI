@@ -127,16 +127,16 @@ test("HTTP actions share durable tasks; refresh and event reconnection never res
   const f = await host(t, true, (_, n) => ({ text: `answer ${n} fixture-secret fixtureKey` }));
   await f.action("provider.save", { providerId: "localhttp", apiKey: "fixtureKey", custom: { baseUrl: f.endpoint, api: "openai-completions", modelId: "configured", name: "Configured", contextWindow: 32000, maxTokens: 4096 } });
   const s = await f.action("session.create", { project: null });
-  const submitted = await f.action("task.submit", { sessionId: s.id, input: "question", submissionId: "durable" });
+  const submitted = await f.action("task.submit", { sessionId: s.id, input: "question", protocolVersion:1, submissionId: "durable" });
   const done = await completed(f, submitted.taskId);
   assert.equal(done.status, "completed", done.error);
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 1);
   for (const path of ["/api/bootstrap", `/api/session?id=${s.id}`, `/api/task?id=${submitted.taskId}`]) {
     const r = await fetch(f.origin + path, { headers: f.headers });
     assert.equal(r.status, 200);
     assert.doesNotMatch(await r.text(), /fixture-secret|fixtureKey/);
   }
-  const duplicate = await f.action("task.submit", { sessionId: s.id, input: "question", submissionId: "durable" });
+  const duplicate = await f.action("task.submit", { sessionId: s.id, input: "question", protocolVersion:1, submissionId: "durable" });
   assert.equal(duplicate.taskId, submitted.taskId);
   const streams = await Promise.all([1, 2].map(async () => {
     const abort = new AbortController();
@@ -146,7 +146,7 @@ test("HTTP actions share durable tasks; refresh and event reconnection never res
     assert.match(new TextDecoder().decode((await reader.read()).value), /event: invalidate\ndata: \{\}/);
     return { abort, reader };
   }));
-  await f.action("session.mode", { sessionId: s.id, mode: "one" });
+  await f.action("session.name", { sessionId: s.id, title: "Fixture conversation" });
   for (const stream of streams) {
     assert.match(new TextDecoder().decode((await stream.reader.read()).value), /event: invalidate/);
     stream.abort.abort();
@@ -155,7 +155,7 @@ test("HTTP actions share durable tasks; refresh and event reconnection never res
   const r = await fetch(f.origin + "/api/events", { headers: f.headers, signal: reconnect.signal });
   await r.body.getReader().read();
   reconnect.abort();
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 1);
   assert.equal((await (await fetch(f.origin + `/api/task?id=${submitted.taskId}`, { headers: f.headers })).json()).id, submitted.taskId);
   await f.h.close();
   await f.h.close();
@@ -164,12 +164,20 @@ test("HTTP actions share durable tasks; refresh and event reconnection never res
 test("closing HTTP host cancels an active real controller task and closes event connections", async (t) => {
   const f = await host(t, true, async () => { await new Promise((r) => setTimeout(r, 400)); return { text: "slow" }; });
   const s = await f.action("session.create", { project: null });
-  const task = await f.action("task.submit", { sessionId: s.id, input: "slow", submissionId: "cancel" });
+  const task = await f.action("task.submit", { sessionId: s.id, input: "slow", protocolVersion:1, submissionId: "cancel" });
   const events = await fetch(f.origin + "/api/events", { headers: f.headers });
   const reader = events.body.getReader();
   await reader.read();
   await f.h.close();
-  assert.equal((await reader.read()).done, true);
+  // Two-phase shutdown keeps observers live while cancellation settles. Drain
+  // those final invalidations before checking the transport's eventual EOF.
+  let ended=false;
+  for(let n=0;n<100;n++) {
+    const item=await reader.read();
+    if(item.done){ended=true;break;}
+    assert.match(new TextDecoder().decode(item.value),/event: invalidate/);
+  }
+  assert.equal(ended,true);
   assert.notEqual(readTask(f.home, task.taskId).status, "completed");
   assert.equal(f.h.server.listening, false);
   assert.equal(f.calls.length, 1);
@@ -235,7 +243,7 @@ test("HTTP work routes serve fixed diffs, plain patches and only task-owned pagi
   const repo = repository(t);
   const f = await host(t, true, (_call, n) => {
     const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
-    if (n === 1) return tool("start_work", { reason: "change fixture", scope: ["a.txt"], readScope: ["a.txt"] });
+    if (n === 1) return tool("start_work", {action:"start",reason:"change fixture",plan:{goal:"change source",scope:["a.txt"],deliverables:["a.txt"],checks:[{command:"node",args:["-e","console.log(\'HTTP check log\')"]}]}});
     if (n === 2) return tool("read", { path: "a.txt" });
     if (n === 3) return tool("write", { path: "a.txt", content: "HTTP accepted output\n" });
     if (n === 4 || n === 5) return tool("accept_change");
@@ -244,9 +252,12 @@ test("HTTP work routes serve fixed diffs, plain patches and only task-owned pagi
   const original = git(repo.project, "status", "--porcelain=v1");
   await f.action("settings.work", { work: { execution, checks: [{ command: "node", args: ["-e", "console.log('HTTP check log')"] }] } });
   const s = await f.action("session.create", { project: repo.project });
-  await f.action("session.mode", { sessionId: s.id, mode: "one" });
-  const task = await f.action("task.submit", { sessionId: s.id, input: "change source", submissionId: "http-work" });
-  const done = await completed(f, task.taskId);
+  await f.action("session.name", { sessionId: s.id, title: "Fixture conversation" });
+  const proposal = await f.action("task.submit", { sessionId: s.id, input: "change source", protocolVersion:1, submissionId: "http-work" });
+  const proposed=await completed(f,proposal.taskId);
+  const task=await f.action("task.confirmWork",{sessionId:s.id,protocolVersion:1,submissionId:"http-confirm",proposalRef:proposed.proposalRef});
+  const rootDone=await completed(f,task.taskId);
+  const done=await completed(f,rootDone.projectOperation.childTaskIds[0]);
   assert.equal(done.status, "completed", done.error);
   assert.equal(done.work.finalCheck.verification, "passed");
   const diff = await (await fetch(`${f.origin}/api/diff?id=${task.taskId}`, { headers: f.headers })).json();
@@ -286,7 +297,7 @@ test("CLI signal cancels an active task, saves partial status and releases its H
     return r.json();
   };
   const s = await action("session.create", { project: null });
-  const r = await action("task.submit", { sessionId: s.id, input: "slow CLI", submissionId: "cli-signal" });
+  const r = await action("task.submit", { sessionId: s.id, input: "slow CLI", protocolVersion:1, submissionId: "cli-signal" });
   // Submission acknowledges the durable task before its first request is dispatched.
   // This case specifically exercises interrupting an in-flight request.
   for(let n=0;n<500&&!f.calls.length;n++)await new Promise(resolve=>setTimeout(resolve,10));
@@ -319,7 +330,7 @@ test("navigation HTTP routes retain safe conflict codes and distinguish null-pro
   const emptyArchive=await api.action("session.archive",{sessionId:s.id,archived:true,expectedRevision:0});
   assert.equal(emptyArchive.navigation.archived,true);
   await api.action("session.archive",{sessionId:s.id,archived:false,expectedRevision:1});
-  const run=await f.action("task.submit",{sessionId:s.id,input:"HTTP navigation",submissionId:"nav-http"});
+  const run=await f.action("task.submit",{sessionId:s.id,input:"HTTP navigation",protocolVersion:1, submissionId:"nav-http"});
   await completed(f,run.taskId);
   const archived=await api.action("session.archive",{sessionId:s.id,archived:true,expectedRevision:2});
   const page=await api.read("sessions",{project:"",archived:"archived",query:"HTTP",limit:1});
@@ -329,7 +340,7 @@ test("navigation HTTP routes retain safe conflict codes and distinguish null-pro
   for(const params of [{limit:101},{limit:0},{archived:"yes"},{query:"x".repeat(201)}]) await assert.rejects(api.read("sessions",params));
   const recovered=await api.action("session.archive",{sessionId:s.id,archived:false,expectedRevision:archived.navigation.revision});
   assert.equal(recovered.navigation.archived,false);
-  assert.equal(f.calls.length,3);
+  assert.equal(f.calls.length,1);
 });
 
 test("workspace actions preserve auth, current conflict entries and unavailable table errors", async t => {
@@ -358,9 +369,9 @@ test("workspace actions preserve auth, current conflict entries and unavailable 
   assert.equal(conflict.body.workspace.revision,1);
   const session = await f.action("session.create",{project:repo.project});
   const generic = await f.action("session.create",{project:null});
-  await f.action("session.mode",{sessionId:generic.id,mode:"one"});
+  await f.action("session.name",{sessionId:generic.id,title:"Generic fixture"});
   const archived = await f.action("workspace.update",{workspaceId,expectedRevision:1,change:{archived:true}});
-  const submit = () => post("task.submit",{sessionId:session.id,input:"Must not run",submissionId:randomUUID()});
+  const submit = () => post("task.submit",{sessionId:session.id,input:"Must not run",protocolVersion:1, submissionId:randomUUID()});
   const archivedSubmit = await submit();
   assert.equal(archivedSubmit.status,409);
   assert.equal(archivedSubmit.body.code,"WORKSPACE_ARCHIVED");
@@ -377,7 +388,7 @@ test("workspace actions preserve auth, current conflict entries and unavailable 
   assert.equal(uncertainSubmit.body.code,"WORKSPACE_UNAVAILABLE");
   assert.equal(readFileSync(join(f.home,"gui-workspaces.json"),"utf8"),damaged);
   assert.equal(f.calls.length,0);
-  const accepted = await post("task.submit",{sessionId:generic.id,input:"Independent generic conversation",submissionId:randomUUID()});
+  const accepted = await post("task.submit",{sessionId:generic.id,input:"Independent generic conversation",protocolVersion:1, submissionId:randomUUID()});
   assert.equal(accepted.status,200,accepted.body.error);
   assert.equal((await completed(f,accepted.body.taskId)).status,"completed");
   assert.equal(f.calls.length,1);
@@ -412,7 +423,7 @@ test("a replaced workspace path cannot redirect task or plugin execution to anot
   assert.equal(readable.workspaceId,session.workspaceId);
   assert.equal((await get("/api/bootstrap")).workspaces[0].projectAvailable,false);
   for (const [action,args] of [
-    ["task.submit",{input:"Must not run",submissionId:randomUUID()}],
+    ["task.submit",{input:"Must not run",protocolVersion:1, submissionId:randomUUID()}],
     ["extension.command",{input:"/must-not-run"}],
   ]) {
     const response = await fetch(f.origin+"/api/action",{method:"POST",
@@ -435,4 +446,11 @@ test("HTTP reading records reject stale revisions with a safe conflict code", as
   assert.equal(stale.status,409);
   assert.equal((await stale.json()).code,"VIEW_CONFLICT");
   assert.equal(f.calls.length,0);
+});
+
+test('browser GUI CLI refuses Node preload before importing the business host',async t=>{
+ const f=await fixture(t);const preload=join(f.home,'injection.mjs');writeFileSync(preload,'globalThis.__guiPreloaded=true;');
+ const {invoke}=await import('./helpers/cli-fixture.js');
+ const result=await invoke({...f,nodeArgs:['--import',preload]},['gui','--no-open']);
+ assert.equal(result.code,2);assert.match(result.stderr,/干净入口/);assert.doesNotMatch(result.stdout,/http:/);assert.equal(f.calls.length,0);
 });

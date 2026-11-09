@@ -251,6 +251,10 @@ export function Collaboration({
             {task.usage?.nativeTools&&`；原生工具 ${task.usage.nativeTools.count} 次（扩展用量独立，未知不计为零）`}
             · {elapsedLabel(task, now)}
           </div>
+          {task.executionTasks?.map(source=><details key={source.id}><summary>{source.stepId} · {source.relation==='inherited'?'沿用已有交付':'本轮实际执行'} · {statusLabel(source.status)}</summary>
+            <p>来源任务 {source.id} · 已发 {source.usage?.calls??'未知'} 次请求</p>
+            {source.messages.map(message=><div key={message.id}><p>{message.role} · {modelName(message.model)}</p><Markdown text={message.text??''}/></div>)}
+            {source.work&&<Checks work={source.work} taskId={source.id} commands={commands}/>}</details>)}
           {task.workRequest && <details className="field-note"><summary>制作HTML/SVG · 本条冻结技能</summary>{task.answerSkills?.map(s=><p key={s.hash}>{s.name}<br/><code>{s.hash}</code></p>)}</details>}
           <details className="roster"><summary>参与者与冻结阵容</summary>
             <div className="roster-title">

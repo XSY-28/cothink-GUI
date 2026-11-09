@@ -29,6 +29,50 @@ const componentUrl = pathToFileURL(
   resolve(bundleDirectory, "components.js"),
 ).href;
 
+test('skill settings show host capabilities and save only explicit disabled names',async()=>{
+ await modalEnvironment(async({root,container,Settings})=>{
+  const saved=[],boot={configured:true,version:'fixture',providers:[],models:[],teams:[],work:{},builtinSkills:{names:['doc-maintenance','context-management'],disabled:[]}};
+  const capabilities={phase:'next-turn',skills:[{name:'doc-maintenance',version:'0.1.0',description:'Docs',explicitOnly:false}],tools:['read_skill'],permissions:{fileWrite:false,scriptExecution:false},environment:{managedExecutionConfigured:false,contextToolsAvailable:false},diagnostics:[]};
+  await act(async()=>root.render(React.createElement(Settings,{boot,session:{id:'selected'},initialTab:'skills',commands:{getCapabilities:async id=>{assert.equal(id,'selected');return capabilities;},saveBuiltinSkills:async args=>saved.push(args)},onClose(){}})));
+  await act(async()=>{await new Promise(r=>setTimeout(r,0));});
+  assert.match(container.textContent,/当前角色不可用/);assert.match(container.textContent,/当前未获文件写入权限/);
+  const toggle=container.querySelector('input[type="checkbox"]');await act(()=>toggle.click());
+  await act(async()=>container.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true})));
+  assert.deepEqual(saved,[{builtinSkills:{disabled:['doc-maintenance']}}]);assert.match(container.textContent,/技能选择已保存/);
+ });
+});
+test('unknown builtin save reads actual persisted preference once without replaying the write',async t=>{
+ const {fixture}=await import('./helpers/pi-fixture.js'),{createGuiController}=await import('../src/gui-controller.js'),{saveConfig}=await import('../src/config.js'),{createTeamConfig}=await import('../src/teams.js');
+ const f=await fixture(t);saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Fixture','7c8094cd-3476-4bfa-8f53-055d87972896'));
+ const controller=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>controller.close());
+ await modalEnvironment(async({root,win,useGuiWorkspace})=>{
+  const prior=Object.getOwnPropertyDescriptor(globalThis,'sessionStorage');Object.defineProperty(globalThis,'sessionStorage',{configurable:true,value:win.sessionStorage});let workspace,writes=0,persist=true;
+  const api={subscribe:()=>()=>{},read:async(kind,args={})=>kind==='session'?controller.session(args.id):kind==='sessions'?controller.sessions(args):controller.bootstrap(),action:async(name,args)=>{writes++;if(persist)await controller.action(name,args);throw Object.assign(Error('lost saved receipt'),{unknown:true});}};
+  function Harness(){workspace=useGuiWorkspace(api);return null;}
+  try {await act(async()=>root.render(React.createElement(Harness)));let result;
+   await act(async()=>{result=await workspace.commands.saveBuiltinSkills({builtinSkills:{disabled:['doc-maintenance']}});});
+   assert.equal(writes,1);assert.deepEqual(result.disabled,['doc-maintenance']);assert.deepEqual(workspace.state.bootstrap.builtinSkills.disabled,['doc-maintenance']);assert.equal(f.calls.length,0);
+   persist=false;await act(async()=>{await assert.rejects(workspace.commands.saveBuiltinSkills({builtinSkills:{disabled:[]}}),{unknown:true});});assert.equal(writes,2);assert.deepEqual((await controller.bootstrap()).builtinSkills.disabled,['doc-maintenance']);
+  }finally{await act(()=>root.render(null));if(prior)Object.defineProperty(globalThis,'sessionStorage',prior);else delete globalThis.sessionStorage;}
+ });
+});
+test('formal capability panel labels coordinator and executor permissions separately and refreshes actors',async()=>{
+ await modalEnvironment(async({root,container,Settings})=>{
+  const base={phase:'project',scope:'coordinator',skills:[],tools:[],permissions:{fileWrite:false,scriptExecution:false},environment:{managedExecutionConfigured:true,contextToolsAvailable:false},diagnostics:[]};
+  const executor={...base,phase:'work',source:{taskId:'owned-task',stageId:'owned-stage',role:'main'},tools:['read','write','resource_exec'],permissions:{fileWrite:true,scriptExecution:true}};
+  let reads=0,resolveRefresh;const boot={configured:true,version:'fixture',providers:[],models:[],teams:[],work:{},builtinSkills:{names:['doc-maintenance','context-management'],disabled:[]},active:{taskId:'root',status:'running'}};
+  const props={boot,session:{id:'session'},initialTab:'skills',commands:{getCapabilities:async()=>{reads++;return reads===1?{...base,executors:[executor]}:new Promise(resolve=>resolveRefresh=resolve);}},onClose(){}};
+  await act(async()=>root.render(React.createElement(Settings,props)));
+  const coordinator=container.querySelector('[aria-label="能力来源 协调器"]'),child=container.querySelector('[aria-label="能力来源 所属执行者 main"]');
+  assert.match(coordinator.textContent,/当前未获文件写入权限/);assert.doesNotMatch(coordinator.textContent,/resource_exec/);
+  assert.match(child.textContent,/当前允许受管文件写入/);assert.match(child.textContent,/resource_exec/);assert.match(container.textContent,/协调器与所属执行者/);
+  await act(async()=>root.render(React.createElement(Settings,{...props,boot:{...boot,active:{taskId:'root',status:'running'}}})));
+  assert.ok(container.querySelector('[aria-label="能力来源 所属执行者 main"]'),'same-owner refresh keeps readable content while the request is pending');
+  await act(async()=>resolveRefresh({...base,executors:[]}));
+  assert.equal(container.querySelector('[aria-label="能力来源 所属执行者 main"]'),null);assert.match(container.textContent,/尚无已绑定的活动执行者/);assert.equal(reads,2);
+ });
+});
+
 async function modalEnvironment(run) {
   const win = new Window({ url: "http://localhost/" }),
     prior = {};
@@ -96,7 +140,7 @@ test("Settings contains Tab focus while work fields are disabled by an active ta
     let finishSave;
     for (const state of ["active", "busy"]) {
       const props = {
-        boot: {
+        boot: {protocol:{unified:1},
           ...base,
           active: state === "active" ? { taskId: "running" } : null,
         },
@@ -176,11 +220,12 @@ test("Settings contains Tab focus while work fields are disabled by an active ta
 
 test("Modal skips invisible ancestor controls and uses a collapsed summary as a real focus stop", async () => {
   await modalEnvironment(async ({ win, container, root, Modal }) => {
+    let closes=0;
     await act(() =>
       root.render(
         React.createElement(
           Modal,
-          { title: "Focus", onClose: () => {} },
+          { title: "Focus", onClose: () => {closes++;} },
           React.createElement(
             "details",
             null,
@@ -225,6 +270,17 @@ test("Modal skips invisible ancestor controls and uses a collapsed summary as a 
     await act(() => close.dispatchEvent(reverse));
     assert.equal(reverse.defaultPrevented, true);
     assert.equal(win.document.activeElement, summary);
+    summary.blur();
+    assert.equal(win.document.activeElement,win.document.body);
+    await act(()=>win.document.body.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Tab",bubbles:true,cancelable:true})));
+    assert.equal(win.document.activeElement,close,"orphan focus returns to the modal on Tab");
+    close.blur();
+    await act(()=>win.document.body.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true})));
+    assert.equal(closes,1,"Escape still closes after a focused control is removed");
+    container.setAttribute("inert","");
+    await act(()=>win.document.body.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true})));
+    assert.equal(closes,1,"an inert parent modal cannot consume the active layer's Escape");
+    container.removeAttribute("inert");
   });
 });
 
@@ -260,7 +316,7 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
   };
   const base = {
     session: { id: "s", mode: "cothink", team },
-    boot: {
+    boot: {protocol:{unified:1},
       teams: [team],
       models: [
         { provider: "p", modelId: "main", thinkingLevels: ["low", "high"] },
@@ -319,7 +375,7 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
     assert.equal(sent.length, 1);
     assert.equal(container.querySelector('[aria-label="team"]'), null);
     assert.equal(container.querySelectorAll('[type="submit"]').length, 1);
-    await act(()=>root.render(React.createElement(Composer,{...base,boot:{...base.boot,models:[]}})));
+    await act(()=>root.render(React.createElement(Composer,{...base,boot:{protocol:{unified:1},...base.boot,models:[]}})));
     await act(()=>container.querySelector('[aria-label="添加本次操作"]').click());
     assert.match(container.textContent,/模型目录不可用，输出额度要求未知/);
     assert.doesNotMatch(container.textContent,/未设本地输出上限/);
@@ -330,7 +386,7 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
     );
     assert.equal(container.querySelector("textarea").disabled, false);
     assert.equal(container.querySelector('[type="submit"]').disabled, true);
-    assert.match(container.textContent, /下一条模式/);
+    assert.doesNotMatch(container.textContent, /下一条模式/);
     await act(() =>
       container.querySelector("textarea").dispatchEvent(
         new win.KeyboardEvent("keydown", {
@@ -381,7 +437,7 @@ test("invalid work-check arguments show a form error and do not send a settings 
   win.document.body.append(container);
   const root = createRoot(container),
     actions = [];
-  const boot = {
+  const boot = {protocol:{unified:1},
     configured: true,
     teams: [],
     models: [],
@@ -553,6 +609,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     let result;
     if (url.pathname === "/api/bootstrap")
       result = {
+        protocol:{unified:1},
         configured: true,
         version: "fixture",
         teams: [team],
@@ -614,9 +671,11 @@ test("application refreshes preserve typed drafts across sessions and cancel the
       await settle();
     }
   };
+  const pickerRow = title => container.querySelector('[role="dialog"][aria-label="对话"]').querySelector(`[title="${title}"]`);
+  const assertUngrouped = () => assert.match(container.querySelector("h1").textContent,/未分组对话/);
   const openHistory = async title => {
     await showHistory();
-    await act(()=>container.querySelector(`[title="${title}"]`).click());
+    await act(()=>pickerRow(title).click());
     await settle();
   };
   try {
@@ -626,22 +685,22 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     await settle();
     assert.equal(container.querySelector("textarea").value, "saved a");
     assert.equal(container.querySelector('[role="dialog"]'),null,"unread release notes never interrupt startup");
-    assert.match(container.querySelector('[aria-label="Team 导航"]').textContent,/更新记录未读/);
-    assert.doesNotMatch(container.querySelector('[aria-label="Team 导航"]').textContent,/有新版本/);
+    assert.match(container.querySelector('[aria-label="工作导航"]').textContent,/更新记录未读/);
+    assert.doesNotMatch(container.querySelector('[aria-label="工作导航"]').textContent,/有新版本/);
     await act(()=>container.querySelector('[aria-label="暂时收起本地更新提示"]').click());
     assert.equal(actions.some(a=>a.action==="releaseNotes.ack"),false,"dismissing a notice is not acknowledgement");
     await act(()=>[...container.querySelectorAll('button')].find(b=>b.textContent.includes('查看本次更新')).click());
-    assert.deepEqual([...container.querySelectorAll('.settings-nav button')].map(n=>n.textContent),['已归档','模型与认证','项目执行','偏好与更新']);
+    assert.deepEqual([...container.querySelectorAll('.settings-nav button')].map(n=>n.textContent),['已归档','模型与认证','项目执行','技能与能力','偏好与更新']);
     assert.equal(actions.some(a=>a.action==="releaseNotes.ack"),false,"opening notes is not acknowledgement");
     await act(()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='我已看过此版本更新').click());
     await settle();
     assert.equal(actions.filter(a=>a.action==="releaseNotes.ack").length,1);
     assert.equal(actions.find(a=>a.action==="releaseNotes.ack").args.version,'fixture');
     await act(()=>container.querySelector('[aria-label="关闭设置"]').click());
-    assert.equal(container.querySelector('[title="Active chat"]'),null,"conversation rows start collapsed");
+    assert.equal(container.querySelector('nav [title="Active chat"]'),null,"conversation history belongs in the project picker");
     assert.equal([...container.querySelectorAll("header.topbar button")].filter(n=>n.textContent === "阵容").length,1);
     await showHistory();
-    const runningMenu=container.querySelector('[title="Active chat"]').parentElement.querySelector('details');
+    const runningMenu=pickerRow("Active chat").parentElement.querySelector('details');
     await act(()=>runningMenu.querySelector('summary').click());
     assert.equal([...runningMenu.querySelectorAll('button')].find(b=>b.textContent==="归档对话").disabled,true);
     assert.match(runningMenu.textContent,/任务进行中/);
@@ -683,7 +742,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     await openHistory("History chat");
     await act(() => releaseSessionA());
     await settle();
-    assert.match(container.querySelector("h1").textContent,/通用对话/);
+    assertUngrouped();
     assert.equal(container.querySelector("textarea").value, "saved b");
 
     // Opening and unmounting the reader keeps A's draft and sends nothing.
@@ -704,7 +763,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     await openHistory("History chat");
     await act(() => rejectSubmission(Error("lost response")));
     await settle();
-    assert.match(container.querySelector("h1").textContent,/通用对话/);
+    assertUngrouped();
     assert.equal(container.querySelector("textarea").value, "saved b");
     assert.equal(JSON.parse(win.sessionStorage.getItem("cothink.pending")).sessionId, "a");
     assert.match(container.textContent, /提交确认丢失/);
@@ -713,16 +772,16 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     await act(()=>[...container.querySelectorAll("button")].find(b=>b.textContent==="保留草稿并放弃关联").click());
     const archiveRow = async title => {
       await showHistory();
-      const row=container.querySelector(`[title="${title}"]`).parentElement;
+      const row=pickerRow(title).parentElement;
       await act(()=>row.querySelector("summary").click());
       await act(()=>[...row.querySelectorAll("button")].find(b=>b.textContent==="归档对话").click());
       await settle();
     };
     await archiveRow("History chat");
-    assert.match(container.querySelector("h1").textContent,/通用对话/);
+    assertUngrouped();
     assert.equal(container.querySelector("textarea").value,"new unsent a");
     await archiveRow("Active chat");
-    assert.match(container.querySelector("h1").textContent,/通用对话/);
+    assertUngrouped();
     assert.equal(actions.some(a=>a.action==="session.create"),false,"archiving the last visible row never creates an empty history");
     await act(()=>container.querySelector('[role="dialog"][aria-label="对话"] button[aria-label^="关闭"]').click());
     await act(()=>[...container.querySelectorAll("nav button")].find(b=>b.textContent.includes("设置")).click());
@@ -732,13 +791,13 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     await act(()=>archivedRow.querySelector("summary").click());
     await act(()=>[...archivedRow.querySelectorAll("button")].find(b=>b.textContent==="恢复对话").click());
     await settle();
-    assert.match(container.querySelector("h1").textContent,/通用对话/,"restoring in settings does not change Team");
+    assertUngrouped();
     assert.equal(container.querySelector("textarea").disabled,true,"restoring in settings does not select a conversation");
     await act(()=>container.querySelector('[aria-label="关闭设置"]').click());
     await settle();
     await showHistory();
     loseNextPin=true;
-    const restoredRow=container.querySelector('[title="History chat"]').parentElement;
+    const restoredRow=pickerRow("History chat").parentElement;
     await act(()=>restoredRow.querySelector("summary").click());
     await act(()=>[...restoredRow.querySelectorAll("button")].find(b=>b.textContent==="置顶").click());
     await settle();
@@ -795,7 +854,7 @@ test('update settings keep controls disabled during a check and show a save fail
     const home=mkdtempSync(join(tmpdir(),'gui-update-settings-'));
     const service=createUpdateService({home,currentVersion:'1.0.0',env:{},fetchImpl:async()=>new Response(JSON.stringify({name:'cothink-v2',version:'2.0.0'}))});
     await service.check({manual:true});const s=service.snapshot();
-    const boot={configured:true,teams:[],models:[],providers:[],work:{},version:'1.0.0',releaseNotes:{full:'local'},updates:{...s,message:formatUpdateStatus(s),instructions:updateInstructions(s)}};
+    const boot={protocol:{unified:1},configured:true,teams:[],models:[],providers:[],work:{},version:'1.0.0',releaseNotes:{full:'local'},updates:{...s,message:formatUpdateStatus(s),instructions:updateInstructions(s)}};
     let calls=0,fail;
     const commands={configureUpdates:async()=>{calls++;await new Promise((_,reject)=>fail=reject);}};
     try {
@@ -807,6 +866,12 @@ test('update settings keep controls disabled during a check and show a save fail
       await act(()=>fail(Error('无法保存更新偏好，原文件保留。')));
       assert.equal(toggle.checked,true);assert.match(container.textContent,/无法保存更新偏好/);
       assert.doesNotMatch(container.textContent,/设置已保存/);assert.equal(check.disabled,false);
+      assert.match(container.textContent,/页面连接本机宿主；查新由宿主访问 npm/);
+      const desktopBoot={...boot,installation:'desktop',updates:{channel:'desktop-local',currentVersion:'1.0.0',message:'本地桌面候选'}};
+      await act(()=>root.render(React.createElement(Settings,{key:'desktop',boot:desktopBoot,session:null,commands,onRefresh:async()=>{},onClose:()=>{},initialTab:'updates'})));
+      assert.match(container.textContent,/桌面仅显示本地版本与随包更新记录/);
+      assert.doesNotMatch(container.textContent,/查新由宿主访问 npm/);
+      assert.equal([...container.querySelectorAll('button')].some(b=>b.textContent==='检查更新'),false);
     } finally {service.close();rmSync(home,{recursive:true,force:true});}
   });
 });
@@ -830,11 +895,11 @@ test('collaboration shows unresolved conflict and separates a completed mismatch
 });
 
 
-test("Option+M toggles composer mode without typing or sending, including during work", async () => {
+test("removed Option+M mode shortcut leaves text and submission untouched", async () => {
   await modalEnvironment(async ({win, container, root}) => {
     const changes = [], drafts = [], submissions = [];
     const base = {
-      session: {id: "s", mode: "cothink"}, boot: {models: [], teams: []},
+      session: {id: "s", mode: "cothink"}, boot: {protocol:{unified:1},models: [], teams: []},
       draft: "keep this draft", onDraft: value => drafts.push(value),
       onSubmit: () => submissions.push(true), onChange: (...args) => changes.push(args),
       onSettings: () => {},
@@ -847,19 +912,19 @@ test("Option+M toggles composer mode without typing or sending, including during
       return event;
     };
     await render({});
-    assert.equal((await press()).defaultPrevented, true);
-    assert.deepEqual(changes, [["session.mode", {mode: "one"}]]);
+    assert.equal((await press()).defaultPrevented, false);
+    assert.deepEqual(changes, []);
     await render({busy: true, session: {...base.session, mode: "one"}});
     await press();
-    assert.deepEqual(changes.at(-1), ["session.mode", {mode: "cothink"}]);
+    assert.deepEqual(changes, []);
     for (const event of [{repeat: true}, {isComposing: true}, {keyCode: 229},
       {ctrlKey: true}, {metaKey: true}, {shiftKey: true}, {altKey: false}]) await press(event);
-    assert.equal(changes.length, 2);
+    assert.equal(changes.length, 0);
     for (const props of [{session: {...base.session, readOnly: true}},
       {session: {...base.session, selectionError: "write failed"}}, {submitting: true}, {pending: true}]) {
       await render(props); await press();
     }
-    assert.equal(changes.length, 2);
+    assert.equal(changes.length, 0);
     assert.equal(container.querySelector("textarea").value, "keep this draft");
     assert.deepEqual(drafts, []);
     assert.deepEqual(submissions, []);
@@ -869,15 +934,15 @@ test("Option+M toggles composer mode without typing or sending, including during
 
 test("archived settings search and restore stay in settings while viewing selects the matched message",async()=>{
   await modalEnvironment(async({root,container,Settings,win})=>{
-    const boot={configured:true,teams:[],models:[],providers:[],work:{},version:"fixture",releaseNotes:{full:"local"}};
-    let archived=true; const requests=[], changes=[], opens=[];
+    const boot={protocol:{unified:1},configured:true,teams:[],models:[],providers:[],work:{},version:"fixture",releaseNotes:{full:"local"}};
+    let archived=true,closes=0; const requests=[], changes=[], opens=[];
     const row={id:"archived",title:"Saved answer",project:null,persisted:true,navigation:{revision:3,archived:true,pinned:false},match:{snippet:"needle answer",taskId:"old-task",field:"finalText"}};
     const commands={
       querySessions:async args=>{requests.push(args);return {items:archived ? [row] : [],nextCursor:null};},
       setSessionNavigation:async args=>{changes.push(args);archived=false;},
       openSession:(...args)=>opens.push(args),
     };
-    await act(async()=>root.render(React.createElement(Settings,{boot,commands,initialTab:"archives",onClose(){},api:{},onRefresh(){}})));
+    await act(async()=>root.render(React.createElement(Settings,{boot,commands,initialTab:"archives",onClose(){closes++;},api:{},onRefresh(){}})));
     assert.match(container.textContent,/needle answer/);
     const menu=container.querySelector('[title="Saved answer"]').parentElement.querySelector('details');
     await act(()=>menu.querySelector('summary').click());
@@ -885,6 +950,8 @@ test("archived settings search and restore stay in settings while viewing select
     assert.equal(menu.open,false);
     assert.ok(container.querySelector('[role="dialog"]'),"Escape in a row menu leaves settings open");
     assert.equal(win.document.activeElement,menu.querySelector('summary'));
+    await act(()=>menu.querySelector('summary').dispatchEvent(new win.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})));
+    assert.equal(closes,1,"a closed row menu passes the next Escape to its modal");
     await act(()=>container.querySelector('[title="Saved answer"]').click());
     assert.deepEqual(opens,[["archived","old-task",undefined,"finalText"]]);
     await act(async()=>{
@@ -903,7 +970,7 @@ test("archived settings search and restore stay in settings while viewing select
 test("archived composer preserves draft and blocks submission without claiming another writer",async()=>{
   await modalEnvironment(async({root,container,win})=>{
     let sends=0;
-    await act(()=>root.render(React.createElement(Composer,{session:{id:"a",navigation:{archived:true},mode:"one",team:{id:"t",main:{provider:"p",modelId:"m"},secondary:[]}},boot:{models:[],teams:[]},draft:"keep unsent",onDraft(){},onSubmit(){sends++;},onChange(){},onSettings(){}})));
+    await act(()=>root.render(React.createElement(Composer,{session:{id:"a",navigation:{archived:true},mode:"one",team:{id:"t",main:{provider:"p",modelId:"m"},secondary:[]}},boot:{protocol:{unified:1},models:[],teams:[]},draft:"keep unsent",onDraft(){},onSubmit(){sends++;},onChange(){},onSettings(){}})));
     assert.equal(container.querySelector('textarea').disabled,true);
     assert.equal(container.querySelector('textarea').value,"keep unsent");
     assert.match(container.textContent,/已归档/); assert.doesNotMatch(container.textContent,/被其他入口占用/);
@@ -1157,7 +1224,7 @@ test("workspace handles /team locally while busy and freezes one HTML submission
       assert.deepEqual(workspace.state.workRequest,{kind:"html-svg"});
       await act(()=>workspace.commands.setDraft("a","make the page"));
       unknown=true;await act(async()=>workspace.commands.submit({sessionId:"a"}));
-      assert.equal(submits.length,2);assert.deepEqual(submits[1].workRequest,{kind:"html-svg"});
+      assert.equal(submits.length,2);assert.equal(submits[1].workRequest,undefined,"legacy editor marker cannot bypass unified planning");assert.equal(submits[1].protocolVersion,1);
       const submissionId=submits[1].submissionId;
       assert.equal(workspace.state.pending.submissionId,submissionId);
       await act(()=>workspace.commands.setWorkRequest("a",null));
@@ -1253,7 +1320,7 @@ test("Team creation form needs only a name even without a directory or roster",a
 test("reply branch action targets its own completed reply and compact composer omits permanent hints",async()=>{
  await modalEnvironment(async({root,container,win,Conversation})=>{
   const forks=[],team={id:"t",name:"T",main:{provider:"p",modelId:"m"},secondary:[{provider:"p",modelId:"r"}]};
-  const state={bootstrap:{teams:[team],models:[],sessions:[],active:null},session:{id:"a",title:"Title",project:null,team,turns:[{taskId:"first",input:"question",finalText:"answer",status:"completed",canFork:true}]},task:null,draft:"draft",ready:true,errors:[]};
+  const state={bootstrap:{protocol:{unified:1},teams:[team],models:[],sessions:[],active:null},session:{id:"a",title:"Title",project:null,team,turns:[{taskId:"first",input:"question",finalText:"answer",status:"completed",canFork:true}]},task:null,draft:"draft",ready:true,errors:[]};
   const props={state,commands:{setDraft(){},setError(){},openSession(){},refresh(){},abandonSubmission(){}},onFork:id=>{forks.push(id);},onSettings(){},onToggleNavigation(){},onCopy(){}};
   await act(()=>root.render(React.createElement(Conversation,props)));
   assert.equal(container.querySelector('[aria-label="重命名对话"]'),null);
@@ -1262,6 +1329,21 @@ test("reply branch action targets its own completed reply and compact composer o
   assert.deepEqual(forks,['first']);
   await act(()=>root.render(React.createElement(Conversation,{...props,state:{...state,session:{...state.session,turns:[{...state.session.turns[0],canFork:false,status:'running'}]}}})));
   assert.equal([...container.querySelectorAll('button')].find(b=>b.textContent==='从这里分支').disabled,true);
+ });
+});
+
+test("reply headers use their own persisted elapsed time without opening task details",async()=>{
+ await modalEnvironment(async({root,container,Conversation})=>{
+  const base={createdAt:"2026-11-08T00:00:00Z",endedAt:"2026-11-08T00:00:18Z",input:"question",finalText:"answer"};
+  const turns=[{...base,taskId:"done",status:"completed"},{...base,taskId:"failed",status:"failed"},{...base,taskId:"cancel",status:"cancelled",cancelSettledAt:"2026-11-08T00:00:25Z"},{...base,taskId:"unknown",status:"stop_unknown"},{...base,taskId:"old",status:"completed",endedAt:null}];
+  const state={bootstrap:{protocol:{unified:1},teams:[],models:[],sessions:[],active:null},session:{id:"a",title:"Title",turns},task:null,tasksById:{},draft:"",ready:true,errors:[]};
+  const props={state,commands:{setDraft(){},setError(){},openSession(){},refresh(){},abandonSubmission(){}}};
+  await act(()=>root.render(React.createElement(Conversation,props)));
+  const headers=[...container.querySelectorAll("article > header")].map(node=>node.textContent);
+  assert.deepEqual(headers,["用时 18秒已完成","用时 18秒失败","用时 25秒已停止","用时未确认停止未确认","用时未知已完成"]);
+  assert.ok(headers.every(text=>!text.includes("CoThink")&&!text.includes("多模型")&&!text.includes("◌")));
+  await act(()=>root.render(React.createElement(Conversation,{...props,state:{...state,session:{...state.session,turns:[{...base,taskId:"running",status:"cancelling",createdAt:new Date(Date.now()-12000).toISOString()}]}}})));
+  assert.match(container.querySelector("article > header").textContent,/已用时 1[2-3]秒正在停止/);
  });
 });
 
@@ -1372,7 +1454,7 @@ test("a delayed post-submit task read cannot overwrite the next saved editor on 
       assert.deepEqual(saves.map(save=>save.text),["first task","next unsent task"],"old cleared snapshot must not publish after newer autosave");
       assert.deepEqual(records.a.editor,newest); assert.equal(workspace.state.draft,newest.text);
       assert.equal(submits.length,1); assert.equal(submits[0].input,"first task");
-      assert.deepEqual(submits[0].workRequest,{kind:"html-svg"}); assert.equal(newest.workRequest,null);
+      assert.equal(submits[0].workRequest,undefined); assert.equal(submits[0].protocolVersion,1); assert.equal(newest.workRequest,null);
       await act(async()=>workspace.commands.openSession("b"));
       await act(async()=>workspace.commands.openSession("a"));
       assert.deepEqual(records.a.editor,newest); assert.equal(workspace.state.draft,newest.text);
@@ -1572,9 +1654,9 @@ test("damaged Pi affiliation keeps history readable and requires an explicit con
   t.after(()=>controller.close());
   const generic=await controller.action("session.create",{sessionId:crypto.randomUUID(),workspaceId:null});
   const damaged=await controller.action("session.create",{sessionId:crypto.randomUUID(),workspaceId:null});
-  await controller.action("session.mode",{sessionId:damaged.id,mode:"one"});
+
   await controller.action("session.name",{sessionId:damaged.id,title:"归属异常夹具"});
-  const {taskId}=await controller.action("task.submit",{sessionId:damaged.id,input:"保存的问题",submissionId:"unknown-affiliation"});
+  const {taskId}=await controller.action("task.submit",{sessionId:damaged.id,input:"保存的问题",protocolVersion:1, submissionId:"unknown-affiliation"});
   for (let i=0;i<200 && (await controller.task(taskId)).status==="running";i++)
     await new Promise(resolve=>setTimeout(resolve,10));
   assert.equal((await controller.task(taskId)).status,"completed");
@@ -1606,6 +1688,7 @@ test("damaged Pi affiliation keeps history readable and requires an explicit con
       win.sessionStorage.setItem("cothink.session",damaged.id);
       const reads=[], creates=[];
       let gui;
+      const waitList=async()=>{for (let i=0;i<50 && gui.state.navigationLoading;i++) await act(async()=>new Promise(resolve=>setTimeout(resolve,10)));};
       const api={
         subscribe:()=>()=>{},
         read:async (kind,args={})=>{
@@ -1633,8 +1716,7 @@ test("damaged Pi affiliation keeps history readable and requires an explicit con
         assert.equal(gui.state.ready,true);
         assert.equal(gui.state.workspaceId,undefined);
         assert.match(container.querySelector("h1").textContent,/归属待核对/);
-        const genericEntry=[...container.querySelectorAll("nav button")].find(button=>button.textContent==="通用对话");
-        assert.equal(genericEntry.hasAttribute("aria-current"),false);
+        assert.equal(container.querySelector("nav [aria-current=page]"),null);
         assert.match(container.querySelector(".composer").textContent,/会话的 Team 归属损坏；原记录保留。/);
         assert.doesNotMatch(container.querySelector(".composer").textContent,/若被其他 CLI|发送前请在顶部选择阵容/);
         assert.match(container.textContent,/保存的答复/);
@@ -1648,7 +1730,7 @@ test("damaged Pi affiliation keeps history readable and requires an explicit con
         assert.equal(creates.length,0);
 
         await act(async()=>gui.commands.searchSessions({scope:"all",query:"保存的问题"}));
-        for (let i=0;i<50 && gui.state.navigationLoading;i++) await act(async()=>new Promise(resolve=>setTimeout(resolve,10)));
+        await waitList();
         assert.equal(reads.at(-1).kind,"sessions");
         assert.equal(Object.hasOwn(reads.at(-1).args,"workspaceId"),false);
         assert.equal(gui.state.sessions.find(row=>row.id===damaged.id).match.taskId,taskId);
@@ -1667,13 +1749,17 @@ test("damaged Pi affiliation keeps history readable and requires an explicit con
         assert.equal(gui.state.sessions.find(row=>row.id===damaged.id).workspaceId,undefined);
         assert.equal(container.querySelector("textarea").value,"保存的草稿");
 
+        await act(async()=>gui.commands.searchSessions({scope:"all",query:""}));
+        await waitList();
+        const genericEntry=container.querySelector(`[title="${generic.title}"]`);
+        assert.ok(genericEntry,"ungrouped history remains reachable through global search");
         await act(async()=>genericEntry.click());
         for (let i=0;i<50 && gui.state.session?.id!==generic.id;i++) await act(async()=>new Promise(resolve=>setTimeout(resolve,10)));
         assert.equal(gui.state.workspaceId,null);
-        assert.equal(genericEntry.getAttribute("aria-current"),"page");
+        assert.equal(container.querySelector(`[title="${generic.title}"]`).getAttribute("aria-current"),"page");
         assert.equal(gui.state.session.id,generic.id);
         await act(async()=>gui.commands.searchSessions({scope:"project",query:""}));
-        for (let i=0;i<50 && gui.state.navigationLoading;i++) await act(async()=>new Promise(resolve=>setTimeout(resolve,10)));
+        await waitList();
         assert.deepEqual(gui.state.sessions.map(row=>row.id),[generic.id]);
         await act(async()=>gui.commands.createSession({workspaceId:null}));
         assert.equal(creates.length,1);
@@ -1689,4 +1775,100 @@ test("damaged Pi affiliation keeps history readable and requires an explicit con
   } finally {
     await controller.close();
   }
+});
+
+test('versioned per-session turn options survive reopen and unknown submit without granting another project access',async t=>{
+ const {fixture}=await import('./helpers/pi-fixture.js');const {repository}=await import('./helpers/git-fixture.js');
+ const {createGuiController}=await import('../src/gui-controller.js');const {saveConfig}=await import('../src/config.js');const {createTeamConfig}=await import('../src/teams.js');const {readTask}=await import('../src/task.js');const {randomUUID}=await import('node:crypto');
+ const f=await fixture(t),repoA=repository(t),repoB=repository(t);saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Options fixture',randomUUID()));
+ let controller=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>controller.close());
+ const a=await controller.action('session.create',{project:repoA.project}),b=await controller.action('session.create',{project:repoB.project});
+ await modalEnvironment(async({root,win,useGuiWorkspace})=>{
+  const oldStorage=Object.getOwnPropertyDescriptor(globalThis,'sessionStorage');Object.defineProperty(globalThis,'sessionStorage',{configurable:true,value:win.sessionStorage});
+  let workspace,loseSubmit=false,submitted;
+  const api={subscribe:()=>()=>{},async read(kind,args={}){return kind==='session'?controller.session(args.id):kind==='task'?controller.task(args.id):kind==='sessions'?controller.sessions(args):controller.bootstrap();},
+   async action(name,args){const value=await controller.action(name,args);if(name==='task.submit'){submitted=value;if(loseSubmit){loseSubmit=false;throw Object.assign(Error('lost acknowledgement'),{unknown:true});}}return value;},
+   async recover(pending){return (await controller.session(pending.sessionId)).submissions.find(s=>s.submissionId===pending.submissionId)??null;}};
+  function Harness(){workspace=useGuiWorkspace(api);return null;}
+  try{
+   await act(async()=>root.render(React.createElement(Harness)));
+   await act(async()=>workspace.commands.openSession(a.id));
+   await act(()=>{workspace.commands.setDraft(a.id,'question with saved limits');workspace.commands.setTurnOptions(a.id,{maxCalls:'3',readOnly:true,delegate:false,readAllowed:true,readPaths:'a.txt'});});
+   await act(async()=>workspace.commands.flushAllDrafts());const savedA=await controller.session(a.id);assert.equal(savedA.editor.turnOptions.maxCalls,'3');assert.equal(savedA.editor.turnOptions.readProject,savedA.project);
+   await act(async()=>workspace.commands.openSession(b.id));assert.equal(workspace.state.turnOptions,null,'A opt-in never becomes B consent');
+   await act(()=>workspace.commands.setTurnOptions(b.id,{maxCalls:'1'}));await act(async()=>workspace.commands.flushAllDrafts());
+   await act(()=>root.render(null));await controller.close();controller=await createGuiController({home:f.home,cwd:f.cwd});
+   await act(async()=>root.render(React.createElement(Harness)));await act(async()=>workspace.commands.openSession(a.id));
+   assert.equal(workspace.state.turnOptions.maxCalls,'3');assert.equal(workspace.state.turnOptions.readOnly,true);assert.equal(workspace.state.turnOptions.readAllowed,true);
+   await assert.rejects(controller.action('task.submit',{sessionId:b.id,input:savedA.draft,submissionId:'foreign-editor',protocolVersion:1,editorEditId:savedA.editor.editId,budget:{maxCalls:3},constraints:{readOnly:true,allowedSubtasks:[]},readAuthorization:{paths:['a.txt']}}),/草稿|选项/);assert.equal(f.calls.length,0);
+   loseSubmit=true;await act(async()=>workspace.commands.submit({sessionId:a.id}));assert.ok(workspace.state.pending);assert.equal(workspace.state.turnOptions.maxCalls,'3');
+   await act(()=>workspace.commands.setTurnOptions(a.id,{maxCalls:'9'}));assert.equal(workspace.state.turnOptions.maxCalls,'3','unknown submission retains its original options');
+   await act(async()=>workspace.commands.openSession(b.id));assert.equal(workspace.state.turnOptions.maxCalls,'1');assert.equal(workspace.state.turnOptions.readAllowed,false);
+   await act(async()=>workspace.commands.openSession(a.id));await act(async()=>workspace.commands.recoverSubmission());assert.equal(workspace.state.turnOptions,null,'acknowledgement consumes only the submitted choice');
+   for(let n=0;n<100&&(await controller.bootstrap()).active;n++)await new Promise(r=>setTimeout(r,10));
+   const task=readTask(f.home,submitted.taskId);assert.equal(task.budget.maxCalls,3);assert.equal(task.constraints.readOnly,true);assert.equal(task.readAuthorization.canonicalRepo,savedA.project);assert.equal(task.readAuthorization.source.editorEditId,savedA.editor.editId);assert.equal(f.calls.length,1);
+  }finally{await act(()=>root.render(null));if(oldStorage)Object.defineProperty(globalThis,'sessionStorage',oldStorage);else delete globalThis.sessionStorage;}
+ });
+});
+
+
+test("Team navigation keeps project identity and distinguishes empty, archived and unavailable lists",async()=>{
+ await modalEnvironment(async({root,container,Navigation})=>{
+  const rows=[{id:"a",name:"CoThink 开发"},{id:"b",name:"LLM 学习",attention:{kind:"unread"}},{id:"c",name:"课程笔记"}];
+  const props={workspaces:rows,workspaceId:"b",ready:true,connection:"connected"};
+  await act(()=>root.render(React.createElement(Navigation,{...props,sessions:[{id:"s",workspaceId:"b",title:"Only in picker",navigation:{}}]})));
+  assert.equal(container.querySelector('[aria-label="新建 Team"]')?.textContent,"新建 Team");
+  assert.equal(container.querySelector('[aria-label="最近对话"]'),null);
+  assert.equal(container.querySelector('[title="Only in picker"]'),null);
+  assert.equal(container.querySelector('[aria-label*="中新建对话"]'),null);
+  assert.match(container.querySelector('[aria-current="page"]').textContent,/LLM 学习.*有新结果/);
+  await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:[]})));
+  assert.match(container.textContent,/创建第一个 Team，开始持续的工作。/);
+  await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:rows.map(row=>({...row,archived:true}))})));
+  assert.match(container.textContent,/已归档 Team 可在搜索或设置中恢复/);
+  assert.doesNotMatch(container.textContent,/创建第一个/);
+  await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:null})));
+  assert.match(container.textContent,/工作列表暂不可用/);
+  assert.doesNotMatch(container.textContent,/创建第一个/);
+  await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:[],connection:"reconnecting"})));
+  assert.doesNotMatch(container.textContent,/创建第一个/);
+ });
+});
+
+
+test("saved Team survives rejected or unknown first conversation creation without automatic recreation",async()=>{
+ for (const unknown of [false,true]) await modalEnvironment(async({root,container,win,useGuiWorkspace,Conversation})=>{
+  const previous=Object.getOwnPropertyDescriptor(globalThis,"sessionStorage");
+  Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
+  let gui;const workspaces=[],actions=[],reads=[];
+  const api={subscribe:()=>()=>{},read:async(kind,args)=>{
+    reads.push({kind,args});
+    if(kind==="bootstrap")return {protocol:{unified:1},teams:[],models:[],providers:[],sessions:[],workspaces,work:{},active:null};
+    if(kind==="sessions")return {items:[],workspaces};
+    throw Error("Original session cannot yet be read");
+  },action:async(name,args)=>{
+    actions.push({name,args});
+    if(name==="workspace.create") {const row={id:args.workspaceId,name:args.name,project:null,revision:1};workspaces.push(row);return row;}
+    if(name==="session.create")throw Object.assign(Error(unknown?"lost acknowledgement":"creation rejected"),{unknown});
+  }};
+  function Harness(){gui=useGuiWorkspace(api);return React.createElement(Conversation,{state:gui.state,commands:gui.commands,workspace:gui.state.bootstrap.workspaces?.[0],onConversations(){}});}
+  try {
+    await act(async()=>root.render(React.createElement(Harness)));
+    let saved;await act(async()=>{saved=await gui.commands.createWorkspace({name:"未发消息的 Team",project:null,defaultRosterId:null});});
+    assert.equal(saved.id,workspaces[0].id);
+    assert.equal(gui.state.workspaceId,saved.id);
+    assert.equal(gui.state.bootstrap.workspaces.length,1);
+    assert.equal(actions.filter(row=>row.name==="workspace.create").length,1);
+    const creates=actions.filter(row=>row.name==="session.create");assert.equal(creates.length,1);
+    assert.match(container.textContent,/Team 已保存/);
+    if(unknown){
+      assert.match(container.textContent,/创建结果尚未确认/);
+      assert.ok(container.textContent.includes(creates[0].args.sessionId));
+      assert.deepEqual(reads.filter(row=>row.kind==="session").map(row=>row.args.id),[creates[0].args.sessionId]);
+      assert.doesNotMatch(container.textContent,/从‘对话’中新建/);
+    } else assert.match(container.textContent,/creation rejected/);
+  } finally {
+    if(previous)Object.defineProperty(globalThis,"sessionStorage",previous);else delete globalThis.sessionStorage;
+  }
+ });
 });

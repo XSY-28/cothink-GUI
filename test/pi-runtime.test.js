@@ -76,3 +76,15 @@ test('model switching defaults to high, preserves explicit levels and rejects un
   await assert.rejects(rt.selectModel(f.models.secondary[1]),/不支持.*high/);
   assert.equal(f.calls.length,0);
 });
+
+test('explicit empty and singleton tool policies remain exact under managed resource registration',async t=>{
+ const {createTask}=await import('../src/task.js');
+ for(const selected of [[],['chosen']])await t.test(JSON.stringify(selected),async t=>{
+   const f=await fixture(t),task=createTask({home:f.home,input:'Generate only',models:f.models});
+   const rt=await api.createRuntime({home:f.home,cwd:f.cwd,modelRef:f.models.main,projectManaged:true,useFrozenSkills:true,contextAccess:true,
+     activeToolNames:selected,toolDefinitions:[{name:'chosen',label:'Chosen tool',description:'Only explicitly selected tool',parameters:{type:'object',properties:{}},execute:async()=>({content:[{type:'text',text:'ok'}]})}]});
+   t.after(()=>rt.dispose());rt.bindTask(task,task.beginPhase('draft','main',f.models.main));
+   await rt.prompt('Generate only');
+   assert.deepEqual((f.calls[0].body.tools??[]).map(x=>x.function.name),selected);
+ });
+});

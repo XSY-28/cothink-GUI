@@ -1,3 +1,4 @@
+import {resolveDelivery} from "./project-turn.js";
 import { readFileSync } from "node:fs";
 import { readTask, readRequests, taskDisplayStatus } from "./task.js";
 import { finalAnswerText, safeText } from "./terminal.js";
@@ -35,7 +36,9 @@ export function workCheckText(check) {
   if (check.verification !== "passed") return "未验证（空检查策略）";
   return check.reusedFrom ? "通过（复用既有检查）" : "通过";
 }
-export function finalText(record, requests, {localArtifacts=true, hostFooter=true}={}) {
+export function finalText(record, requests, {localArtifacts=true, hostFooter=true,home}={}) {
+  if(record.flow==="unified"&&record.proposal&&!record.projectOperation)return "待确认工作提议\n\n"+JSON.stringify(record.proposal.plan,null,2)+"\n\n实际目录："+record.proposal.canonicalRepo+"\n固定版本："+record.proposal.version+"\n本轮约束："+JSON.stringify(record.proposal.constraints)+"\n确认后剩余请求数："+(record.proposal.budgetAtProposal?.remainingCalls??"不设上限")+"\n冻结阵容："+JSON.stringify(record.models);
+  if(record.deliveryRef && home){try{return resolveDelivery(home,record).map(source=>source.stepId+"\n\n"+finalAnswerText(source.call.text??"")).join("\n\n");}catch(error){return "交付来源尚不能核验："+error.message;}}
   if (record.status !== "completed") return "";
   const text = finalAnswerText(
     requests.find((c) => c.id === record.finalCallId)?.text ?? "",
@@ -104,7 +107,7 @@ export function projectMessage(home, message) {
       return null;
     return {
       ...message,
-      content: [{ type: "text", text: finalText(record, requests) }],
+      content: [{ type: "text", text: finalText(record, requests,{home}) }],
     };
   }
   if (message.role === "custom" && message.customType?.startsWith("cothink-"))
@@ -142,7 +145,7 @@ export function renderTask(home, record, all = false) {
   const requests = readRequests(home, record);
   return (
     safeText(
-      all ? detailsText(record, requests) : finalText(record, requests),
+      all ? detailsText(record, requests) : finalText(record, requests,{home}),
     ) + "\n"
   );
 }

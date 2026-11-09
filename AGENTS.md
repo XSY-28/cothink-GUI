@@ -12,6 +12,10 @@
 
 # CoThink GUI implementation
 
+For the 2026-11-09 project-Team navigation correction, read docs/gui/TEAM_NAVIGATION_REFINEMENT_PLAN.md. The user authorized implementation, then on 2026-11-09 requested resolving remaining GUI failures, completing cross-Team file-search validation, pushing verified source to the private GitHub repository and installing the local App. Its navigation requirements supersede the recent-conversation sidebar and visible model label `team` in the earlier compact UI revision; runtime and persistence contracts remain unchanged.
+
+For the next desktop/unified-conversation iteration, read docs/gui/DESKTOP_UNIFIED_IMPLEMENTATION_PLAN.md. The 2026-11-08 follow-up authorizes implementing that plan and local validation, including an isolated desktop candidate. Paid-model validation, global installation replacement and publication still require separate authorization.
+
 For project-Team GUI work, read docs/gui/TEAM_WORKSPACE_DESIGN.md and docs/gui/TEAM_WORKSPACE_IMPLEMENTATION_PLAN.md. The user approved local implementation and validation of this iteration on 2026-11-07. REDESIGN_PROPOSAL.md / REDESIGN_IMPLEMENTATION_PLAN.md retain the preceding iteration; DESIGN.md / IMPLEMENTATION_PLAN.md / ACCEPTANCE.md retain the first iteration. Current implementation evidence is in VALIDATION.md.
 Keep one Pi model path and the existing agent-sync boundary. The current baseline permits installed agent plugins; preserve parent ownership, resource selection and agent-sync acceptance. No new automatic retries or unrecorded model calls.
 Before Git operations inspect changed files; stage only explicit paths. Never push to the public source repository.
@@ -20,4 +24,8 @@ Keep private runtime data and local evidence out of commits. Do not modify the u
 
 ## 统一维护入口
 
-唯一开发主线为私有仓库 `XSY-28/cothink-gui`，CLI 与 GUI 共用核心和根包版本。公开 `XSY-28/Cothink-release` 仅接收按固定源码版本生成的发行内容，不另行手工维护核心。原 CLI 工作目录保留历史和未提交成果，不写入迁移标记，也不继续作为开发入口。
+唯一开发主线为私有仓库 `XSY-28/cothink-gui-workspace`，CLI 与 GUI 共用核心和根包版本。公开 `XSY-28/Cothink-release` 仅接收按固定源码版本生成的发行内容，不另行手工维护核心。原 CLI 工作目录保留历史和未提交成果，不写入迁移标记，也不继续作为开发入口。
+
+## macOS 安装收尾
+
+测试 App 仅放 `.noindex` 候选目录；正式安装只保留 `/Applications/CoThink.app`。安装后按 bundle ID 核对 Spotlight 与 Launch Services，注销测试副本并实际检查搜索结果，不能只验证复制成功。打包脚本会拒绝可索引的候选输出目录；证据副本保留在隔离目录或归档，不另散放 `.app`。

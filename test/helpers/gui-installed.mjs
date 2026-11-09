@@ -21,6 +21,7 @@ const expectedVersion = process.env.COTHINK_EXPECT_VERSION ??
 assert.equal(pkg.version, expectedVersion);
 assert.equal(pkg.overrides, undefined);
 for (const p of [
+  "project-turn",
   "conversation",
   "final-answer",
   "gui-controller",

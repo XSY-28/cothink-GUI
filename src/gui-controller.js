@@ -1,3 +1,9 @@
+import {contextToolNames,contextDigest,contextSnapshot,contextState,readContextDisk,compactContext,contextOperationView} from './context-management.js';
+import {validateEditorTurnOptions,editorTurnInput} from "./gui-turn-options.js";
+import {resolveBuiltinSkills,validateBuiltinSkills,builtinSkillNames,capabilitySnapshot} from './builtin-skills.js';
+import {freezeAnswerSkills} from './context.js';
+import {taskSkillDirectory} from './skill-resources.js';
+import {resolvePackageResources} from './packages.js';
 import {
   createGuiWorkspace, importGuiWorkspaceProjects, isWorkspaceId, isWorkspaceProject,
   readGuiWorkspaces, updateGuiWorkspace, workspaceError, workspaceForProject,
@@ -15,12 +21,13 @@ import { readSessionTeam, resolveTeamConfig } from "./teams.js";
 import {
   createModelRuntime,
   createRuntime,
+  assertCleanProjectProcess,
   selectedResources,
   secretValues,
 } from "./pi-runtime.js";
-import { runTurn } from "./discussion.js";
+import {runProjectTurn,unifiedProtocol,normalizeConstraints,normalizeRootBudget,freezeReadAuthorization,reserveConfirmation,confirmationState,executeConfirmed,resolveDelivery,rootUsage,assertRootOwner,createRootOwner} from "./project-turn.js";
 import { cothinkExtension } from "./extensions/cothink.js";
-import { readTask, readRequests, taskDisplayStatus } from "./task.js";
+import { createTask,readTask, readRequests, taskDisplayStatus } from "./task.js";
 import {
   acquireSessionWriter,
   sessionWriterBusy,
@@ -28,9 +35,10 @@ import {
   redact,
   releaseNotesSeen,
   markReleaseNotesSeen,
+  writePrivateJson,
 } from "./storage.js";
 import { validateModelThinking } from "./thinking.js";
-import { isGenerationCommand, parseTurnInput, singleLineCommand } from "./setup.js";
+import { parseTurnInput, singleLineCommand } from "./setup.js";
 import { releaseNotes } from "./presentation.js";
 import {
   appendConversationEntry,
@@ -54,6 +62,7 @@ import {
   saveGuiWork,
   saveGuiProvider,
   validateGuiThinking,
+  saveGuiBuiltinSkills,
 } from "./gui-settings.js";
 import {
   inspectGuiProject,
@@ -64,7 +73,8 @@ import {
 } from "./gui-work.js";
 
 /** Local host adapter. Pi sessions and task records remain the sources of conversation and execution facts. */
-export async function createGuiController({ home, cwd = process.cwd(), updateService }) {
+export async function createGuiController({ home, cwd = process.cwd(), suggestedProject = cwd, installation = "browser", updateService }) {
+  assertCleanProjectProcess({unified:true});
   const directory = join(home, "pi/sessions/main");
   privateDirectory(directory);
   const holders = new Map(),
@@ -72,6 +82,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     live = new Map();
   let active = null,
     closed = false,
+    shuttingDown = false, drainPromise, shutdownError = null,
     management = false;
   // Serialize only selection acceptance and metadata writes, never task execution.
   let selectionWrite = Promise.resolve();
@@ -136,8 +147,8 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
   }
   const updates=updateService ?? createUpdateService({home});
   const unsubscribeUpdates=updates.subscribe(()=>{if(!closed) emit();});
-  const updateSnapshot=()=>{const s=updates.snapshot();return {...s,message:formatUpdateStatus(s),instructions:updateInstructions(s)};};
-  const checkForUpdates=()=>updates.check();
+  const updateSnapshot=()=>{if(installation === "desktop") return {channel:"desktop-local",status:"local",automatic:false,message:"桌面本地候选；更新渠道尚未启用。",instructions:[],currentVersion:releaseNotes().version};const s=updates.snapshot();return {...s,message:formatUpdateStatus(s),instructions:updateInstructions(s)};};
+  const checkForUpdates=()=>installation === "desktop" ? Promise.resolve(updateSnapshot()) : updates.check();
   // Disposable summaries: stat every dependency, parse only changed durable bytes.
   // No request bodies, reviewer text or second persisted conversation store.
   const taskCache = new Map(), sessionCache = new Map(), fileListCache = new Map();
@@ -145,7 +156,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     const record=rawTask(id).record;
     const key=JSON.stringify(record.work ?? null);
     const previous=fileListCache.get(id);
-    if(previous?.key===key)return previous.value;
+    if(!record.deliveryRef&&previous?.key===key)return previous.value;
     const value=await guiFiles(home,record);
     fileListCache.set(id,{key,value});
     return value;
@@ -165,17 +176,17 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
       const stamp = signature(path);
       const dependencies = ids => ids.map(r => [r, signature(join(home, "requests", r + ".json")),
         signature(join(home, "requests", r + ".events.jsonl"))]);
-      if (!cached || cached.stamp !== stamp || JSON.stringify(dependencies(cached.requestIds)) !== cached.dependencies) {
+      if (!cached || cached.value?.flow==="unified" || cached.stamp !== stamp || JSON.stringify(dependencies(cached.requestIds)) !== cached.dependencies) {
         cached = {stamp, requestIds: [], dependencies: "[]"};
         try {
           const record = readTask(home, id);
           if (!Array.isArray(record.requestIds) || record.requestIds.some(r=>typeof r !== "string" || !/^[0-9a-f-]{36}$/.test(r)) || typeof record.input !== "string" || typeof record.createdAt !== "string") throw Error("task summary");
           cached.requestIds = record.requestIds;
           cached.value = {id: record.id, sessionId: record.sessionId, submissionId: record.submissionId,
-            createdAt: record.createdAt, input: record.input, status: taskDisplayStatus(record),
-            singleModel: record.singleModel, hasWork: !!record.work, finalText: ""};
+            createdAt: record.createdAt, cancelSettledAt: record.cancelSettledAt ?? null, input: record.input, status: taskDisplayStatus(record),
+            origin:record.origin,sourceLeaf:record.sourceLeaf,sourceSnapshot:record.sourceSnapshot,contextResult:record.contextResult,singleModel: record.singleModel, flow:record.flow, proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,hasWork: !!record.work||!!record.deliveryRef||!!record.projectOperation?.childTaskIds?.length, finalText: ""};
           try {
-            cached.value.finalText = finalGuiText(record, readRequests(home, record));
+            cached.value.finalText = finalGuiText(record, readRequests(home, record),home);
             cached.value.resultRevision = guiResultRevision(record,cached.value.finalText);
             cached.value.endedAt = record.endedAt ?? null;
           } catch { cached.value.historyError = "任务请求记录损坏、缺失或不可用；原文件保留。"; }
@@ -298,7 +309,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
         readConversationMetadata(disk);
         readSessionMode(disk); readSessionTeam(disk.getBranch());
         // Association damage blocks writes without hiding otherwise readable turns.
-        if (workspaceFacts(disk).associationError) return disk;
+        if (workspaceFacts(disk).associationError || holders.get(id).selectionError || holders.get(id).runtime?.selectionError) return disk;
       }
       return manager;
     }
@@ -312,6 +323,10 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     // projection before acquiring a writer so damaged facts cannot be skipped.
     const readable = await session(id);
     if (readable.selectionError) throw Error(readable.selectionError);
+    for(const r of taskRecords().filter(r=>r.sessionId===id&&r.origin==='context.organize'&&r.id!==active?.taskId&&(r.status==='outcome_unknown'&&!r.contextResult||r.contextResult?.uncertain))){
+      const recovered=await readContextOperation(r.id);
+      if(!recovered.applied)throw sessionStateError('CONTEXT_STORAGE','旧整理结果未确认；只读查询原操作，禁止继续生成。');
+    }
     if (readable.workspaceError) throw workspaceError("WORKSPACE_UNAVAILABLE", readable.workspaceError);
     if (mutating && readable.workspaceArchived)
       throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。");
@@ -345,7 +360,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     holder.opening = (async () => {
       const manager = holder.sessionManager,
         project = readSessionProject(manager),
-        host = { allowWork: project !== null };
+        host = { allowWork: project !== null,flow:"unified" };
       holder.writer.release();
       holder.writer = null;
       try {
@@ -354,6 +369,8 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
           cwd: conversationCwd(manager, home),
           sessionManager: manager,
           modelRef: effective.main,
+          projectManaged:true,
+          contextAccess:true,
           uiContext:extensionUI(id),
           extensionFactories: [
             { name: "cothink", factory: cothinkExtension(host) },
@@ -364,9 +381,9 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
               new URL("../prompts/main.md", import.meta.url),
               "utf8",
             ),
-            ...(project === null ? { noContextFiles: true } : {}),
+            noContextFiles:true,
           },
-          ...(project === null ? { activeToolNames: [] } : {}),
+
         });
         rt.hostContext = (task) => {
           host.task = task;
@@ -444,13 +461,17 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
         const current = active?.taskId === taskId ? live.get(taskId) : null,
           record = current?.record ?? records.find((t) => t.id === taskId);
         if (!record || record.historyError) throw Error("分支引用的任务记录缺失或损坏。");
-        const finalText = current ? finalGuiText(record,current.requests()) : record.finalText;
+        const finalText = current ? finalGuiText(record,current.requests(),home) : record.finalText;
         return {
           taskId: record.id,
+          flow:record.flow,proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,
+          createdAt: record.createdAt ?? null,
+          endedAt: record.endedAt ?? null,
+          cancelSettledAt: record.cancelSettledAt ?? null,
           submissionId: record.submissionId ?? null,
           input: record.input,
           status: taskDisplayStatus(record),
-          hasWork: current ? !!current.record.work : !!record.hasWork,
+          hasWork: current ? !!current.record.work||!!current.record.deliveryRef : !!record.hasWork,
           mode: record.singleModel ? "one" : "cothink",
           finalText,
           resultRevision: current ? guiResultRevision(record,finalText) : record.resultRevision,
@@ -490,6 +511,8 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
         ...membership,
         mode: readSessionMode(manager) ? "one" : "cothink",
         team: publicTeam(readSessionTeam(manager.getBranch())),
+        context:contextState(manager),contextOrganizing:active?.origin==='context.organize'&&active.sessionId===id,
+        contextOperationIds:records.filter(r=>r.origin==='context.organize'&&r.sessionId===id&&branch.some(e=>e.id===r.sourceLeaf)).map(r=>r.id),
         draft: meta.draft, editor: meta.editor, draftRevision: meta.draftRevision, branchAnchor: meta.branchAnchor,
         ...reading, viewRevision: navigation.navigation?.viewRevision ?? 0,
         forkOf: facts.forkOf,
@@ -534,7 +557,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     const byTask = new Map(index.records.map(r => [r.id,r]));
     if (active && live.has(active.taskId)) {
       const task = live.get(active.taskId), record = task.record;
-      const finalText = finalGuiText(record,task.requests());
+      const finalText = finalGuiText(record,task.requests(),home);
       byTask.set(record.id,{...record,status:taskDisplayStatus(record),finalText,
         resultRevision:guiResultRevision(record,finalText)});
     }
@@ -598,11 +621,11 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
         const sources = [{text:title,taskId:null,field:"title"}, ...(!error ? turns.flatMap(t=>[
           {text:t.input,taskId:t.id,field:"input"}, {text:t.finalText,taskId:t.id,field:"finalText"}]) : [])];
         let match = sources.find(m=>m.text?.toLocaleLowerCase().includes(needle));
-        if(!match&&!error) {
+        if((!match || match.field==="finalText" && turns.find(t=>t.id===match.taskId)?.proposalRef)&&!error) {
           for(const turn of turns) {
             try {
               const record=rawTask(turn.id).record;
-              if(!record.work)continue;
+              if(!record.work&&!record.deliveryRef&&!record.projectOperation?.childTaskIds?.length)continue;
               const list=await files(turn.id), item=list.items.find(f=>f.name.toLocaleLowerCase().includes(needle));
               if(item){match={text:item.name,taskId:turn.id,field:"file",fileRef:item.ref};break;}
             } catch(e) {errors.push({taskId:turn.id,error:e.message});}
@@ -668,9 +691,13 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     })));
     return safe({
       version: notes.version,
+      protocol:{unified:unifiedProtocol,capabilities:1},
+      builtinSkills:{disabled:validateBuiltinSkills(config),names:builtinSkillNames},
       extensionUI:extensionSnapshot(),
       configured: config?.formatVersion === 3,
-      suggestedProject: cwd,
+      suggestedProject,
+      installation,
+      shutdown: shutdownState(),
       teams: (config?.teams ?? []).map(publicTeam),
       currentTeamId: config?.lastUsedTeamId ?? null,
       providers: catalog.getProviders().map((p) => ({
@@ -706,7 +733,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
       workspaceErrors: page.workspaceErrors,
       active: active
         ? {
-            taskId: active.taskId,
+            origin:active.origin??null,taskId: active.taskId,
             sessionId: active.sessionId,
             status: live.has(active.taskId) ? taskDisplayStatus(live.get(active.taskId).record) : "preparing",
           }
@@ -717,7 +744,79 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
       historyErrors,
     });
   }
-  async function submit(args) {
+  async function getSessionCapabilities(sessionId) {
+    const manager=await reader(sessionId),config=loadConfig(home),project=readSessionProject(manager);
+    const running=active?.sessionId===sessionId?live.get(active.taskId):null;
+    if(running){const runtime=[...running.runtimes].find(r=>r.sessionManager.getSessionId()===sessionId);
+      const coordinator=runtime?runtime.capabilities():capabilitySnapshot({skills:taskSkillDirectory(running),phase:running.record.phase,hasProject:!!project,readOnly:true,executionConfigured:!!running.record.frozenConfig?.work?.execution});
+      if(running.record.projectOperation)return {...coordinator,scope:'coordinator',executors:assertRootOwner(running.rootOwner,running.record.id).executorCapabilities()};
+      return coordinator;}
+    const builtins=resolveBuiltinSkills(config),diagnostics=[...builtins.diagnostics];let skills=[];
+    try {const cwd=conversationCwd(manager,home),manual=selectedResources(config??{},cwd),packages=await resolvePackageResources({home,cwd,manual:{skills:manual.additionalSkillPaths,prompts:manual.additionalPromptTemplatePaths,themes:manual.additionalThemePaths}});
+      skills=freezeAnswerSkills({cwd,home,paths:[...builtins.skills.map(s=>s.path),...manual.additionalSkillPaths,...packages.skills],project:true,includeRestricted:true}).map(s=>({...s,sourceKind:builtins.skills.some(b=>b.path===s.path)?'builtin':'selected'}));
+    }catch {diagnostics.push({code:'SKILL_DISCOVERY',message:'选定技能存在缺失、同名冲突或包状态错误；新任务会在请求前拒绝，请核对资源选择。'});}
+    return capabilitySnapshot({skills,tools:[...contextToolNames,'read_skill','get_capabilities','request_review','start_work',...(project?['read_project_context']:[])],hasProject:!!project,executionConfigured:!!config?.work?.execution,diagnostics,context:contextState(manager)});
+  }
+  async function readContextOperation(operationId) {
+    const task=rawTask(operationId),record=task.record;
+    if(record.origin!=='context.organize')throw sessionStateError('CONTEXT_IDENTITY','此 ID 不属于上下文整理。');
+    const requests=task.requests();
+    const file=record.stages.find(stage=>stage.sessionId===record.sessionId)?.sessionFile;
+    try {
+      if(!file||join(directory,basename(file))!==file)throw Error('整理来源文件不可核对。');
+      return contextOperationView(record,requests,readContextDisk(file,record.sessionId));
+    }catch(error){return {operationId,taskId:operationId,sessionId:record.sessionId,status:['running','cancelled','failed'].includes(record.status)?taskDisplayStatus(record):'outcome_unknown',applied:false,error:error.message,requests:requests.map(r=>({id:r.id,phase:r.phase,status:r.status,sent:r.sent,usage:r.usage??null})),budget:record.budget};}
+  }
+  async function organizeContext(args) {
+    if(!args||Object.keys(args).some(k=>!['sessionId','operationId','sourceLeaf','budget','protocolVersion'].includes(k))||args.protocolVersion!==unifiedProtocol||!isWorkspaceId(args.sessionId)||!isWorkspaceId(args.operationId)||typeof args.sourceLeaf!=='string')throw sessionStateError('CONTEXT_IDENTITY','整理身份或协议无效。');
+    const {sessionId,operationId,sourceLeaf}=args,budget=normalizeRootBudget(args.budget);
+    const inputDigest=contextDigest({origin:'context.organize',sessionId,sourceLeaf,budget});
+    if(existsSync(join(home,'tasks',operationId+'.json'))){const prior=readTask(home,operationId);if(prior.origin!=='context.organize'||prior.sessionId!==sessionId||prior.sourceLeaf!==sourceLeaf||contextDigest(prior.budget)!==contextDigest(budget)||prior.inputDigest!==inputDigest)throw sessionStateError('CONTEXT_IDENTITY','同一整理 ID 的身份或预算不同。');return readContextOperation(operationId);}
+    if(active?.taskId===operationId){if(active.inputDigest!==inputDigest)throw sessionStateError('CONTEXT_IDENTITY','整理身份不一致。');return active.ready;}
+    if(active||management||extensionCommand)throw sessionStateError('SESSION_BUSY','当前任务尚未结束；不会排队整理。');
+    let resolveReady,rejectReady;const ready=new Promise((a,b)=>{resolveReady=a;rejectReady=b;});
+    const state={origin:'context.organize',taskId:operationId,sessionId,inputDigest,ready,abort:new AbortController()};active=state;
+    state.promise=(async()=>{
+      let task,rt,holder,abort;
+      try {
+        const prep=await writeSelection(async()=>{
+          assertSessionUnarchived(sessionId);holder=await owner(sessionId,{mutating:true});const manager=holder.sessionManager;
+          const membership=await assertWorkspaceWritable(manager);
+          if(manager.getLeafId()!==sourceLeaf)throw sessionStateError('CONTEXT_SOURCE_CHANGED','整理前分支已变化，请刷新；草稿保留。');
+          const disk=readContextDisk(manager.getSessionFile(),sessionId);
+          if(contextDigest(disk.getEntries())!==contextDigest(manager.getEntries()))throw sessionStateError('CONTEXT_STORAGE','内存与磁盘历史不一致。');
+          const config=loadConfig(home);if(config?.formatVersion!==3||!readSessionTeam(manager.getBranch()))throw Error('请先绑定阵容。');
+          const effective=resolveConversationConfig(config,manager).config,thinking=readConversationMetadata(manager).thinking;
+          if(thinking!==undefined)effective.main.thinkingLevel=thinking;
+          return {effective,workspace:{id:membership.workspaceId??null,project:readSessionProject(manager)},before:structuredClone(manager.getEntries()),opening:runtime(sessionId,holder,effective)};
+        });
+        rt=await prep.opening;
+        if(state.abort.signal.aborted||closed||shuttingDown)throw Error('整理已取消，未发送。');
+        rt.assertOwned();if(!rt.session.isIdle)throw sessionStateError('SESSION_BUSY','运行端尚未空闲，不能整理。');
+        const manager=rt.sessionManager,after=manager.getEntries();
+        // SDK initialization may restore only its missing model/thinking metadata.
+        if(contextDigest(after.slice(0,prep.before.length))!==contextDigest(prep.before)||after.slice(prep.before.length).some(e=>!['model_change','thinking_level_change'].includes(e.type)))throw sessionStateError('CONTEXT_SOURCE_CHANGED','运行端准备期间来源变化。');
+        await rt.selectModel(prep.effective.main);
+        if(state.abort.signal.aborted||closed||shuttingDown)throw Error('整理已取消，未发送。');
+        rt.assertOwned();
+        if(contextDigest(manager.getEntries().slice(0,prep.before.length))!==contextDigest(prep.before)||manager.getEntries().slice(prep.before.length).some(e=>e.type==='model_change'&&(e.provider!==prep.effective.main.provider||e.modelId!==prep.effective.main.modelId)||e.type==='thinking_level_change'&&e.thinkingLevel!==rt.session.thinkingLevel||!['model_change','thinking_level_change'].includes(e.type)))throw sessionStateError('CONTEXT_SOURCE_CHANGED','准备期间出现非宿主选择变更。');
+        if(contextDigest(readContextDisk(manager.getSessionFile(),sessionId).getEntries())!==contextDigest(manager.getEntries()))throw sessionStateError('CONTEXT_STORAGE','准备后的历史未完整落盘。');
+        task=createTask({home,secrets:secretValues(home),id:operationId,input:'整理上下文',origin:'context.organize',sourceLeaf,inputDigest,sourceSnapshot:contextSnapshot(manager),sessionId,branchId:manager.getLeafId(),models:{main:prep.effective.main,secondary:[]},team:prep.effective.team,flow:'unified',constraints:normalizeConstraints({readOnly:true,allowedSubtasks:[]}),budget,frozenConfig:prep.effective,workspace:prep.workspace});
+        createRootOwner(task);live.set(operationId,task);
+        const quarantine=error=>{holder.selectionError=rt.selectionError='上下文写入未确认，运行端已隔离；请查询原操作：'+error.message;};
+        abort=()=>{void task.cancel();};state.abort.signal.addEventListener('abort',abort,{once:true});
+        const running=compactContext({task,runtime:rt,quarantine,onChange:emit});
+        resolveReady({operationId,taskId:operationId,sessionId,status:'running'});emit();
+        await running;if(task.cancelPromise)await task.cancelPromise;
+      }catch(error){if(task&&task.record.status==='running')task.finish('failed',error.message);rejectReady(error);}
+      finally{state.abort.signal.removeEventListener('abort',abort);if(active===state)active=null;emit();}
+    })();
+    return ready;
+  }
+  async function submit(args,confirmation) {
+    if(!confirmation && (args.protocolVersion!==unifiedProtocol||Object.keys(args).some(k=>!["sessionId","input","submissionId","protocolVersion","constraints","readAuthorization","budget","editorEditId"].includes(k))))throw Error("统一会话协议不匹配，请重新打开新版界面。");
+    const constraints=normalizeConstraints(confirmation?.source.proposal.constraints??args.constraints);
+    const budget=normalizeRootBudget(confirmation?.reservation.budgetSource.remaining??args.budget);
     const { sessionId, input, submissionId } = args;
     if (
       typeof submissionId !== "string" ||
@@ -740,9 +839,9 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     if (
       typeof input !== "string" ||
       !input.trim() ||
-      parseTurnInput(input).local
+      parseTurnInput(input).local || /^\s*\/(?:one|cothink|project)(?:\s|$)/.test(input)
     )
-      throw Error("请输入问题；模式命令请使用模式控件。");
+      throw Error("请输入问题；统一会话已移除旧模式命令。");
     assertSessionUnarchived(sessionId);
     void checkForUpdates();
     let resolveReady, rejectReady;
@@ -751,7 +850,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
       rejectReady = no;
     });
     const state = {
-      taskId: randomUUID(),
+      taskId: confirmation?.reservation.taskId??randomUUID(),
       sessionId,
       submissionId,
       ready,
@@ -764,7 +863,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
           assertSessionUnarchived(sessionId);
           const holder = await owner(sessionId,{mutating:true}),
             manager = holder.sessionManager;
-          await assertWorkspaceWritable(manager,{forExecution:true});
+          const membership=await assertWorkspaceWritable(manager,{forExecution:true});
           if (holder.runtime?.selectionError || holder.selectionError)
             throw Error(
               holder.runtime?.selectionError ?? holder.selectionError,
@@ -773,15 +872,25 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
           if (config?.formatVersion !== 3) throw Error("请先配置具名 Team。");
           if (!readSessionTeam(manager.getBranch()))
             throw Error("此历史会话尚未绑定 Team，请明确选择。");
+          if(!confirmation && args.editorEditId!==undefined){
+            const editor=readConversationMetadata(manager).editor;
+            if(editor.editId!==args.editorEditId||editor.text!==input)throw sessionStateError('DRAFT_CONFLICT','提交的完整草稿已变化，请重新核对；未发送。');
+            const expected=editorTurnInput(editor.turnOptions,{project:readSessionProject(manager),workspaceId:membership.workspaceId??null});
+            if(JSON.stringify(expected.constraints)!==JSON.stringify(constraints)||JSON.stringify(normalizeRootBudget(expected.budget))!==JSON.stringify(budget)||JSON.stringify(expected.readAuthorization??null)!==JSON.stringify(args.readAuthorization??null))throw sessionStateError('DRAFT_CONFLICT','提交选项与已保存草稿不一致；未发送。');
+          }
           const snapshot = {
-            config: resolveConversationConfig(config, manager).config,
+            config: confirmation?.source.frozenConfig??resolveConversationConfig(config, manager).config,
+            workspace:{id:membership.workspaceId??null,project:readSessionProject(manager)},
+            contextTaskIds:conversationTaskIds(manager),
             singleModel: readSessionMode(manager),
             cwd: conversationCwd(manager, home),
             allowWork: readSessionProject(manager) !== null,
           };
           const thinking = readConversationMetadata(manager).thinking;
-          if (thinking !== undefined)
+          if (!confirmation && thinking !== undefined)
             snapshot.config.main.thinkingLevel = thinking;
+          snapshot.readAuthorization=confirmation?null:await freezeReadAuthorization({home,workspace:snapshot.workspace,sessionId,submissionId,editorEditId:args.editorEditId,input:args.readAuthorization});
+          if(!manager.getBranch().some(e=>e.type==="custom"&&e.customType==="cothink-flow"&&e.data?.flow==="unified"))appendConversationEntry(holder,"cothink-flow",{flow:"unified",version:unifiedProtocol});
           // Publish the initialization promise before allowing later selection writes.
           return {
             snapshot,
@@ -790,23 +899,23 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
         });
         const { snapshot } = accepted,
           rt = await accepted.opening;
-        if (closed) throw Error("宿主已关闭。");
+        if (closed || shuttingDown || state.abort.signal.aborted) throw Error("宿主正在关闭，任务未发送。");
         if (rt.selectionError) throw Error(rt.selectionError);
-        const command = singleLineCommand(input);
-        if (command && command[1] !== "one" && !isGenerationCommand(command[1], rt))
-          throw Object.assign(Error("本地或未知命令未发送给模型，请从插件命令列表确认。"), {code: "EXTENSION_COMMAND"});
-        await runTurn({
+        // runTurn validates commands against the selected, frozen unified skill catalog.
+        // The legacy SDK loader does not include the host's enabled builtin skills.
+        await runProjectTurn({
           home,
           cwd: snapshot.cwd,
           input,
-          workRequest: args.workRequest,
-          config: snapshot.config,
-          singleModel: snapshot.singleModel,
+          frozenConfig: snapshot.config,
+          frozenConstraints:constraints,budget,workspace:snapshot.workspace,readAuthorization:snapshot.readAuthorization,contextTaskIds:snapshot.contextTaskIds,
+          ...(confirmation?{frozenSkillSource:confirmation.source,frozenPackageSnapshot:confirmation.source.packageSnapshot,confirmedOperation:{...confirmation,execute:task=>executeConfirmed(task,confirmation.source,confirmation.reservation)}}:{}),
           mainRuntime: rt,
           allowWork: snapshot.allowWork,
-          id: state.taskId,
-          submissionId,
+          taskId: state.taskId,
+          submissionId,editorEditId:args.editorEditId,
           signal: state.abort.signal,
+          onTaskCreated:task=>{if(confirmation){const sourceTask=live.get(confirmation.source.id);const source=sourceTask?.record??confirmation.source;source.confirmationIntent.status="consumed";source.confirmationIntent.consumedByTaskId=task.record.id;if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",source.id+".json"),source,rt.assertOwned);taskCache.delete(source.id);}},
           onProgress: (event) => {
             live.set(event.task.record.id, event.task);
             resolveReady({ taskId: event.task.record.id, sessionId });
@@ -825,6 +934,22 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     state.timer = setInterval(emit, 250);
     state.timer.unref();
     return ready;
+  }
+  async function confirmWork(args) {
+    if(!args||Object.keys(args).some(k=>!["sessionId","submissionId","proposalRef","protocolVersion"].includes(k))||args.protocolVersion!==unifiedProtocol||typeof args.submissionId!=="string"||!args.submissionId||args.submissionId.length>200)throw Error("确认参数或协议无效。");
+    const prepared=await writeSelection(async()=>{
+      const holder=await owner(args.sessionId,{mutating:true});
+      const membership=await assertWorkspaceWritable(holder.sessionManager,{forExecution:true});
+      const id=args.proposalRef?.sourceTaskId;
+      if(!conversationTaskIds(holder.sessionManager).includes(id))throw Error("提议不属于当前可见分支。");
+      const sourceTask=live.get(id),source=sourceTask?.record??readTask(home,id);
+      const save=()=>{holder.assertOwned();if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",id+".json"),source,holder.assertOwned);taskCache.delete(id);};
+      const reservation=await reserveConfirmation({home,source,proposalRef:args.proposalRef,sessionId:args.sessionId,workspaceId:membership.workspaceId??null,submissionId:args.submissionId,save});
+      const found=await confirmationState({home,source,reservation});
+      return {source,reservation,found};
+    });
+    if(prepared.found.task)return {taskId:prepared.found.task.id,sessionId:args.sessionId};
+    return submit({sessionId:args.sessionId,input:prepared.source.input,submissionId:prepared.reservation.submissionId},prepared);
   }
   async function inspectWorkspaceProject(path) {
     const project = await inspectGuiProject(home,path,loadConfig(home)?.work);
@@ -890,6 +1015,10 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
   }
   async function action(name, args = {}) {
     if (closed) throw Error("宿主已关闭。");
+    if (shuttingDown && !["session.draft", "session.view", "task.cancel"].includes(name))
+      throw Object.assign(Error("宿主正在退出；新操作已冻结，历史和草稿保存仍可用。"),{code:"HOST_SHUTTING_DOWN"});
+    if(active?.origin==='context.organize'&&active.sessionId===(args.sessionId??args.id)&&name.startsWith('session.')&&!['session.view','session.pin'].includes(name))throw sessionStateError('CONTEXT_BUSY','正在整理此对话；本机编辑稿保留，持久修改暂缓。');
+    if(name==='context.organize')return organizeContext(args);
     if(name==="extension.respond") {
       const prompt=extensionPrompts.get(args.promptId);
       if(!prompt||prompt.sessionId!==args.sessionId)throw Error("插件提示已结束或不属于此会话。");
@@ -907,7 +1036,9 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
         // Serialize holder acquisition with close/archive/fork. Do not hold the
         // selection queue while a plugin waits for the user's response.
         const rt = await writeSelection(() => extensionRuntime(sessionId));
+        if(shuttingDown || command.abort.signal.aborted) throw Error("宿主正在退出；插件操作未执行。");
         await rt.bindUI();
+        if(shuttingDown || command.abort.signal.aborted) throw Error("宿主正在退出；插件操作未执行。");
         if (name === "extension.commands") {
           return rt.commands().filter(c => !c.source?.includes?.("inline:cothink"))
             .map(c => ({name: c.name, description: c.description ?? ""}));
@@ -932,6 +1063,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
       }
     }
     if (name === "updates.check" || name === "updates.configure") {
+      if (installation === "desktop") return updateSnapshot();
       const allowed=name === "updates.check" ? ["manual"] : ["automatic"];
       if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key=>!allowed.includes(key))) throw Error("更新操作参数无效。");
       if (name === "updates.configure") {
@@ -952,11 +1084,14 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
       return { version, unread: false };
     }
     if (name === "task.submit") return submit(args);
+    if (name === "task.confirmWork") return confirmWork(args);
+    if (name === "session.mode") throw Error("统一会话已移除模式切换；旧 CLI 会话保留原模式。");
     if (name === "task.cancel") {
       if (active?.taskId === args.taskId) {
         cancelExtensionPrompts(active.sessionId);
         active.abort.abort();
         await live.get(args.taskId)?.cancel();
+        if(active?.origin==='context.organize')await active.promise;
       } else rawTask(args.taskId);
       emit();
       return { taskId: args.taskId };
@@ -1199,7 +1334,14 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
             if ((args.branchAnchor === null ? branch.length !== 0 : !branch.some(e=>e.id===args.branchAnchor)) ||
                 meta.draftRevision !== args.expectedDraftRevision)
               throw sessionStateError("DRAFT_CONFLICT","草稿或所见分支已变化；本机草稿保留，请读取保存稿后明确选择。");
+            if(meta.editor.turnOptions!==undefined && !Object.hasOwn(args,'turnOptions'))throw sessionStateError('DRAFT_CONFLICT','完整草稿必须保留本条约束与预算选项。');
+            const turnOptions=validateEditorTurnOptions(args.turnOptions);
+            if(turnOptions?.readAllowed){
+              const membership=await assertWorkspaceWritable(manager);
+              if(turnOptions.readProject!==readSessionProject(manager)||turnOptions.readWorkspaceId!==(membership.workspaceId??null))throw sessionStateError('DRAFT_CONFLICT','读取选择属于其他目录或 Team，请重新确认。');
+            }
             appendConversationEntry(target,"cothink-draft",{
+              ...(Object.hasOwn(args,'turnOptions')?{turnOptions}:{}),
               text:args.text,workRequest:args.workRequest,selectionId:args.selectionId,editId:args.editId,
             });
           }
@@ -1241,7 +1383,7 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     }
 
     if (
-      ["team.save", "team.remove", "provider.save", "settings.work"].includes(
+      ["team.save", "team.remove", "provider.save", "settings.work", "settings.builtinSkills"].includes(
         name,
       )
     ) {
@@ -1277,6 +1419,10 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
           }
         }
         if (name === "settings.work") result = saveGuiWork(home, args.work);
+        if (name === "settings.builtinSkills") {
+          if(Object.keys(args).some(k=>k!=='builtinSkills'))throw Error('内置技能设置参数无效。');
+          result=saveGuiBuiltinSkills(home,args.builtinSkills);
+        }
         emit();
         return result;
       } finally {
@@ -1285,21 +1431,42 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
     }
     throw Error("未知 action。");
   }
+  function shutdownState() {
+    const taskRefs = [...live.values()].filter(task => {
+      const status=taskDisplayStatus(task.record);
+      return task.recovery || ["running","preparing","cancelling","stop_unknown"].includes(status);
+    }).map(task=>task.record.id);
+    if(active && !taskRefs.includes(active.taskId)) taskRefs.push(active.taskId);
+    return {requested:shuttingDown, settled:shuttingDown && !drainPromise && !shutdownError && !management && !extensionCommand && !taskRefs.length,
+      reason:shutdownError || (taskRefs.length ? "任务停止尚未确认，请核对已保存状态。" : management ? "设置仍在保存。" : null), taskRefs};
+  }
+  function beginShutdown() {
+    shuttingDown = true;
+    if (drainPromise) return drainPromise;
+    shutdownError = null;
+    const state=active, command=extensionCommand;
+    state?.abort.abort(); command?.abort.abort(); cancelExtensionPrompts();
+    drainPromise=(async()=>{
+      try {
+        // Stop owned executions before releasing their writers or HTTP observers.
+        await live.get(state?.taskId)?.cancel();
+        await state?.promise;
+        try { await command?.finished; } catch { /* Its original error remains in task/runtime state. */ }
+        await selectionWrite;
+      } catch(error) { shutdownError=safe(error.message); }
+    })().finally(()=>{drainPromise=null;emit();});
+    emit();
+    return drainPromise.then(shutdownState);
+  }
   async function close() {
     if (closed) return;
+    const state=await beginShutdown();
+    if (!state.settled) throw Object.assign(Error(state.reason || "宿主停止尚未确认。"),{code:"SHUTDOWN_UNSETTLED"});
+    // A failed dispose keeps the remaining holders and read API available.
+    try { for (const id of [...holders.keys()]) await releaseHolder(id); }
+    catch(error) {shutdownError=safe(error.message);emit();throw error;}
     closed = true;
-    const command=extensionCommand;command?.abort.abort();cancelExtensionPrompts();
-    try{await command?.finished;}catch{}
-    unsubscribeUpdates();
-    updates.close();
-    if (active) {
-      const state = active;
-      state.abort.abort();
-      await live.get(state.taskId)?.cancel();
-      await state.promise;
-    }
-    for (const id of [...holders.keys()]) await releaseHolder(id);
-    listeners.clear();
+    unsubscribeUpdates(); updates.close(); listeners.clear();
   }
   const wrap =
     (fn) =>
@@ -1318,7 +1485,10 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
       }
     };
   return {
+    organizeContext:wrap(organizeContext),
+    readContextOperation:wrap(readContextOperation),
     bootstrap: wrap(bootstrap),
+    getSessionCapabilities:wrap(getSessionCapabilities),
     checkForUpdates,
     session: wrap(session),
     sessions: wrap(sessions),
@@ -1340,7 +1510,20 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
         }
       });
       const p = projectGuiTask(t.record, t.requests(), entries);
-      if (active?.taskId === id && live.has(id)) p.usage = t.usage();
+      p.finalText=finalGuiText(t.record,t.requests(),home);p.proposal=t.record.proposal;p.proposalRef=t.record.proposalRef;p.flow=t.record.flow;
+      if(t.record.flow==='unified'){
+        const delivered=t.record.deliveryRef?resolveDelivery(home,t.record):[];
+        const ids=[...new Set([...(t.record.projectOperation?.childTaskIds??[]),...delivered.map(x=>x.record.id)])];
+        p.executionTasks=ids.map(childId=>{
+          const child=readTask(home,childId),inherited=delivered.some(x=>x.record.id===childId&&x.relation==='inherited');
+          if(!inherited&&(child.rootTaskId!==t.record.id||child.project?.commandId!==t.record.projectOperation.commandId))throw Error('执行来源归属不符');
+          const childEntries=[...new Set(child.stages.map(s=>s.sessionFile).filter(Boolean))].flatMap(path=>{try{return readFileSync(path,'utf8').split('\n').filter(Boolean).map(JSON.parse);}catch{return [];}});
+          return {...projectGuiTask(child,readRequests(home,child),childEntries),relation:inherited?'inherited':'owned',rootTaskId:child.rootTaskId,stepId:child.project.stepId};
+        });
+      }
+
+      if(t.record.flow==="unified")p.usage=rootUsage(home,t.record);
+      if (t.record.flow!=="unified" && active?.taskId === id && live.has(id)) p.usage = t.usage();
       return p;
     }),
     action: wrap(action),
@@ -1364,6 +1547,8 @@ export async function createGuiController({ home, cwd = process.cwd(), updateSer
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    beginShutdown: wrap(beginShutdown),
+    shutdownState,
     close,
   };
 }

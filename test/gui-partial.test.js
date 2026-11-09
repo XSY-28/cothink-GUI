@@ -39,13 +39,13 @@ for (const [phase, index, model, label] of [["draft", 1, "main", "主答初稿"]
   for (const cap of [undefined, 77]) {
     test(`HTTP ${phase} length retains text, identity and cap across reopen without replay (cap=${cap})`, async (t) => {
       const partial = "已收到的片段 😄\n".repeat(600) + "PARTIAL_END";
-      const f = await fixture(t, (_, n) => n === index ? { text: partial, finish: "length", noUsage: true } : { text: `COMPLETE_${n}` });
+      const f = await fixture(t, (_, n) => n === index ? { text: partial, finish: "length", noUsage: true } : n===1 ? {toolCalls:[{name:"request_review",args:{reason:"test partial stages",draft:"COMPLETE_1"}}]} : { text: `COMPLETE_${n}` });
       const models = structuredClone(f.models);
       if (cap !== undefined) for (const ref of [models.main, ...models.secondary]) ref.maxOutputTokens = cap;
       saveConfig(f.home, createTeamConfig({ formatVersion: 2, ...models }, "Partial fixture", "7c8094cd-3476-4bfa-8f53-055d87972896"));
       let h = await host(t, f);
       const s = await h.action("session.create", { project: null });
-      const args = { sessionId: s.id, input: "长回答", submissionId: `length-${phase}` };
+      const args = { sessionId: s.id, input: "长回答", protocolVersion:1, submissionId: `length-${phase}` };
       const accepted = await h.action("task.submit", args);
       const task = await settle(h, accepted.taskId);
       assert.equal(task.status, "partial");
@@ -91,7 +91,7 @@ test("HTTP lost provider response remains unknown after reopen and duplicate con
   saveConfig(f.home, createTeamConfig({ formatVersion: 2, ...f.models }, "Unknown fixture", "7c8094cd-3476-4bfa-8f53-055d87972896"));
   let h = await host(t, f);
   const s = await h.action("session.create", { project: null });
-  const args = { sessionId: s.id, input: "响应丢失", submissionId: "unknown-response" };
+  const args = { sessionId: s.id, input: "响应丢失", protocolVersion:1, submissionId: "unknown-response" };
   const accepted = await h.action("task.submit", args);
   const task = await settle(h, accepted.taskId);
   assert.equal(task.status, "outcome_unknown");

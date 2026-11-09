@@ -133,3 +133,12 @@ The disclosed pi-subagents native-host-admission-v2 transform also patches the o
 The same disclosed transform adds owner-attested Herdr placement/SSH options, observed startup readiness, and managed runtime receipts around the original native bridge. Remote runtime selection uses the pinned package's official unbundled `dist/cli.js` with the existing patched provider dependencies; it does not substitute a model loop. Herdr TUI 0.9.5 (Apache-2.0) is an external, explicitly configured prerequisite, not bundled in this package.
 
 The coding-agent `cothink.3` revision only updates its Jiti dependency metadata. Jiti uses SemVer build metadata so it satisfies Vite’s optional peer range with npm 10; all files except the two package.json manifests retain their previous bytes.
+
+
+## Builtin doc-maintenance (D5 local source candidate)
+
+The builtin is adapted from the explicitly selected local `agent-doc-maintenance@0.1.0` source, MIT, Copyright (c) 2026 Doc Maintenance contributors. Exact original file hashes, repository attribution, CoThink wording adaptations, locked dependency versions/integrities, license hashes and the generated checker hash are retained in [source.json](resources/builtin-skills/doc-maintenance/assets/source.json). This identifies the selected source bytes; no unverified upstream tag, commit or published npm tarball equivalence is claimed.
+
+The original [LICENSE](resources/builtin-skills/doc-maintenance/assets/LICENSE) and [NOTICE](resources/builtin-skills/doc-maintenance/assets/NOTICE.md) are retained. The full locked ten-package closure's license texts are in `resources/builtin-skills/doc-maintenance/assets/licenses/`: markdown-it, linkify-it, mdurl, picomatch, punycode.js and uc.micro (MIT), github-slugger and yaml (ISC), entities (BSD-2-Clause), and argparse (Python-2.0). These terms remain applicable to bundled dependency code; CoThink's root MIT license does not replace them. The build removes source comments and preserves the complete notices separately.
+
+`context-management@0.1.0` is original CoThink guidance based on the desktop unified contract, licensed under the root MIT license; it is not attributed to an unverified external skill. Context host tools remain unavailable in D5. Rolldown 1.2.15 is the existing locked development build tool, not a checker runtime dependency.

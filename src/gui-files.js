@@ -1,3 +1,4 @@
+import {resolveOwnedTasks} from "./project-turn.js";
 /** Task-owned file reading. Public trees authorize identities; bounded local reads prove bytes.
  * No current-checkout fallback, executable preview, or independent asset store. */
 import {createHash} from 'node:crypto';
@@ -156,6 +157,13 @@ export function splitFileDiff(diff, s) {
   }catch{return {items:[],warning:'该差异暂无法可靠按文件拆分，请下载完整补丁。'};}
 }
 export async function guiFiles(home, record) {
+  if(record.flow==='unified'&&!record.deliveryRef){
+    const items=[],warnings=['项目整体验收尚未完成；以下是保留的执行来源文件。'];
+    for(const child of resolveOwnedTasks(home,record).filter(c=>c.work?.root)){
+      try{const list=await guiFiles(home,child);items.push(...list.items);warnings.push(...list.warnings);}catch(error){warnings.push(error.message);}
+    }
+    return {taskId:record.id,fromVersion:null,toVersion:null,items,limits:FILE_LIMITS,warnings};
+  }
   return withGuiWork(home,record,async(v,w)=>{
     const s=await snapshot(v,w);
     const readable=!!w.resultWorkspace&&!!w.resultChangeId;

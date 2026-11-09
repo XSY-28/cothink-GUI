@@ -1,3 +1,4 @@
+import {resolveDelivery} from "./project-turn.js";
 import { createHash } from "node:crypto";
 import { realpathSync, readFileSync, lstatSync } from "node:fs";
 import { resolve, join, relative, isAbsolute } from "node:path";
@@ -84,7 +85,9 @@ export async function inspectGuiProject(home, path, work = {}) {
   }
 }
 export async function withGuiWork(home, record, fn) {
-  const work = record.work;
+  const sources=record.deliveryRef?resolveDelivery(home,record):[];
+  const selected=sources.findLast(s=>s.record.work?.version===record.deliveryRef.version);
+  const work = record.deliveryRef ? (selected ? {...selected.record.work,startVersion:sources[0].record.work.startVersion} : null) : record.work;
   if (!work?.root) throw Error("任务没有已保存的工作项目。");
   const v = await createVersioning({
     home,
@@ -138,6 +141,7 @@ export async function guiOutput(
   offset = 0,
   limit = 65536,
 ) {
+  if(record.deliveryRef){const source=resolveDelivery(home,record).find(s=>taskOutputRefs(s.record).includes(outputRef));if(!source)throw Error("outputRef 不属于此根任务的已核验交付。");return guiOutput(home,source.record,outputRef,offset,limit);}
   if (!taskOutputRefs(record).includes(outputRef))
     throw Error("outputRef 不属于此任务。");
   return withGuiWork(home, record, async (v) => {

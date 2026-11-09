@@ -1,6 +1,7 @@
 import {OutcomeFiles} from "../files/FilePanel.jsx";
 import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import { Composer } from "../../Composer.js";
+import {Icon} from "../../Icon.js";
 import { Markdown } from "../../Markdown.js";
 import { statusLabel, phaseLabel, elapsedLabel } from "../../view.js";
 import styles from "./Conversation.module.css";
@@ -10,8 +11,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   const {bootstrap: boot, task, draft, ready, submitting, pending, pendingStatus} = state;
   const session = workspace?.archived && state.session ? {...state.session,workspaceArchived:true,readOnly:true} : state.session;
   const [now,setNow]=useState(Date.now());
-  useEffect(()=>{if(!boot.active)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[boot.active?.taskId]);
-  const teamName = workspace?.name || (state.workspaceId === null ? "通用对话" : "归属待核对");
+  const timing = session?.turns.some(turn=>["running","preparing","cancelling"].includes(turn.status));
+  useEffect(()=>{if(!timing)return;setNow(Date.now());const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[timing,session?.id]);
+  const teamName = workspace?.name || (state.workspaceId === null ? "未分组对话" : "归属待核对");
   const error = state.errors[0] || "";
   const {openSession, refresh, setError, abandonSubmission} = commands;
   const safely = operation => Promise.resolve(operation).catch(e => setError(e.message));
@@ -20,9 +22,10 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   const recoverPending = () => commands.recoverSubmission();
   const editDraft = text => commands.setDraft(session?.id, text);
   const change = (name, args) => safely(commands.changeSession(name, args));
-  const submit = async () => {
-    const result = await commands.submit({sessionId:session?.id});
+  const submit = async (options) => {
+    const result = await commands.submit({sessionId:session?.id,...options});
     if (result?.local === "team") onSettings("teams");
+    return result;
   };
   const copy = onCopy;
   const scroll = useRef(null);
@@ -99,7 +102,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   },[session?.id,session?.turns,session?.view,inert,state.readingPosition]);
   return (
       <main className="main-workspace" inert={inert}>
-        <header className="topbar">
+        <header className="topbar" data-desktop={globalThis.window?.cothinkDesktop ? "true" : undefined}>
           <button
             className="icon-button nav-toggle"
             aria-label="切换导航"
@@ -107,14 +110,14 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
               onToggleNavigation();
             }}
           >
-            ☰
+            <Icon name="panel" />
           </button>
           <h1 className={styles.workspaceHeading}>
-            <button onClick={onWorkspaceMenu} title={teamName}>{teamName} <span aria-hidden="true">⌄</span></button>
+            <button onClick={onWorkspaceMenu} title={teamName}>{teamName}</button>
           </h1>
           <div className={styles.headerActions}>
-            <button className="conversation-picker-trigger" onClick={onConversations}>对话 <span aria-hidden="true">⌄</span></button>
-            <button onClick={onRoster} title={session?.team?.name || "查看阵容"}>阵容</button>
+            <button className="conversation-picker-trigger" onClick={onConversations}><Icon name="conversations" />对话</button>
+            <button className={styles.teamButton} onClick={onRoster} title={session?.team?.name || "查看阵容"}><Icon name="team" />阵容</button>
           </div>
         </header>
         {workspace?.archived && <div className="pending-banner" role="status">
@@ -211,14 +214,19 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
         )}
         <div className={styles.conversationScroll} ref={scroll} onScroll={onScroll}>
           <div className={styles.conversationContent}>
-            {!session?.turns.length ? (
+            {!session ? (
               <section className={styles.emptyState}>
-                <h2>{session ? "想从哪里开始？" : "还没有打开对话"}</h2>
-                <p>{session ? "在下方输入问题或描述要完成的工作。" : "从「对话」新建或打开已保存的历史。"}</p>
-                {session && !session.team && ready && <p>可以先写草稿。发送前请在顶部选择阵容。</p>}
+                {!ready || state.navigationLoading ? <p>正在读取…</p> : error ? <p>请先核对上方提示，已保存的 Team 和历史会保留。</p> : state.workspaceId === undefined ? <p>Team 归属暂时无法确认。请从左侧选择 Team，或搜索已保存的对话。</p> : <>
+                  <h2>{workspace ? "继续这个 Team 的工作" : "从一件想做的事开始"}</h2>
+                  <p>{workspace ? "这个 Team 还没有可打开的对话。从‘对话’中新建，或查找已归档对话。" : "从左侧新建 Team，或搜索已保存的对话。"}</p>
+                  <button onClick={onConversations}>打开对话</button>
+                </>}
               </section>
             ) : (
-              session.turns.map((turn) => (
+              session.turns.map((turn) => {
+                const elapsed = elapsedLabel(turn,now);
+                const timing = ["running","preparing","cancelling"].includes(turn.status);
+                return (
                 <section
                   className={styles.turn}
                   id={"turn-"+turn.taskId}
@@ -231,18 +239,14 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                   </div>
                   <article className={styles.answer} data-task-id={turn.taskId} data-reading-part="result" data-result-revision={turn.resultRevision || undefined} tabIndex={-1}>
                     <header className={styles.answerHeading}>
-                      <span className={styles.answerSymbol} aria-hidden="true">
-                        ◌
-                      </span>
-                      <strong>CoThink</strong>
-                      <span className={styles.turnMode}>
-                        {turn.mode === "one" ? "单模型" : "多模型"}
+                      <span className={styles.elapsed}>
+                        {elapsed.startsWith("用时") ? elapsed : `${timing ? "已用时" : "用时"} ${elapsed}`}
                       </span>
                       <span className={styles.turnStatus}>
                         {statusLabel(turn.status)}
                       </span>
                     </header>
-                    {turn.status === "running" && boot.active?.status !== "preparing" && boot.active?.taskId === turn.taskId && <div className={styles.runState} role="status"><span>{phaseLabel(state.tasksById[turn.taskId]?.phase)} · {typeof state.tasksById[turn.taskId]?.usage?.calls === "number" ? `已发 ${state.tasksById[turn.taskId].usage.calls} 次调用` : "调用数尚未汇总"} · {state.tasksById[turn.taskId] ? elapsedLabel(state.tasksById[turn.taskId],now) : "正在读取进度"}</span><button className="stop-button" disabled={!!state.stopping} onClick={cancelTask}>{stopLabel}</button></div>}
+                    {turn.status === "running" && boot.active?.status !== "preparing" && boot.active?.taskId === turn.taskId && <div className={styles.runState} role="status"><span>{phaseLabel(state.tasksById[turn.taskId]?.phase)} · {typeof state.tasksById[turn.taskId]?.usage?.calls === "number" ? `已发 ${state.tasksById[turn.taskId].usage.calls} 次调用` : "调用数尚未汇总"}</span><button className="stop-button" disabled={!!state.stopping} onClick={cancelTask}>{stopLabel}</button></div>}
                     {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。请核对已保存的执行记录。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。" : turn.status === "cancelled" ? "已停止。已完成的内容保留，停止不等于回滚；可查看此条执行记录后继续说明下一步。" : "本次未完整完成。请核对已有内容和执行记录；若有成果，文件入口会列在下方。"}</p>}
                     {turn.finalText ? (
                       <div className="prose">
@@ -260,6 +264,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                         )}
                       </div>
                     )}
+                    {turn.proposalRef && !turn.confirmationIntent?.consumedByTaskId && <button disabled={!!boot.active||!!pending||session.readOnly} onClick={()=>safely(commands.confirmWork(turn))}>确认上述计划并执行</button>}
                     {turn.hasWork && <OutcomeFiles taskId={turn.taskId} status={turn.status} commands={commands} onOpen={onOpenFile}/>}
                     <footer className={styles.answerActions}>
                       <button
@@ -284,11 +289,12 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     </footer>
                   </article>
                 </section>
-              ))
+              );})
             )}
           </div>
         </div>
         <div className={styles.composerArea}>
+          {session && !session.turns.length && <h2 className={styles.composerGreeting}>这次想完成什么？</h2>}
           <div className={styles.pluginFeedback}>
             {boot.extensionUI?.statuses.filter(s => s.sessionId === session?.id).map(s => <p key={s.key} role="status">{s.text}</p>)}
             {boot.extensionUI?.notifications.filter(n => n.sessionId === session?.id).slice(-4).map(n =>
@@ -301,9 +307,11 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             draftConflict={state.draftConflict}
             onResolveDraft={choice=>safely(commands.resolveDraft(session.id,choice))}
             onDraft={editDraft}
+            turnOptions={state.turnOptions} onTurnOptions={change=>commands.setTurnOptions(session?.id,change)}
             onSubmit={submit}
+            onOrganize={()=>safely(commands.organizeContext())}
             onChange={change}
-            busy={!!boot.active || !!boot.extensionUI?.command}
+            busy={!!boot.active || !!boot.extensionUI?.command || !!boot.shutdown?.requested || state.connection === "reconnecting"}
             submitting={submitting}
             pending={!!pending}
             onPlugins={onPlugins}

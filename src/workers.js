@@ -287,7 +287,7 @@ export async function runWork({
       actor,
       ...(actor === "result" ? {actorRole:"main"} : {}),
       scope: readOnly ? [] : scope,
-      readScope: readScope ?? ["."],
+      readScope: readScope ?? (task.record.rootTaskId ? task.record.project.readScope : ["."]),
       intent,
       readOnly,
       wait: options.wait ?? false,
@@ -691,7 +691,7 @@ export async function runWork({
       m.record.baseVersion = m.binding.current.baseVersion;
       m.record.workspace = m.binding.current.workspace;
       save();
-      const readTools = m.record.reviewOf ? ["read"] : ["read", "grep", "find", "ls"];
+      const readTools = [...(m.record.reviewOf ? ["read"] : ["read", "grep", "find", "ls"]), "read_skill", "get_capabilities"];
       if (!m.runtime) {
         const defs = workspaceTools({
           task,
@@ -758,11 +758,11 @@ export async function runWork({
         const position = projectPosition(m);
         if (position?.canDelegate && position.supervisorId === "root" && !m.record.reviewOf) {
           m.groupTools = ["delegate", "collect", "feedback"].map(name => groupFactories.get(name)(m));
-          m.groupTools.push(...staff.tools(position.id, () => {
+          m.groupTools.push(...staff.tools(position.id, detail => {
             guardMember(m);
             if (m.conflictHalted || m.resolvingConflict || !m.record.understandingCallId)
               throw problem("TASK_CONFLICT", "Staffing is unavailable during independent preparation or conflict resolution.");
-            task.projectPolicy.admit("delegate", {actor:m.binding.role});
+            task.projectPolicy.admit("delegate", {actor:m.binding.role,...detail});
           }, task.record.id));
           defs.push(...m.groupTools);
         }
@@ -772,6 +772,7 @@ export async function runWork({
           cwd: m.binding.current.workspace,
           modelRef: m.record.model,
           role: "member-" + m.record.memberId,
+          getWorkspaceAuthority:()=>({active:m.record.status==='running'&&!m.controller.signal.aborted,scope:m.binding.current.scope,readScope:m.binding.current.readScope,readOnly:m.binding.current.readOnly||!!m.record.coordinatingMemberId||m.conflictHalted||m.resolvingConflict}),
           projectManaged:Boolean(staff),
           packageSnapshot: task.packageSnapshot,
           useFrozenSkills: true,
@@ -1117,7 +1118,7 @@ export async function runWork({
           scope: args.scope ?? [],
           readScope:
             args.readScope ??
-            (args.readOnly && args.scope?.length ? args.scope : ["."]),
+            (args.readOnly && args.scope?.length ? args.scope : task.record.rootTaskId ? task.record.project.readScope : ["."]),
           readOnly: args.readOnly ?? false,
           dependsOn: args.dependsOn ?? [],
           status: "queued",
@@ -1945,6 +1946,7 @@ export async function runWork({
       cwd: initial.workspace,
       modelRef: config.main,
       role: "leader-" + task.record.id,
+      getWorkspaceAuthority:()=>({scope:mainBinding.current.scope,readScope:mainBinding.current.readScope,readOnly:mainBinding.current.readOnly}),
       projectManaged:Boolean(staff),
       packageSnapshot: task.packageSnapshot,
       useFrozenSkills: true,
@@ -1976,7 +1978,7 @@ export async function runWork({
         }),
         ...pluginWork.resourceTools({actor:"main",binding:mainBinding,assertAllowed:guard}),
         ...tools,
-        ...(staff?.tools("root", () => { guard(); task.projectPolicy.admit("delegate", {actor:"main"}); }, task.record.id) ?? []),
+        ...(staff?.tools("root", detail => { guard(); task.projectPolicy.admit("delegate", {actor:"main",...detail}); }, task.record.id) ?? []),
         ...pluginWork.tools({actor:"main",binding:mainBinding,model:config.main,assertAllowed:guard,getModelContract:(provider,id)=>leader.modelRuntime.getModel(provider,id),getPricing:()=>leader.modelRuntime.getModel(config.main.provider,config.main.modelId)?.cost}),
       ],
       maxOutputTokens,
@@ -2070,7 +2072,7 @@ export async function runWork({
       // A pure observation command may add an operation commit. Close only after public empty-diff proof.
       const current=await v.inspect({changeId:mainBinding.current.changeId});
       if(!['accepted','abandoned','interrupted'].includes(current.status))await abandon(mainBinding.current,'最终视觉检查前结束无修改观察');
-      const check=await begin('main',[entry],['.'],'最终集成版本视觉检查',false);
+      const check=await begin('main',[entry],task.record.rootTaskId?task.record.project.readScope:['.'],'最终集成版本视觉检查',false);
       if(check.status==='blocked'||check.baseVersion!==work.version)throw problem('STALE_VISUAL','最终检查范围被占用或集成版本已改变');
       const preview=createPreviewTool({task,stage,versioning:v,getChange:()=>check,assertOwned:guard,onChanged:c=>Object.assign(check,syncChange(c)),onProgress});
       let material;
@@ -2106,7 +2108,7 @@ export async function runWork({
     }
     break;
     }
-    const published = await begin("result", [], ["."], "只读最终成果", true);
+    const published = await begin("result", [], task.record.rootTaskId?task.record.project.readScope:["."], "只读最终成果", true);
     if (published.baseVersion !== work.version)
       throw problem("STALE_RESULT", "最终投影版本已变化");
     work.resultWorkspace = published.workspace;

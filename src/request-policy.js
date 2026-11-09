@@ -26,7 +26,7 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
       const output = createAssistantMessageEventStream();
       queueMicrotask(async () => {
         const binding = getBinding();
-        let call, task, stage, removeAbortListener;
+        let call, task, stage, removeAbortListener, fenced;
         const failure = (error) => ({
           role: "assistant",
           api: model.api,
@@ -54,7 +54,8 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
           binding.assertOwned?.();
           if (task.ioError) throw task.ioError;
           if (task.signal.aborted) throw task.signal.reason;
-          if (task.projectPolicy && (!projectHttpApis.has(model.api) || options?.client))
+          fenced = Boolean(task.projectPolicy || task.rootOwner);
+          if (fenced && (!projectHttpApis.has(model.api) || options?.client))
             throw problem("PROJECT_TRANSPORT", "Selected Pi adapter has no project-controlled HTTP dispatch fence: " + model.api);
           const secrets = await getSecrets(model);
           const clean = (v) => redact(v, secrets);
@@ -114,14 +115,14 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
           let usageSeen = false;
           const opts = {
             ...options,
-            ...(task.projectPolicy && model.api === "openai-codex-responses" ? {transport:"sse"} : {}),
+            ...(fenced && model.api === "openai-codex-responses" ? {transport:"sse"} : {}),
             signal,
             maxTokens:
               binding.maxOutputTokens ?? binding.modelRef?.maxOutputTokens ?? options?.maxTokens,
             fetch: async (url, init) => {
               if (signal.aborted) throw signal.reason;
               let response;
-              if (task.projectPolicy) {
+              if (fenced) {
                 // Pi may perform fetch after yielding since onPayload. Recheck live authority.
                 if (!call.payload || call.transport.projectDispatched)
                   throw problem("PROJECT_REPLAY", "Missing prepared payload or repeated project transport");
@@ -130,7 +131,11 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
                   if (origin !== new URL(model.baseUrl).origin)
                     throw problem("PROJECT_TRANSPORT", "Dispatch origin differs from the approved model endpoint");
                   call.transport.requestOrigin = origin;
-                  task.projectPolicy.admit("send", sendIntent);
+                  binding.assertOwned?.();
+                  if(task.ioError) throw task.ioError;
+                  if(task.record.status!=="running") throw problem("TASK_ENDED","Task ended before dispatch");
+                  task.rootOwner?.reserveRequest({requestId:call.id,taskId:task.record.id,sessionId:stage.sessionId??task.record.sessionId,stageId:stage.id,model:call.actualModel,cause:sendIntent?.cause??stage.phase});
+                  task.projectPolicy?.admit("send", sendIntent);
                 } catch (error) {
                   // Some provider SDKs replace local fetch errors with "Connection error".
                   binding.error = error;
@@ -146,13 +151,13 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
               }
               try {
                 response = await (options?.fetch ?? globalThis.fetch)(url,
-                  task.projectPolicy ? { ...init, redirect: "error" } : init);
+                  fenced ? { ...init, redirect: "error" } : init);
               } catch (error) {
                 call.transport.fetchError = describeError(error, secrets);
                 throw error;
               }
               call.httpStatus = response.status;
-              if (task.projectPolicy) call.transport.responseOrigin = response.url ? new URL(response.url).origin : null;
+              if (fenced) call.transport.responseOrigin = response.url ? new URL(response.url).origin : null;
               call.transport.headersAt = new Date().toISOString();
               call.transport.responseHeaders = responseHeaders(response.headers, secrets);
               const observed = observeResponse(response, call.transport, secrets);
@@ -211,11 +216,11 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
                 timeoutMs: binding.timeout ?? null,
                 retries: 0,
               };
-              if (task.projectPolicy) {
-                await task.projectPolicy.autoReviewScope?.();
+              if (fenced) {
+                await task.projectPolicy?.autoReviewScope?.();
                 if (actual.provider !== model.provider || actual.id !== model.id || actual.baseUrl !== model.baseUrl)
                   throw problem("PROJECT_TRANSPORT", "Prepared payload changed the approved project route");
-                task.projectPolicy.admit("prepareSend", sendIntent);
+                task.projectPolicy?.admit("prepareSend", sendIntent);
               } else { call.status = "in_flight"; call.sent = true; }
               task.writeRequest(call);
               task.save();
@@ -312,6 +317,10 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
           output.push({ type: "error", reason: "error", error: failure(error) });
           output.end();
         } finally {
+          if(call && task?.rootOwner) {
+            try {task.rootOwner.settleRequest({requestId:call.id,taskId:task.record.id,status:call.status,notSent:call.sent===false && !call.transport?.projectDispatched,usage:call.usage});}
+            catch(error){task.ioError=error;binding.error=error;}
+          }
           removeAbortListener?.();
         }
       });

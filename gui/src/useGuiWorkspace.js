@@ -1,3 +1,4 @@
+import {defaultTurnOptions,editorTurnInput} from "../../src/gui-turn-options.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createDraftBook } from "./view.js";
 
@@ -41,13 +42,28 @@ export function useGuiWorkspace(api) {
   const conflicts = useRef(new Map());
   function syncEditor(sessionId) {
     const snapshot=book.current.snapshot(sessionId);
-    setWorkChoices(previous=>({...previous,[sessionId]:snapshot.workRequest ? {request:snapshot.workRequest,id:snapshot.selectionId} : null}));
+    setWorkChoices(previous=>({...previous,[sessionId]:{request:snapshot.workRequest??null,id:snapshot.selectionId,turnOptions:snapshot.turnOptions??null}}));
     if (selected.current === sessionId) setDraftText(snapshot.text || "");
   }
   function setWorkRequest(sessionId, request) {
     if (!sessionId || pendingRef.current?.sessionId === sessionId || submissionBusy.current) return;
     book.current.edit(sessionId,{workRequest:request ?? null,selectionId:request ? crypto.randomUUID() : null});
     syncEditor(sessionId); scheduleDraft(sessionId);
+  }
+  function setTurnOptions(sessionId,change) {
+    if(!sessionId||selected.current!==sessionId||session?.id!==sessionId||pendingRef.current?.sessionId===sessionId||submissionBusy.current)return;
+    const prior=book.current.snapshot(sessionId).turnOptions??defaultTurnOptions();
+    const next={...prior,...change,id:crypto.randomUUID()};
+    if(change.readAllowed===true){next.readProject=session.project;next.readWorkspaceId=session.workspaceId??null;}
+    if(!next.readAllowed){next.readProject=null;next.readWorkspaceId=null;}
+    book.current.edit(sessionId,{turnOptions:next});syncEditor(sessionId);scheduleDraft(sessionId);
+  }
+  function reconcileReadSelection(value){
+    const options=book.current.snapshot(value.id).turnOptions;
+    if(options?.readAllowed&&(options.readProject!==value.project||options.readWorkspaceId!==(value.workspaceId??null))){
+      book.current.edit(value.id,{turnOptions:{...options,id:crypto.randomUUID(),readAllowed:false,readProject:null,readWorkspaceId:null}});
+      syncEditor(value.id);scheduleDraft(value.id);setError('项目归属已变化，本次文件读取选择已清除；请重新确认。');
+    }
   }
   function consumeSnapshot(association) {
     // Only the submitted editor may clear text; a newer choice has its own ID.
@@ -69,11 +85,21 @@ export function useGuiWorkspace(api) {
   const selected = useRef(null), selectedTask = useRef(null);
   const book = useRef(createDraftBook()), draftTimers = useRef(new Map());
   const draftQueue = useRef(Promise.resolve()), submissionBusy = useRef(false);
-  const pendingRef = useRef(pending), mounted = useRef(true);
+  const pendingRef = useRef(pending), mounted = useRef(true), organizingSession = useRef(null);
   const refreshing = useRef(false), refreshAgain = useRef(false);
   const selectionRequest = useRef(0), taskRequest = useRef(0);
 
   function acceptBootstrap(value) {
+    if(value.active?.origin==='context.organize')organizingSession.current=value.active.sessionId;
+    else if(organizingSession.current&&!submissionBusy.current&&pendingRef.current?.kind!=='context'){
+      const id=organizingSession.current;
+      void api.read('session',{id}).then(saved=>{
+        if(organizingSession.current!==id||saved.contextOrganizing)return;
+        organizingSession.current=null;
+        const snapshot=book.current.snapshot(id);
+        if(snapshot.expectedDraftRevision===saved.draftRevision&&!saved.readOnly){book.current.rebase(id,saved);void flushDraft(id).catch(()=>{});}
+      }).catch(()=>{});
+    }
     setBootstrap(current => {
       if (!Array.isArray(value.workspaces) || !Array.isArray(current.workspaces)) return value;
       const prior = new Map(current.workspaces.map(row=>[row.id,row]));
@@ -92,6 +118,7 @@ export function useGuiWorkspace(api) {
   function saveDraft(snapshot) {
     if (!snapshot?.sessionId || !snapshot.editId) return Promise.resolve();
     const operation = draftQueue.current.catch(() => {}).then(async () => {
+      if(organizingSession.current===snapshot.sessionId)return;
       const latest=book.current.snapshot(snapshot.sessionId);
       if (conflicts.current.has(snapshot.sessionId)) throw Error("草稿存在保存冲突，请先读取保存稿或明确使用本机稿。");
       // A deferred caller may enqueue an obsolete cleanup after a newer edit.
@@ -101,6 +128,7 @@ export function useGuiWorkspace(api) {
           latest.savedEditId === snapshot.editId) return;
       const args={sessionId:snapshot.sessionId,text:snapshot.text,workRequest:snapshot.workRequest,
         selectionId:snapshot.selectionId,editId:snapshot.editId,
+        ...(snapshot.turnOptions!==undefined?{turnOptions:snapshot.turnOptions}:{}),
         expectedDraftRevision:latest.expectedDraftRevision,branchAnchor:latest.branchAnchor};
       try {
         const saved=await api.action("session.draft",args);
@@ -125,6 +153,7 @@ export function useGuiWorkspace(api) {
     return operation;
   }
   function scheduleDraft(sessionId) {
+    if(organizingSession.current===sessionId)return;
     clearTimeout(draftTimers.current.get(sessionId));
     const snapshot=book.current.snapshot(sessionId);
     draftTimers.current.set(sessionId,setTimeout(()=>{
@@ -136,6 +165,13 @@ export function useGuiWorkspace(api) {
     clearTimeout(draftTimers.current.get(sessionId)); draftTimers.current.delete(sessionId);
     await draftQueue.current.catch(()=>{});
     return saveDraft(book.current.snapshot(sessionId));
+  }
+  async function flushAllDrafts() {
+    for(const timer of draftTimers.current.values()) clearTimeout(timer);
+    draftTimers.current.clear();
+    await draftQueue.current.catch(()=>{});
+    for(const snapshot of book.current.pending()) await saveDraft(snapshot);
+    if(book.current.pending().length) throw Error("草稿在保存期间发生变化，请再次关闭以保存最新输入。");
   }
   async function resolveDraft(sessionId, choice) {
     clearTimeout(draftTimers.current.get(sessionId)); draftTimers.current.delete(sessionId);
@@ -259,6 +295,7 @@ export function useGuiWorkspace(api) {
     sessionStorage.setItem("cothink.session", sessionId);
     try {
       const value = await api.read("session", {id: sessionId});
+      if(value.contextOperationIds?.length)value.contextOperation=await api.read("context-operation",{operationId:value.contextOperationIds[0]});
       if (!mounted.current || request !== selectionRequest.current) return null;
       const restored=rememberView(value);
       setSession(restored);
@@ -270,6 +307,7 @@ export function useGuiWorkspace(api) {
       editorWorkspaces.current.set(sessionId, value.workspaceId);
       if (!value.navigation?.archived) recentByProject.current.set(value.project,sessionId);
       book.current.load(sessionId,value.editor ?? value.draft,value.draftRevision,value.branchAnchor);
+      reconcileReadSelection(value);
       syncEditor(sessionId);
       await selectTask(taskId || value.turns.at(-1)?.taskId || null, sessionId);
       if (request !== selectionRequest.current) return null;
@@ -474,9 +512,11 @@ export function useGuiWorkspace(api) {
       const selection = selectionRequest.current, taskSelection = taskRequest.current;
       observedSelection = selection;
       await Promise.all([
-        id && api.read("session", {id}).then(value => {
+        id && api.read("session", {id}).then(async value => {
+          if(value.contextOperationIds?.length)value.contextOperation=await api.read("context-operation",{operationId:value.contextOperationIds[0]});
           if (mounted.current && selectionRequest.current === selection && value.id === selected.current) {
             setSession(rememberView(value));
+            reconcileReadSelection(value);
             if (value.workspaceId !== workspaceRef.current) {
               selectWorkspaceId(value.workspaceId);
               editorWorkspaces.current.set(value.id, value.workspaceId);
@@ -624,8 +664,9 @@ export function useGuiWorkspace(api) {
       setDraft(sessionId, "");
       return {local: "team"};
     }
+    if (connection === "reconnecting" || bootstrap.shutdown?.requested) {setError("宿主未连接或正在退出；草稿保留，不发送新任务。");return;}
     if (bootstrap.active || bootstrap.extensionUI?.command || submissionBusy.current || pendingRef.current) return;
-    const choice = snapshot.workRequest ? {request:snapshot.workRequest,id:snapshot.selectionId} : null;
+    const choice = {request:snapshot.workRequest??null,id:snapshot.selectionId,turnOptions:snapshot.turnOptions??null};
     workRequest ??= snapshot.workRequest;
     submissionBusy.current = true;
     setSubmitting(true);
@@ -635,6 +676,7 @@ export function useGuiWorkspace(api) {
     let submitted = false;
     try {
       await saveDraft(snapshot);
+      const {constraints,budget,readAuthorization}=editorTurnInput(snapshot.turnOptions,{project:session.project,workspaceId:session.workspaceId??null});
       const commandInput = snapshot.text.trim();
       const slash = /^\/([^\s]+)/.exec(commandInput)?.[1];
       if (slash && slash !== "one" && !slash.startsWith("skill:")) {
@@ -655,7 +697,7 @@ export function useGuiWorkspace(api) {
       storePending(association);
       setPendingStatus("正在确认本次提交…");
       submitted = true;
-      const result = await api.action("task.submit", {sessionId, submissionId:association.submissionId, input: snapshot.text, ...(workRequest ? {workRequest} : {})});
+      const result = await api.action("task.submit", {sessionId, submissionId:association.submissionId, input: snapshot.text,protocolVersion:1,editorEditId:snapshot.editId,constraints,budget,...(readAuthorization?{readAuthorization}:{})});
       consumeSnapshot(association);
       storePending(null);
       setPendingStatus("");
@@ -679,8 +721,33 @@ export function useGuiWorkspace(api) {
       setSubmitting(false);
     }
   }
+  async function organizeContext() {
+    const sessionId=selected.current;
+    if(!sessionId||bootstrap.active||pendingRef.current||submissionBusy.current)return;
+    submissionBusy.current=true;setSubmitting(true);setError('');
+    let sent=false;
+    try{
+      await flushDraft(sessionId);
+      const saved=await api.read('session',{id:sessionId});
+      if(saved.readOnly||saved.selectionError)throw Error(saved.selectionError||'会话只读。');
+      const snapshot=book.current.snapshot(sessionId);
+      if(snapshot.editId!==saved.editor?.editId&&snapshot.editId)throw Error('编辑稿尚未确认保存，整理未发送。');
+      const {budget}=editorTurnInput(snapshot.turnOptions,{project:saved.project,workspaceId:saved.workspaceId??null});
+      const operationId=crypto.randomUUID(),association={kind:'context',sessionId,submissionId:operationId,operationId,sourceLeaf:saved.branchAnchor,budget};
+      organizingSession.current=sessionId;storePending(association);sent=true;
+      const result=await api.action('context.organize',{sessionId,operationId,sourceLeaf:saved.branchAnchor,budget,protocolVersion:1});
+      storePending(null);setPendingStatus('整理已受理；当前输入仍保留。');await refresh();return result;
+    }catch(error){if(!sent||!error.unknown){organizingSession.current=null;storePending(null);}else setPendingStatus('整理响应未知，只查询原 operationId，不重发。');setError(error.message);}
+    finally{submissionBusy.current=false;setSubmitting(false);void refresh();}
+  }
   async function recoverSubmission(association = pendingRef.current) {
     if (!association) return;
+    if(association.kind==='context'){
+      try{const found=await api.read('context-operation',{operationId:association.operationId});
+        if(found.sessionId!==association.sessionId)throw Error('整理恢复身份不一致。');
+        storePending(null);setPendingStatus('已读取原整理状态，输入保留。');await refresh();return found;
+      }catch(error){setError(error.message);return;}
+    }
     try {
       const found = await api.recover(association);
       if (pendingRef.current?.submissionId !== association.submissionId) return;
@@ -701,6 +768,15 @@ export function useGuiWorkspace(api) {
       setError(e.message);
       submissionError.current = {sessionId:association.sessionId,submissionId:association.submissionId,errorRevision:errorRevision.current};
     }
+  }
+  async function confirmWork(turn) {
+    if(bootstrap.active||pendingRef.current||submissionBusy.current)return;
+    submissionBusy.current=true;setSubmitting(true);
+    const association={sessionId:session.id,submissionId:crypto.randomUUID(),proposalRef:turn.proposalRef,kind:'confirmation'};
+    storePending(association);
+    try{const result=await api.action('task.confirmWork',{sessionId:session.id,submissionId:association.submissionId,proposalRef:turn.proposalRef,protocolVersion:1});storePending(null);await selectTask(result.taskId,session.id);await refresh();return result;}
+    catch(error){if(!error.unknown)storePending(null);setError(error.message);}
+    finally{submissionBusy.current=false;setSubmitting(false);}
   }
   async function cancelTask() {
     const taskId=bootstrap.active?.taskId;
@@ -741,18 +817,27 @@ export function useGuiWorkspace(api) {
     await refresh();
   }
   return {
-    state: {bootstrap, readingPosition, readingError, stopping:stopStatus && stopStatus.taskId === bootstrap.active?.taskId ? stopStatus : null, sessions, nextCursor, navigationQuery, currentProject, workspaceId, workspaceMatches, navigationLoading, navigationNotice, selectedSessionId, session, task, tasksById, draft, workRequest:workChoices[selectedSessionId]?.request ?? null, draftConflict:!!draftConflicts[selectedSessionId], pending,
+    state: {bootstrap, readingPosition, readingError, stopping:stopStatus && stopStatus.taskId === bootstrap.active?.taskId ? stopStatus : null, sessions, nextCursor, navigationQuery, currentProject, workspaceId, workspaceMatches, navigationLoading, navigationNotice, selectedSessionId, session, task, tasksById, draft, workRequest:workChoices[selectedSessionId]?.request ?? null,turnOptions:workChoices[selectedSessionId]?.turnOptions??null, draftConflict:!!draftConflicts[selectedSessionId], pending,
       pendingStatus, submitting, connection, ready, errors: error ? [error] : []},
-    commands: {querySessions, loadSessions, searchSessions, selectProject, selectWorkspace, openWorkspaceAttention, setSessionNavigation, closeSession,
+    commands: {flushAllDrafts, querySessions, loadSessions, searchSessions, selectProject, selectWorkspace, openWorkspaceAttention, setSessionNavigation, closeSession,
       createWorkspace: args => manageWorkspace("workspace.create",{workspaceId:crypto.randomUUID(),...args},true),
       updateWorkspace: (workspace,change) => manageWorkspace("workspace.update",{workspaceId:workspace.id,expectedRevision:workspace.revision,change}),
       bindWorkspace: (workspace,path) => manageWorkspace("workspace.bind",{workspaceId:workspace.id,expectedRevision:workspace.revision,path}),
-      clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, forkSession, setDraft, insertCommand, resolveDraft, submit, recoverSubmission, abandonSubmission,
-      selectTask, changeSession, recordView, refresh, cancelTask, acknowledgeNotes, setWorkRequest, refreshTeams,
+      clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, recoverSubmission, abandonSubmission,
+      selectTask, changeSession, recordView, refresh, cancelTask, acknowledgeNotes, setWorkRequest,setTurnOptions, refreshTeams,
       saveTeam: args => manageTeam("team.save", args),
       removeTeam: args => manageTeam("team.remove", args),
       saveProvider: args => manageTeam("provider.save", args),
       saveWorkSettings: args => manageTeam("settings.work", args),
+      getCapabilities: sessionId => api.read('capabilities',{sessionId}),
+      saveBuiltinSkills: async args => {
+        try{return await manageTeam('settings.builtinSkills',args);}
+        catch(error){if(!error.unknown)throw error;
+          const saved=await api.read('bootstrap').catch(()=>null);
+          if(saved&&JSON.stringify([...(saved.builtinSkills?.disabled??[])].sort())===JSON.stringify([...args.builtinSkills.disabled].sort())){if(mounted.current)acceptBootstrap(saved);return saved.builtinSkills;}
+          throw error;
+        }
+      },
       checkUpdates: () => manageTeam("updates.check", {}),
       configureUpdates: args => manageTeam("updates.configure", args),
       listPluginCommands: sessionId => api.action("extension.commands", {sessionId}),

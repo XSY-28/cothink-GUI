@@ -67,8 +67,8 @@ export function changeProjectStaff(state, action, input = {}, actor = "root", au
     const parent = supervisor(state, parentId);
     const scope = scopeList(input.scope ?? parent?.scope ?? state.scope, parent?.scope ?? state.scope, "scope");
     const readScope = scopeList(
-      input.readScope ?? parent?.readScope ?? ["."],
-      parent?.readScope ?? ["."],
+      input.readScope ?? parent?.readScope ?? state.readScope ?? ["."],
+      parent?.readScope ?? state.readScope ?? ["."],
       "readScope",
     );
     const allowed = models(input.models ?? parent?.models ?? [], parent);
@@ -313,10 +313,13 @@ function admitAssignment(state, input, previous) {
   const { staffId, actor, identity, model, taskId } = input;
   for (const [name, val] of Object.entries({staffId, actor, identity, model, taskId})) requireText(val, name);
   if (state.paused || state.status === "paused") fail("Project is paused.");
+  const constraints=taskStep(state,taskId)?.attempts.find(a=>a.taskId===taskId)?.constraints;
+  if(constraints && !constraints.allowedSubtasks.includes("work") && !(constraints.allowedSubtasks.includes("review")&&input.readOnly&&!input.scope?.length&&input.reviewOf&&(input.reviewKind??"independent")==="independent"))fail("Root permits only independent read-only review assignments");
   const row = authorizedPosition(state, input);
   verifyActor(state, input);
   scopeList(input.scope ?? [], row.scope, "write scope");
   scopeList(input.readScope ?? [], row.readScope, "read scope");
+  if(state.entryPolicy==="unified")scopeList(input.readScope??[],state.readScope,"root read scope");
   const held = assignments(state).find((a) => a !== previous && a.status !== "disposed" && collision(state, a, input));
   if (held) {
     if (held.actor === input.actor && (!input.actorRole || held.actorRole === input.actorRole))
@@ -641,7 +644,7 @@ export function createProjectStaff(host) {
             ),
           }),
           async execute(_id, { action, input }) {
-            admit();
+            admit({staffControl:{action,input:input??{}}});
             const result = action === "register_work"
               ? host.update((state) => registerSubwork(state, taskId, actor, input ?? {}))
               : action === "list"

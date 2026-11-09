@@ -48,7 +48,7 @@ async function setup(t) {
   return f;
 }
 async function send(h, sessionId, input, submissionId = input) {
-  const accepted = await h.action("task.submit", { sessionId, input, submissionId });
+  const accepted = await h.action("task.submit", { sessionId, input, submissionId,protocolVersion:1 });
   for (let i = 0; i < 500; i++) {
     const task = await h.get("/api/task?id=" + accepted.taskId);
     if (task.status !== "running") {
@@ -61,7 +61,7 @@ async function send(h, sessionId, input, submissionId = input) {
 }
 async function newSession(h) {
   const s = await h.action("session.create", { project: null });
-  await h.action("session.mode", { sessionId: s.id, mode: "one" });
+
   return s.id;
 }
 
@@ -83,13 +83,13 @@ test("real Pi selected-branch fork inherits ancestor turns and keeps submission 
   assert.deepEqual(restored.turns.map((x) => x.taskId), [first.id]);
   assert.equal(restored.title, "FORK_ANCESTOR");
   assert.deepEqual(restored.submissions, [], "inherited turns retain their original submission ownership");
-  assert.equal(await h.recover({ sessionId: forkId, submissionId: "FORK_ANCESTOR" }), null);
+  assert.equal(await h.recover({ sessionId: forkId, protocolVersion:1, submissionId: "FORK_ANCESTOR" }), null);
   const next = await send(h, forkId, "FORK_CONTINUE", "FORK_ANCESTOR");
   assert.notEqual(next.id, first.id, "a different session owns an independent submission key");
   assert.match(JSON.stringify(f.calls[2].body.messages), /FORK_ANCESTOR/);
   assert.doesNotMatch(JSON.stringify(f.calls[2].body.messages), /FORK_EXCLUDED_SIBLING/);
   assert.deepEqual((await h.get("/api/session?id=" + forkId)).turns.map((x) => x.taskId), [first.id, next.id]);
-  assert.equal((await h.recover({ sessionId: forkId, submissionId: "FORK_ANCESTOR" })).taskId, next.id);
+  assert.equal((await h.recover({ sessionId: forkId, protocolVersion:1, submissionId: "FORK_ANCESTOR" })).taskId, next.id);
 });
 
 test("real Pi same-session branch displays branch order, excludes sibling turns and retains durable deduplication", async (t) => {
@@ -106,9 +106,9 @@ test("real Pi same-session branch displays branch order, excludes sibling turns 
   manager.appendCustomEntry("cothink-draft", { text: "new selected branch" });
   h = await host(t, f);
   assert.deepEqual((await h.get("/api/session?id=" + id)).turns.map((x) => x.taskId), [first.id]);
-  assert.equal((await h.recover({ sessionId: id, submissionId: "TREE_EXCLUDED_SIBLING" })).taskId, sibling.id);
+  assert.equal((await h.recover({ sessionId: id, protocolVersion:1, submissionId: "TREE_EXCLUDED_SIBLING" })).taskId, sibling.id);
   assert.deepEqual(h.reads, ["GET"], "confirmation recovery observes durable association without mutation");
-  const replay = await h.action("task.submit", { sessionId: id, input: "TREE_EXCLUDED_SIBLING", submissionId: "TREE_EXCLUDED_SIBLING" });
+  const replay = await h.action("task.submit", { sessionId: id, input: "TREE_EXCLUDED_SIBLING", protocolVersion:1, submissionId: "TREE_EXCLUDED_SIBLING" });
   assert.equal(replay.taskId, sibling.id);
   assert.equal(f.calls.length, 2);
   assert.equal((await h.get("/api/sessions?query=TREE_EXCLUDED_SIBLING")).items.length,0);
@@ -149,10 +149,10 @@ for (const damage of ["truncated session", "missing request", "corrupt request"]
     assert.equal((await h.get("/api/task?id=" + healthy.id)).status, "completed");
     await h.action("settings.work", { work: { checks: [] } });
     assert.deepEqual((await h.get("/api/bootstrap")).work.checks, []);
-    await h.reject("task.submit", { sessionId: badId, input: "MUST_NOT_SEND", submissionId: "blocked" });
-    await h.reject("session.mode", { sessionId: badId, mode: "cothink" });
+    await h.reject("task.submit", { sessionId: badId, input: "MUST_NOT_SEND", protocolVersion:1, submissionId: "blocked" });
+    await h.reject("session.name", { sessionId: badId, title:"Blocked rename" });
     await h.reject("session.fork", {sessionId:badId,taskId:bad.id});
-    const old = await h.action("task.submit", { sessionId: badId, input: "DAMAGED_HISTORY", submissionId: "DAMAGED_HISTORY" });
+    const old = await h.action("task.submit", { sessionId: badId, input: "DAMAGED_HISTORY", protocolVersion:1, submissionId: "DAMAGED_HISTORY" });
     assert.equal(old.taskId, bad.id, "known association may be queried, never replayed");
     assert.equal(f.calls.length, 2);
     assert.deepEqual(readFileSync(sessionPath), beforeSession);
@@ -171,7 +171,7 @@ test("completed live caches cannot hide newly damaged durable session or request
     appendFileSync(path, '{"broken');
     const damaged = readFileSync(path);
     assert.equal((await h.get("/api/session?id=" + id)).readOnly, true);
-    await h.reject("task.submit", { sessionId: id, input: "NO_CACHED_CONTINUATION", submissionId: "blocked-cache" });
+    await h.reject("task.submit", { sessionId: id, input: "NO_CACHED_CONTINUATION", protocolVersion:1, submissionId: "blocked-cache" });
     assert.deepEqual(readFileSync(path), damaged);
     assert.equal(f.calls.length, 1);
     writeFileSync(path, original);
@@ -214,7 +214,7 @@ test("GUI reply fork copies only completed ancestors, restores their selections 
   const source = readTask(f.home,first.id).stages[0].sessionFile;
   const original = await h.get("/api/session?id="+id);
   assert.equal(original.turns[0].canFork,true,"completed durable replies become forkable after active clears");
-  await h.action("session.mode",{sessionId:id,mode:"cothink"});
+
   const laterTeam = await h.action("team.save", {name:"Later team",main:f.models.secondary[0],secondary:[f.models.main]});
   await h.action("session.team",{sessionId:id,teamId:laterTeam.id});
   await send(h,id,"GUI_FORK_LATER");
@@ -223,7 +223,7 @@ test("GUI reply fork copies only completed ancestors, restores their selections 
   assert.notEqual(fork.id,id);
   assert.equal(fork.title,"GUI_FORK_FIRST · 分支");
   assert.deepEqual(fork.turns.map(t=>t.taskId),[first.id]);
-  assert.equal(fork.mode,"one");
+  assert.equal(fork.turns[0].flow,"unified");
   assert.deepEqual(fork.team,original.team);
   assert.equal(fork.project,original.project);
   assert.equal(fork.draft,"");
@@ -277,7 +277,7 @@ test("GUI reply fork refuses an active source without cancelling it",async t=>{
   });
   saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},"Active fork fixture","7c8094cd-3476-4bfa-8f53-055d87972896"));
   const h=await host(t,f), id=await newSession(h), first=await send(h,id,"FIRST_DONE");
-  const running=await h.action("task.submit",{sessionId:id,input:"KEEP_RUNNING",submissionId:"active"});
+  const running=await h.action("task.submit",{sessionId:id,input:"KEEP_RUNNING",protocolVersion:1, submissionId:"active"});
   for(let n=0;n<500&&!unblock;n++) await new Promise(r=>setTimeout(r,10));
   assert.ok(unblock);
   try {
@@ -315,7 +315,7 @@ test("reply fork preserves a bound project and requires an unarchived source wit
   const fork=await h.action("session.fork",{sessionId:id,taskId:first.id});
   assert.equal(fork.navigation.archived,false);
   assert.equal(fork.project,project);
-  assert.equal(fork.mode,"one");
+  assert.equal(fork.turns[0].flow,"unified");
   assert.deepEqual(readFileSync(source),before);
   assert.equal(f.calls.length,1);
 });
@@ -388,7 +388,7 @@ test("invalid workspace markers retain completed turns without reclassifying the
   assert.match(session.workspaceError,/归属/);
   assert.deepEqual(session.turns.map(turn=>turn.taskId),[task.id]);
   assert.deepEqual((await h.get("/api/sessions?workspaceId=")).items,[]);
-  const rejected = await h.request("/api/action",{action:"task.submit",args:{sessionId:id,input:"Do not run",submissionId:"WORKSPACE_UNCERTAIN"}});
+  const rejected = await h.request("/api/action",{action:"task.submit",args:{sessionId:id,input:"Do not run",protocolVersion:1, submissionId:"WORKSPACE_UNCERTAIN"}});
   assert.equal(rejected.status,409);
   assert.equal((await rejected.json()).code,"WORKSPACE_UNAVAILABLE");
   assert.equal(readFileSync(path,"utf8"),original);

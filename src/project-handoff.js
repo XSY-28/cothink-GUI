@@ -9,6 +9,10 @@ import {homedir} from 'node:os';
 const root=fileURLToPath(new URL('../',import.meta.url));
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const error=message=>Object.assign(new Error(message),{code:'PROJECT_HANDOFF_BLOCKED'});
+export function assertCleanUnifiedStartup(){
+ const preloaded=process.env.NODE_OPTIONS||process.env.NODE_PATH||process.execArgv.some(arg=>/^(?:--require|--import|--loader|--experimental-loader|--eval|--print)(?:=|$)|^-(?:r|e|p)(?:$|[^-])/.test(arg));
+ if(preloaded)throw error('统一 GUI 需要无 Node 预加载的干净入口；请清除注入配置后重新打开，历史仍保留，未开始生成。');
+}
 export function verifiedHandoffLauncher(){
  if(process.platform!=='darwin')throw error('此平台尚无可信旧宿主迁移观察器，请使用新的 cothink --project 入口。');
  const dir=join(root,'vendor','project-handoff',`darwin-${process.arch}`),binary=join(dir,'watch');
@@ -113,6 +117,7 @@ async function supervise(args){
  }
 }
 export async function runEntrypoint(args=process.argv.slice(2)){
+ if(args[0]==="gui")try{assertCleanUnifiedStartup();}catch(error){process.stderr.write(error.message+"\n");return 2;}
  if(process.env.COTHINK_SUPERVISED_CHILD==='1'&&process.send){
   supervised=true;delete process.env.COTHINK_SUPERVISED_CHILD;
   process.on('message',m=>{if(m?.cothinkHandoff==='reply'){const p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.reject(error(m.error)):p.resolve(m.result);}}});
