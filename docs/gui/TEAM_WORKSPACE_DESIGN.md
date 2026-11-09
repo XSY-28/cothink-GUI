@@ -4,7 +4,7 @@
 
 日期：2026-11-07。用户已接受珍珠白液态玻璃原型，并授权按[施工文档](TEAM_WORKSPACE_IMPLEMENTATION_PLAN.md)实施。当前源码及本地证据见 [VALIDATION.md](../../VALIDATION.md)。
 
-2026-11-09 用户在实际 App 中确认恢复项目 Team 一级导航，施工以[导航修正方案](TEAM_NAVIGATION_REFINEMENT_PLAN.md)为准，本地实现与浏览器／隔离桌面专项已通过，完整回归限制见 [VALIDATION](../../VALIDATION.md)；正式安装未替换。保留[桌面方案 5.1](DESKTOP_UNIFIED_IMPLEMENTATION_PLAN.md#51-视觉精修)的浅色紧凑窗口；左栏只列 Team，内部对话按需打开，模型组合称“阵容”。旧品牌、玻璃材质和“通用对话”常驻入口不再作为当前视觉要求。下文的旧运行机制与验收事实按日期保留，统一项目会话以桌面方案为准。
+2026-11-09 用户在实际 App 中确认恢复项目 Team 一级导航，施工以[导航修正方案](TEAM_NAVIGATION_REFINEMENT_PLAN.md)为准，本地实现与浏览器／隔离桌面专项已通过，完整回归与交付证据见 [VALIDATION](../../VALIDATION.md)；后续已完成私有 GitHub 提交及本机正式安装。保留[桌面方案 5.1](DESKTOP_UNIFIED_IMPLEMENTATION_PLAN.md#51-视觉精修)的浅色紧凑窗口；左栏只列 Team，内部对话按需打开，模型组合称“阵容”。旧品牌、玻璃材质和“通用对话”常驻入口不再作为当前视觉要求。下文的旧运行机制与验收事实按日期保留，统一项目会话以桌面方案为准。
 
 本轮范围为 GUI。模型调用、任务执行、权限与版本仍以[当前设计基线](../../DESIGN_BASELINE.md)为准；不因导航改名而接入终端 PROJECT 调度器。本文是项目 Team GUI 体验的主要说明；[上一轮设计](REDESIGN_PROPOSAL.md)和[施工记录](REDESIGN_IMPLEMENTATION_PLAN.md)保留原有事实，不作为本轮开工或发布授权。
 
