@@ -376,10 +376,10 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
     assert.equal(container.querySelector('[aria-label="team"]'), null);
     assert.equal(container.querySelectorAll('[type="submit"]').length, 1);
     await act(()=>root.render(React.createElement(Composer,{...base,boot:{protocol:{unified:1},...base.boot,models:[]}})));
-    await act(()=>container.querySelector('[aria-label="添加本次操作"]').click());
+    await act(()=>container.querySelector('[data-composer-trigger="options"]').click());
     assert.match(container.textContent,/模型目录不可用，输出额度要求未知/);
     assert.doesNotMatch(container.textContent,/未设本地输出上限/);
-    await act(()=>container.querySelector('[aria-label="添加本次操作"]').click());
+    await act(()=>container.querySelector('[data-composer-trigger="options"]').click());
 
     await act(() =>
       root.render(React.createElement(Composer, { ...base, busy: true })),
@@ -698,7 +698,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     assert.equal(actions.find(a=>a.action==="releaseNotes.ack").args.version,'fixture');
     await act(()=>container.querySelector('[aria-label="关闭设置"]').click());
     assert.equal(container.querySelector('nav [title="Active chat"]'),null,"conversation history belongs in the project picker");
-    assert.equal([...container.querySelectorAll("header.topbar button")].filter(n=>n.textContent === "阵容").length,1);
+    assert.equal([...container.querySelectorAll("header.topbar button")].filter(n=>n.getAttribute("aria-label") === "阵容").length,1);
     await showHistory();
     const runningMenu=pickerRow("Active chat").parentElement.querySelector('details');
     await act(()=>runningMenu.querySelector('summary').click());
@@ -980,7 +980,7 @@ test("archived composer preserves draft and blocks submission without claiming a
 });
 
 
-test("the latest project, conversation or new-chat click wins delayed navigation without exposing the previous draft",async()=>{
+test("delayed new-chat preserves the old draft and a newer navigation wins",async()=>{
   await modalEnvironment(async({root,container,win,useGuiWorkspace})=>{
     const previous=Object.getOwnPropertyDescriptor(globalThis,"sessionStorage");
     Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
@@ -1032,13 +1032,21 @@ test("the latest project, conversation or new-chat click wins delayed navigation
       await click("project B"); await click("open c");
       await act(async()=>staleB.reject(Error("obsolete project failure")));
       assert.equal(state().id,"c"); assert.deepEqual(state().errors,[]);
+      await click("new A");
+      assert.equal(state().id,"c");
+      assert.equal(container.querySelector("textarea").value,"draft C");
+      await act(async()=>creates[0].wait.reject(Error("creation rejected")));
+      assert.equal(state().id,"c");
+      assert.equal(container.querySelector("textarea").value,"draft C");
+      assert.match(state().errors[0],/creation rejected/);
       await click("new A"); await click("new A");
-      assert.equal(creates.length,1,"repeat activation in one Team must not allocate another session");
+      assert.equal(creates.length,2,"repeat activation in one Team must not allocate another session");
       await click("new B");
-      assert.equal(container.querySelector("textarea").disabled,true);
+      assert.equal(state().id,"c");
+      assert.equal(container.querySelector("textarea").value,"draft C");
       records.nb={id:"nb",workspaceId:"team-nb",project:"/b",draft:"new B draft",turns:[]};records.na={id:"na",workspaceId:"team-na",project:"/a",draft:"new A draft",turns:[]};
-      await act(async()=>creates[1].wait.resolve(records.nb));
-      await act(async()=>creates[0].wait.resolve(records.na));
+      await act(async()=>creates[2].wait.resolve(records.nb));
+      await act(async()=>creates[1].wait.resolve(records.na));
       assert.equal(state().id,"nb"); assert.equal(state().project,"/b");
       assert.equal(container.querySelector("textarea").value,"new B draft");
       await click("open a"); assert.equal(container.querySelector("textarea").value,"draft A","navigation kept the earlier draft book");
@@ -1084,11 +1092,17 @@ test("Team panel preserves exchanged model settings, dirty edits and saved facts
     await render(false);
     const click=text=>act(async()=>{const button=[...container.querySelectorAll("button")].find(b=>b.textContent===text);button.focus();button.click();});
     assert.match(container.textContent,/实际思考：high（对话设置，覆盖阵容中的 low）/);
+    const savedRow=container.querySelector('[aria-label="使用 Original"]');
+    assert.equal(savedRow.disabled,true,"the current row cannot silently replace a different historical snapshot");
+    assert.match(savedRow.textContent,/与当前快照不同/);
+    await act(()=>savedRow.click());
+    assert.deepEqual(switches,[]);
+    await act(()=>container.querySelector('[aria-label="管理 Original"]').click());
     await click("使用已保存参数");
     assert.deepEqual(switches,[{sessionId:"session",teamId:"old"}],"an older effective snapshot can explicitly return to its saved Team without creating another Team");
     await act(async()=>{const select=container.querySelector('[aria-label="此对话的思考设置"]');select.value="";select.dispatchEvent(new win.Event("change",{bubbles:true}));});
     assert.deepEqual(changes,[["session.thinking",{},"session"]]);
-    await click("基于当前阵容调整");
+    await click("按当前快照另存");
     await act(()=>{const select=container.querySelector('[aria-label="主模型"]');select.value=JSON.stringify(["p","reviewer"]);select.dispatchEvent(new win.Event("change",{bubbles:true}));});
     assert.equal(container.querySelector('[aria-label="主模型输出额度"]').value,"456");
     assert.equal(container.querySelector('[aria-label="副模型 1输出额度"]').value,"123");
@@ -1124,7 +1138,8 @@ test("unknown Team saves are read-only reconciled and never recreated or automat
       commands:{saveTeam:async()=>{saves++;throw Object.assign(Error("lost reply"),{unknown:true});},refreshTeams:async()=>{reads++;return {providers:[]};},refresh:async()=>{},selectTeam:async()=>switches++},onClose(){}};
     const click=text=>act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent===text).click());
     await act(()=>root.render(React.createElement(TeamPanel,props)));
-    await click("基于当前阵容调整");
+    await act(()=>container.querySelector('[aria-label="管理 Original"]').click());
+    await click("调整另存");
     await act(()=>{const input=container.querySelector('[aria-label="新阵容名称"]');Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(input,"Maybe saved");input.dispatchEvent(new win.Event("input",{bubbles:true}));});
     await act(async()=>container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true})));
     assert.equal(saves,1);assert.equal(reads,1);
@@ -1147,7 +1162,8 @@ test("Team authentication stays in the editing flow and cancel retains confirmed
       commands:{saveProvider:async value=>auth.push(value),saveTeam:async value=>saves.push(value),refresh:async()=>{}},onClose(){}};
     const click=text=>act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent===text).click());
     await act(()=>root.render(React.createElement(TeamPanel,props)));
-    await click("基于当前阵容调整");
+    await act(()=>container.querySelector('[aria-label="管理 Original"]').click());
+    await click("调整另存");
     const key=container.querySelector('[aria-label="p API key"]');
     assert.equal(key.type,"password");
     assert.equal([...container.querySelectorAll("button")].find(b=>b.textContent==="保存 p 认证").disabled,true);
@@ -1177,7 +1193,8 @@ test("workspace handles /team locally while busy and freezes one HTML submission
   await modalEnvironment(async({root,win,useGuiWorkspace})=>{
     const previous=Object.getOwnPropertyDescriptor(globalThis,"sessionStorage");
     Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
-    const records={a:{id:"a",project:"/a",draft:"",turns:[],team:null},b:{id:"b",project:"/b",draft:"",turns:[],team:null}};
+    const team={id:"fixture",name:"Fixture",main:{provider:"p",modelId:"main"},secondary:[]};
+    const records={a:{id:"a",project:"/a",draft:"",turns:[],team},b:{id:"b",project:"/b",draft:"",turns:[],team}};
     let active={sessionId:"other",taskId:"running"}, unknown=false, found=false, workspace, taskStatus="completed";
     const submits=[],actions=[],taskReads=[];
     const api={subscribe:()=>()=>{},read:async(kind,args={})=>{
@@ -1283,6 +1300,9 @@ test("project inspection keeps a newer path when an older read completes and for
     const commands={inspectProject:path=>new Promise(resolve=>waits.push({path,resolve})),
       bindWorkspace:async (workspace,path)=>{opened.push(path);return {...workspace,project:path};}};
     await act(()=>root.render(React.createElement(ProjectDialog,{commands,workspace:{id:"team",name:"Existing",revision:1},onSaved(){},onClose(){}})));
+    const manual=container.querySelector("form > details");
+    assert.equal(manual.open,false);
+    await act(()=>manual.querySelector("summary").click());
     const enter = async path => {
       await act(()=>{const input=container.querySelector('input');Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,'value').set.call(input,path);input.dispatchEvent(new win.Event('input',{bubbles:true}));});
       await act(()=>[...container.querySelectorAll("button")].find(b=>b.textContent==="只读检查目录").click());
@@ -1297,8 +1317,37 @@ test("project inspection keeps a newer path when an older read completes and for
     assert.match(container.textContent,/未配置执行环境/);
     assert.match(container.textContent,/尚未运行/);
     assert.equal(container.querySelector('.project-inspection details').open,false);
-    await act(()=>container.querySelector('form').dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true})));
+    await act(async()=>{container.querySelector('form').dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true}));});
     assert.deepEqual(opened,['/new']);
+  });
+});
+
+test("native directory picker suggests an empty Team name and retains the selected directory on cancellation",async()=>{
+  await modalEnvironment(async({root,container,win,ProjectDialog})=>{
+    const inputs=[],selections=["/tmp/学习目录",null,"/tmp/另一个目录"];
+    win.cothinkDesktop={chooseProjectDirectory:async path=>{inputs.push(path);return selections.shift();}};
+    const commands={inspectProject:async path=>({canonicalPath:path,directoryAvailable:true})};
+    await act(()=>root.render(React.createElement(ProjectDialog,{commands,onSaved(){},onClose(){}})));
+    const button=()=>[...container.querySelectorAll("button")].find(node=>node.textContent==="选择或新建文件夹…");
+    assert.ok(button());
+    const name=container.querySelector("input");
+    await act(async()=>button().click());
+    assert.equal(name.value,"学习目录");
+    await act(async()=>button().click());
+    assert.match(container.textContent,/\/tmp\/学习目录/);
+    const setName=value=>act(()=>{
+      Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(name,value);
+      name.dispatchEvent(new win.Event("input",{bubbles:true}));
+    });
+    const create=container.querySelector('button[type="submit"]');
+    await setName("🌱".repeat(80));
+    assert.equal(create.disabled,false);
+    await setName("🌱".repeat(81));
+    assert.equal(create.disabled,true);
+    await setName("我填的名称");
+    await act(async()=>button().click());
+    assert.equal(name.value,"我填的名称");
+    assert.deepEqual(inputs,[undefined,"/tmp/学习目录","/tmp/学习目录"]);
   });
 });
 
@@ -1310,7 +1359,7 @@ test("Team creation form needs only a name even without a directory or roster",a
     await act(()=>root.render(React.createElement(ProjectDialog,{commands,onSaved:value=>saved.push(value),onClose(){}})));
     assert.match(container.textContent,/暂无默认阵容/);
     await act(()=>{const input=container.querySelector("input");Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(input,"课程笔记");input.dispatchEvent(new win.Event("input",{bubbles:true}));});
-    await act(()=>container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true})));
+    await act(async()=>{container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true}));});
     assert.deepEqual(requests,[{name:"课程笔记",project:null,defaultRosterId:null}]);
     assert.equal(saved[0].id,"new");
   });
@@ -1415,7 +1464,8 @@ test("a delayed post-submit task read cannot overwrite the next saved editor on 
   await modalEnvironment(async({root,win,useGuiWorkspace})=>{
     const previous=Object.getOwnPropertyDescriptor(globalThis,"sessionStorage");
     Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
-    const make=id=>({id,project:"/"+id,turns:[],draft:"",editor:{text:"",workRequest:null,selectionId:null,editId:null},draftRevision:null,branchAnchor:"root-"+id});
+    const team={id:"fixture",name:"Fixture",main:{provider:"p",modelId:"main"},secondary:[]};
+    const make=id=>({id,team,project:"/"+id,turns:[],draft:"",editor:{text:"",workRequest:null,selectionId:null,editId:null},draftRevision:null,branchAnchor:"root-"+id});
     const records={a:make("a"),b:make("b")}, saves=[],submits=[];
     let workspace,releaseTask,taskReadStarted;
     const entered=new Promise(resolve=>{taskReadStarted=resolve;});
@@ -1534,7 +1584,84 @@ test("view updates use the acknowledged revision and keep a newer selected sessi
   });
 });
 
-test("roster default failure preserves the confirmed switch and retries only the default",async()=>{
+test("roster search and row actions keep conversation selection separate from the Team default", async()=>{
+  await modalEnvironment(async({root,container,win,TeamPanel})=>{
+    const main={provider:"p",modelId:"primary"}, reviewer={provider:"p",modelId:"reviewer"}, other={provider:"q",modelId:"q-123"}, unauth={provider:"r",modelId:"r-321"};
+    const first={id:"first",name:"原组合",main,secondary:[reviewer]}, next={id:"next",name:"备选组合",main:other,secondary:[reviewer]};
+    const scope={id:"group",revision:1,defaultRosterId:first.id};
+    const actions=[];
+    const props={session:{id:"chat",team:first},workspace:scope,teams:[first,next],models:[{...main,name:"Primary"},{...reviewer,name:"Reviewer"},{...other,name:"Northstar"},{...unauth,name:"Unconfigured"}],
+      providers:[{id:"p",configured:true},{id:"q",configured:true},{id:"r",configured:false}],
+      commands:{selectTeam:async args=>actions.push(["current",args]),updateWorkspace:async (...args)=>actions.push(["default",...args])},onClose(){}};
+    await act(()=>root.render(React.createElement(TeamPanel,props)));
+    const labeled=label=>container.querySelector(`[aria-label="${label}"]`);
+    const input=(label,value)=>act(()=>{
+      const field=labeled(label);
+      assert.ok(field,label);
+      Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(field,value);
+      field.dispatchEvent(new win.Event("input",{bubbles:true}));
+    });
+    const click=label=>act(async()=>{const button=labeled(label);assert.ok(button,label);button.click();});
+    await input("搜索阵容","Northstar");
+    assert.equal(labeled("使用 原组合"),null);
+    await click("使用 备选组合");
+    assert.deepEqual(actions,[["current",{sessionId:"chat",teamId:"next"}]]);
+    await click("管理 备选组合");
+    await click("将 备选组合 设为此 Team 默认");
+    assert.deepEqual(actions.at(-1),["default",scope,{defaultRosterId:"next"}]);
+    assert.equal(actions.length,2);
+    await input("搜索阵容","原组合");
+    await click("管理 原组合");
+    assert.equal(labeled("删除 原组合").disabled,true);
+    assert.match(labeled("删除 原组合").parentElement.textContent,/当前对话正在使用/);
+    await click("调整 原组合");
+    await input("搜索主模型","r-321");
+    const select=labeled("主模型");
+    assert.equal([...select.options].some(option=>option.textContent.includes("Reviewer")),false);
+    assert.match([...select.options].find(option=>option.value==='["r","r-321"]').textContent,/Unconfigured.*缺少认证/);
+    await act(()=>root.render(React.createElement(TeamPanel,{...props,key:"only",session:{id:"chat"},teams:[first]})));
+    await click("管理 原组合");
+    assert.equal(labeled("删除 原组合").disabled,true);
+    assert.match(labeled("删除 原组合").parentElement.textContent,/至少保留一个阵容/);
+  });
+});
+
+test("a Team without conversations can set a valid default and rejects an invalid roster",async()=>{
+  await modalEnvironment(async({root,container,TeamPanel})=>{
+    const main={provider:"p",modelId:"a"}, reviewer={provider:"p",modelId:"b"};
+    const unconfigured={provider:"q",modelId:"c"}, gone={provider:"p",modelId:"retired"};
+    const active={id:"valid",name:"可用",main,secondary:[reviewer]};
+    const missing={id:"missing",name:"下架副模型",main,secondary:[reviewer,gone]};
+    const noAuth={id:"unauth",name:"副模型未认证",main,secondary:[reviewer,unconfigured]};
+    const group={id:"team",revision:1,defaultRosterId:null};
+    const defaults=[];
+    const props={workspace:group,teams:[active,missing,noAuth],models:[main,reviewer,unconfigured],
+      providers:[{id:"p",configured:true},{id:"q",configured:false}],
+      commands:{updateWorkspace:async(row,change)=>defaults.push([row,change])},onClose(){}};
+    const labeled=label=>container.querySelector(`[aria-label="${label}"]`);
+    const click=label=>act(async()=>labeled(label).click());
+    await act(()=>root.render(React.createElement(TeamPanel,props)));
+    assert.equal(labeled("使用 可用").disabled,true);
+    assert.match(labeled("使用 下架副模型").textContent,/retired.*目录不可用/);
+    await click("管理 下架副模型");
+    assert.equal(labeled("将 下架副模型 设为此 Team 默认").disabled,true);
+    await click("将 下架副模型 设为此 Team 默认");
+    assert.match(labeled("使用 副模型未认证").textContent,/q.*缺少认证/);
+    await click("管理 副模型未认证");
+    assert.equal(labeled("将 副模型未认证 设为此 Team 默认").disabled,true);
+    await click("将 副模型未认证 设为此 Team 默认");
+    assert.deepEqual(defaults,[]);
+    await click("管理 可用");
+    await click("将 可用 设为此 Team 默认");
+    assert.deepEqual(defaults,[[group,{defaultRosterId:"valid"}]]);
+    await act(()=>root.render(React.createElement(TeamPanel,{...props,workspace:{...group,archived:true}})));
+    assert.equal(labeled("将 可用 设为此 Team 默认").disabled,true);
+    await click("将 可用 设为此 Team 默认");
+    assert.equal(defaults.length,1);
+  });
+});
+
+test("roster default failure retries only the default and keeps the current conversation",async()=>{
   await modalEnvironment(async({root,container,TeamPanel})=>{
     const first={id:"one",name:"原阵容",main:{provider:"p",modelId:"a"},secondary:[{provider:"p",modelId:"b"}]};
     const next={...first,id:"two",name:"新阵容"};
@@ -1551,22 +1678,21 @@ test("roster default failure preserves the confirmed switch and retries only the
       },
       refreshTeams:async()=>({workspaces:[{...saved,revision:2}]})
     };
-    await act(()=>root.render(React.createElement(TeamPanel,{session:{id:"s",team:first},workspace:group,teams:[first,next],commands,onClose(){}})));
+    await act(()=>root.render(React.createElement(TeamPanel,{session:{id:"s",team:first},workspace:group,teams:[first,next],models:[first.main,...first.secondary],providers:[{id:"p",configured:true}],commands,onClose(){}})));
     const click=label=>act(async()=>{
       const button=[...container.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.textContent)===label);
       assert.ok(button,label);
       button.click();
     });
-    const combined=[...container.querySelectorAll("button")].find(button=>
-      button.getAttribute("aria-label")==="使用新阵容，并用于此 Team 的新对话");
-    assert.equal(combined?.textContent,"使用并设为新对话默认");
-    await click("使用新阵容，并用于此 Team 的新对话");
-    assert.equal(current.id,next.id);
+    await click("管理 新阵容");
+    await click("将 新阵容 设为此 Team 默认");
+    assert.equal(current.id,first.id);
     assert.equal(saved.defaultRosterId,first.id);
-    assert.match(container.textContent,/当前对话已使用「新阵容」.*默认阵容未保存/);
+    assert.match(container.textContent,/默认阵容未保存/);
     await click("重新保存默认阵容");
     assert.equal(saved.defaultRosterId,next.id);
-    assert.deepEqual(calls,[["switch","two"],["default",1],["default",2]]);
+    assert.equal(current.id,first.id);
+    assert.deepEqual(calls,[["default",1],["default",2]]);
   });
 });
 
@@ -1778,7 +1904,7 @@ test("damaged Pi affiliation keeps history readable and requires an explicit con
 });
 
 test('versioned per-session turn options survive reopen and unknown submit without granting another project access',async t=>{
- const {fixture}=await import('./helpers/pi-fixture.js');const {repository}=await import('./helpers/git-fixture.js');
+ const {fixture}=await import('./helpers/pi-fixture.js');const {repository,git}=await import('./helpers/git-fixture.js');
  const {createGuiController}=await import('../src/gui-controller.js');const {saveConfig}=await import('../src/config.js');const {createTeamConfig}=await import('../src/teams.js');const {readTask}=await import('../src/task.js');const {randomUUID}=await import('node:crypto');
  const f=await fixture(t),repoA=repository(t),repoB=repository(t);saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Options fixture',randomUUID()));
  let controller=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>controller.close());
@@ -1793,7 +1919,7 @@ test('versioned per-session turn options survive reopen and unknown submit witho
   try{
    await act(async()=>root.render(React.createElement(Harness)));
    await act(async()=>workspace.commands.openSession(a.id));
-   await act(()=>{workspace.commands.setDraft(a.id,'question with saved limits');workspace.commands.setTurnOptions(a.id,{maxCalls:'3',readOnly:true,delegate:false,readAllowed:true,readPaths:'a.txt'});});
+   await act(()=>{workspace.commands.setDraft(a.id,'question with saved limits');workspace.commands.setTurnOptions(a.id,{maxCalls:'3',readOnly:true,delegate:false,readAllowed:true,readPaths:'a.txt',readVersion:git(repoA.project,'rev-parse','HEAD')});});
    await act(async()=>workspace.commands.flushAllDrafts());const savedA=await controller.session(a.id);assert.equal(savedA.editor.turnOptions.maxCalls,'3');assert.equal(savedA.editor.turnOptions.readProject,savedA.project);
    await act(async()=>workspace.commands.openSession(b.id));assert.equal(workspace.state.turnOptions,null,'A opt-in never becomes B consent');
    await act(()=>workspace.commands.setTurnOptions(b.id,{maxCalls:'1'}));await act(async()=>workspace.commands.flushAllDrafts());
@@ -1871,4 +1997,205 @@ test("saved Team survives rejected or unknown first conversation creation withou
     if(previous)Object.defineProperty(globalThis,"sessionStorage",previous);else delete globalThis.sessionStorage;
   }
  });
+});
+
+test("stale homepage reservation and transfer expose draft recovery and keep the original creation ID",async()=>{
+  for(const phase of ["reserve","transfer"]) await modalEnvironment(async({root,container,win,useGuiWorkspace,Conversation})=>{
+    const previous=Object.getOwnPropertyDescriptor(globalThis,"sessionStorage");
+    Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
+    const draftId=crypto.randomUUID(), sessionId=crypto.randomUUID();
+    const editor={editorVersion:2,text:"Local saved text",editId:crypto.randomUUID(),workRequest:null,
+      selectionId:null,turnOptions:null,materials:[{id:crypto.randomUUID(),sha256:"a".repeat(64)}]};
+    const material=editor.materials.map(ref=>({...ref,status:"ready",name:"fixture.txt",mediaType:"text/plain",byteLength:12}));
+    const initial={draftId,revision:1,editor,materials:material,pendingCreateSessionId:phase==="transfer"?sessionId:null,targetWorkspaceId:null};
+    let host=structuredClone(initial), gui;
+    const requests=[];
+    const savedSession=()=>({id:sessionId,project:null,workspaceId:null,team:null,turns:[],
+      editor:host.editor,materials:material,draftRevision:"transferred",branchAnchor:"transferred"});
+    const conflict=()=>Object.assign(Error("首页保存稿已变化"),{code:"DRAFT_CONFLICT"});
+    const api={subscribe:()=>()=>{},read:async(kind,args)=>{
+      if(kind==="bootstrap")return {protocol:{unified:1,guiInput:2},homeDraft:structuredClone(host),
+        teams:[],models:[],providers:[],sessions:[],workspaces:[],work:{},active:null};
+      if(kind==="sessions")return {items:[]};
+      if(kind==="session-creation"){
+        requests.push({name:"query",id:args.id});
+        return {status:"confirmed",session:savedSession()};
+      }
+    },action:async(name,args)=>{
+      requests.push({name,...args});
+      if(name==="home.reserve")throw conflict();
+      if(name==="home.draft"){
+        assert.equal(args.expectedRevision,host.revision);
+        host={...host,editor:args.editor,revision:host.revision+1};
+        return structuredClone(host);
+      }
+      if(name==="home.transfer"){
+        if(args.expectedRevision!==host.revision)throw conflict();
+        const result=savedSession();
+        host=null;
+        return result;
+      }
+      throw Error("Unexpected mutation: "+name);
+    }};
+    function Harness(){
+      gui=useGuiWorkspace(api);
+      return React.createElement(Conversation,{state:gui.state,commands:gui.commands});
+    }
+    const button=label=>[...container.querySelectorAll("button")].find(node=>node.textContent===label);
+    try {
+      await act(async()=>root.render(React.createElement(Harness)));
+      host={...host,revision:2,pendingCreateSessionId:sessionId,
+        editor:{...editor,text:"Other window's saved text",editId:crypto.randomUUID()}};
+      if(phase==="reserve")await act(async()=>gui.commands.submit());
+      else await act(async()=>button("查询原会话").click());
+      assert.equal(gui.state.draftConflict,true,phase);
+      assert.equal(container.querySelector("textarea").value,editor.text);
+      assert.ok(button("读取保存稿"));
+      assert.ok(button("以本机稿再保存"));
+      await act(async()=>button(phase==="reserve"?"读取保存稿":"以本机稿再保存").click());
+      assert.equal(gui.state.draftConflict,false);
+      assert.equal(gui.state.homeDraft.pendingCreateSessionId,sessionId);
+      assert.deepEqual(gui.state.homeDraft.editor.materials,editor.materials);
+      const expected=phase==="reserve"?"Other window's saved text":editor.text;
+      assert.equal(container.querySelector("textarea").value,expected);
+      await act(async()=>button("查询原会话").click());
+      assert.equal(gui.state.session.id,sessionId);
+      assert.equal(container.querySelector("textarea").value,expected);
+      assert.ok(requests.filter(row=>row.name==="query").every(row=>row.id===sessionId));
+      assert.ok(requests.every(row=>!["session.create","task.submit"].includes(row.name)));
+    } finally {
+      await act(()=>root.unmount());
+      if(previous)Object.defineProperty(globalThis,"sessionStorage",previous);else delete globalThis.sessionStorage;
+    }
+  });
+});
+
+test("execution settings keep a read-only Docker diagnosis separate from an explicit probe", async () => {
+  await modalEnvironment(async ({root,container,Settings}) => {
+    const calls = [];
+    const commands = {inspectExecution: async ({probe}) => {
+      calls.push(probe);
+      return {checkedAt:"2026-11-09T00:00:00Z",configDigest:"first",
+        diagnostic:{status:"passed",code:"LOCAL_IMAGE_FOUND",message:"本机固定镜像已存在。"},
+        probe:{status:probe?"passed":"not_run",message:probe?"固定镜像已成功启动并清理。":undefined}};
+    }};
+    const boot={configured:true,providers:[],executionConfigDigest:"first",work:{execution:{image:"sha256:fixture"}}};
+    const render = value => root.render(React.createElement(Settings,{boot:value,initialTab:"work",commands,onClose(){}}));
+    const button = title => [...container.querySelectorAll("button")].find(b=>b.textContent===title);
+    await act(async()=>render(boot));
+    assert.deepEqual(calls,[]);
+    await act(async()=>button("只读检查 Docker")?.click());
+    assert.deepEqual(calls,[false]);
+    assert.match(container.textContent,/尚未运行容器探针/);
+    await act(async()=>button("检查执行环境")?.click());
+    assert.deepEqual(calls,[false,true]);
+    assert.match(container.textContent,/固定镜像已成功启动并清理/);
+    await act(async()=>render({...boot,executionConfigDigest:"changed"}));
+    assert.doesNotMatch(container.textContent,/固定镜像已成功启动并清理/);
+    assert.match(container.textContent,/配置已变更，请重新检查/);
+  });
+});
+
+test("OAuth settings submit a single prompt and cancel a waiting operation when closing", async () => {
+  await modalEnvironment(async ({win,root,container,Settings}) => {
+    const calls=[];
+    const prompt={id:"prompt",type:"manual_code",message:"粘贴授权回调地址"};
+    const operation={operationId:"login",providerId:"fixture",status:"running",prompt,message:"等待完成登录"};
+    const boot={configured:true,version:"fixture",providers:[{id:"fixture",name:"Fixture OAuth",oauth:true}],work:{}};
+    const commands={
+      startOAuth:async provider=>{calls.push(["start",provider]);return operation;},
+      getOAuth:async()=>operation,
+      respondOAuth:async(...args)=>{calls.push(["respond",...args]);return {...operation,prompt:null};},
+      cancelOAuth:async id=>{calls.push(["cancel",id]);return {...operation,status:"cancelled"};},
+    };
+    await act(async()=>root.render(React.createElement(Settings,{boot,commands,onClose:()=>root.render(null)})));
+    const provider=container.querySelector("select");
+    await act(async()=>{provider.value="fixture";provider.dispatchEvent(new win.Event("change",{bubbles:true}));});
+    const start=[...container.querySelectorAll("button")].find(b=>b.textContent==="使用 OAuth 登录");
+    assert.ok(start);
+    await act(async()=>start.click());
+    const reply=container.querySelector('input[autocomplete="off"][type="password"]');
+    assert.ok(reply);
+    reply.value="private callback";
+    await act(async()=>reply.form.dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true})));
+    assert.doesNotMatch(container.textContent,/private callback/);
+    await act(async()=>container.querySelector('button[aria-label="关闭设置"]').click());
+    assert.deepEqual(calls,[["start","fixture"],["respond","login","prompt","private callback"],["cancel","login"]]);
+  });
+});
+
+test("local skill settings submit the selected list and preserve its draft after a host conflict", async () => {
+  await modalEnvironment(async ({root,container,Settings}) => {
+    const attempts=[];
+    const boot={configured:true,version:"fixture",providers:[],work:{},localSkillPaths:["/one/SKILL.md","/two/SKILL.md"]};
+    const commands={saveLocalSkills:async ({paths})=>{
+      attempts.push(paths);
+      if(attempts.length===1)throw Error("技能名称冲突 example");
+      return {paths,skills:[{name:"example",description:"External purpose",sourceKind:"selected",explicitOnly:true}]};
+    }};
+    const button = title => [...container.querySelectorAll("button")].find(b=>b.textContent===title);
+    await act(async()=>root.render(React.createElement(Settings,{boot,initialTab:"skills",commands,onClose(){}})));
+    assert.match(container.textContent,/\/one\/SKILL.md/);
+    await act(async()=>container.querySelector('button[aria-label="移除技能来源 /two/SKILL.md"]').click());
+    await act(async()=>button("保存本地技能来源").click());
+    assert.match(container.textContent,/技能名称冲突 example/);
+    assert.doesNotMatch(container.textContent,/\/two\/SKILL.md/);
+    await act(async()=>button("保存本地技能来源").click());
+    assert.deepEqual(attempts,[["/one/SKILL.md"],["/one/SKILL.md"]]);
+    assert.match(container.textContent,/仅手动使用/);
+    assert.match(container.textContent,/External purpose/);
+  });
+});
+
+test("composer keeps add actions separate and refuses incomplete materials", async () => {
+  await modalEnvironment(async ({win, root, container}) => {
+    const imports=[], removes=[], sends=[];
+    const props={boot:{protocol:{unified:1}},homeReady:true,draft:"",onDraft(){},onSubmit:()=>sends.push(true),
+      onImportMaterials:files=>imports.push(...files),onRemoveMaterial:item=>removes.push(item),
+      onAssociateProject(){},onTurnOptions(){}};
+    const material={key:"upload",name:"plot.png",mediaType:"image/png",byteLength:10,status:"failed",error:"图片未保存"};
+    const render=items=>act(()=>root.render(React.createElement(Composer,{...props,materials:items})));
+    await render([material]);
+    const plus=container.querySelector('[aria-label="添加本次操作"]'),send=container.querySelector('[type="submit"]');
+    await act(()=>plus.click());
+    assert.equal(plus.getAttribute("aria-expanded"),"true");
+    assert.match(container.textContent,/添加文件或图片/);
+    assert.match(container.textContent,/关联目录/);
+    assert.doesNotMatch(container.textContent,/只分析，不修改|使用技能|插件命令/);
+    await act(()=>win.document.body.dispatchEvent(new win.Event("pointerdown",{bubbles:true})));
+    assert.equal(plus.getAttribute("aria-expanded"),"false");
+    await act(()=>plus.click());
+    const item=[...container.querySelectorAll("button")].find(button=>button.textContent==="添加文件或图片");
+    item.focus();
+    await act(()=>item.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Escape",bubbles:true})));
+    assert.equal(win.document.activeElement,plus);
+    assert.equal(send.disabled,true);
+    assert.match(container.textContent,/图片未保存/);
+    await act(()=>container.querySelector('[aria-label="移除 plot.png"]').click());
+    assert.deepEqual(removes,[material]);
+    await render([{...material,status:"ready",error:undefined}]);
+    assert.equal(send.disabled,false);
+    await act(()=>send.click());
+    assert.deepEqual(sends,[true]);
+    const file=new win.File(["x"],"another.png",{type:"image/png"});
+    const paste=new win.Event("paste",{bubbles:true,cancelable:true});
+    Object.defineProperty(paste,"clipboardData",{value:{files:[file]}});
+    await act(()=>container.querySelector("textarea").dispatchEvent(paste));
+    assert.deepEqual(imports,[file]);
+  });
+});
+
+test("markdown never requests a remote image until the reader chooses to load it", async () => {
+  const {Markdown}=await import("../gui/src/Markdown.js");
+  await modalEnvironment(async ({root,container})=>{
+    await act(()=>root.render(React.createElement(Markdown,{text:"![safe](https://example.test/image.png) ![unsafe](file:///tmp/private.png)\n\n```js\nconst n = 1;\n```"})));
+    assert.equal(container.querySelectorAll("img").length,0);
+    assert.match(container.textContent,/example.test/);
+    const button=[...container.querySelectorAll("button")].find(button=>button.textContent==="加载图片");
+    await act(()=>button.click());
+    assert.equal(container.querySelectorAll("img").length,1);
+    assert.equal(container.querySelector("img").getAttribute("referrerpolicy"),"no-referrer");
+    assert.equal(container.querySelector("img").getAttribute("src"),"https://example.test/image.png");
+    assert.ok([...container.querySelectorAll("button")].find(button=>button.textContent==="复制代码"));
+  });
 });

@@ -33,7 +33,7 @@ test('authenticated update actions reject endpoint/package injection and malform
   const c=await createGuiController({home:f.home,cwd:f.cwd,updateService:updates});
   const host=await startGuiServer({home:f.home,controller:c,open:false});t.after(()=>host.close());
   const base=host.url.split('/#')[0];
-  const post=(name,args,auth=true)=>fetch(base+'/api/action',{method:'POST',headers:{'Content-Type':'application/json',...(auth?{Authorization:'Bearer '+host.token}:{})},body:JSON.stringify({action:name,args})});
+  const post=(name,args,auth=true)=>fetch(base+'/api/action',{method:'POST',headers:{'Content-Type':'application/json', "X-CoThink-GUI-Input":"2",...(auth?{Authorization:'Bearer '+host.token}:{})},body:JSON.stringify({action:name,args})});
   assert.equal((await post('updates.check',{},false)).status,403);
   for(const [name,args] of [['updates.check',{endpoint:'http://bad'}],['updates.configure',{automatic:'false'}],['updates.configure',{automatic:true,package:'bad'}]]) {
     assert.equal((await post(name,args)).status,400);

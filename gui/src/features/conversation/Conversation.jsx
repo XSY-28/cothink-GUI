@@ -7,7 +7,8 @@ import { statusLabel, phaseLabel, elapsedLabel } from "../../view.js";
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
-  onSettings, onPlugins, onToggleNavigation, onWorkspaceMenu, onConversations, onRoster, onAttention, onFork, onOpenFile, onOpenDetails, onNotes, onCopy}) {
+  onSettings, onPlugins, onToggleNavigation, onWorkspaceMenu, onPrepareProject, onConversations, onRoster, onAttention, onFork, onOpenFile, onOpenDetails, onNotes, onCopy, onLocalCommand, onConversationMenu, onChooseProjectFiles, onAssociateProject,
+  onChooseSkill, onPreviewMaterial, onRetryMaterial}) {
   const {bootstrap: boot, task, draft, ready, submitting, pending, pendingStatus} = state;
   const session = workspace?.archived && state.session ? {...state.session,workspaceArchived:true,readOnly:true} : state.session;
   const [now,setNow]=useState(Date.now());
@@ -21,10 +22,12 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   const stopLabel = state.stopping ? statusLabel(state.stopping.status) : "停止";
   const recoverPending = () => commands.recoverSubmission();
   const editDraft = text => commands.setDraft(session?.id, text);
-  const change = (name, args) => safely(commands.changeSession(name, args));
   const submit = async (options) => {
     const result = await commands.submit({sessionId:session?.id,...options});
-    if (result?.local === "team") onSettings("teams");
+    if(result?.local) {
+      if(onLocalCommand)onLocalCommand(result.local);
+      else if(result.local==="team"||result.local==="models")onSettings?.("teams");
+    }
     return result;
   };
   const copy = onCopy;
@@ -114,10 +117,13 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
           </button>
           <h1 className={styles.workspaceHeading}>
             <button onClick={onWorkspaceMenu} title={teamName}>{teamName}</button>
+            {session?.title&&<><span className={styles.headingSeparator} aria-hidden="true">/</span><span className={styles.currentTitle} title={`${teamName} / ${session.title}`}>
+              {onConversationMenu?<button onClick={onConversationMenu} aria-label={`对话操作：${session.title}`}>{session.title}</button>:session.title}
+            </span></>}
           </h1>
           <div className={styles.headerActions}>
             <button className="conversation-picker-trigger" onClick={onConversations}><Icon name="conversations" />对话</button>
-            <button className={styles.teamButton} onClick={onRoster} title={session?.team?.name || "查看阵容"}><Icon name="team" />阵容</button>
+            <button className={styles.teamButton} aria-label="阵容" onClick={onRoster} title={session?.team?.name || "查看阵容"}><Icon name="team" />{session?.team?.name || "阵容"}</button>
           </div>
         </header>
         {workspace?.archived && <div className="pending-banner" role="status">
@@ -129,6 +135,10 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             <span>{workspace.attention.kind === "unread" ? "这个 Team 有新结果。" : "这个 Team 有对话需要处理。"}</span>
             <button onClick={onAttention}>{workspace.attention.kind === "unread" ? "查看新结果" : "查看待处理"}</button>
           </div>}
+        {session?.projectDirectoryAvailable===false && <p className={styles.contextNote}>保存的目录不可用。可以继续聊天；本次项目资源和文件读取不可用。</p>}
+        {session?.project && session.projectDirectoryAvailable!==false && session.projectStatus?.executionReady===false && <p className={styles.contextNote}>
+          文件工作需要准备。 <button onClick={()=>onPrepareProject(session.project,session.projectStatus?.preparation)}>准备文件工作</button>
+        </p>}
         {session && workspace?.project && !session.project && <p className={styles.contextNote}>当前对话未关联目录。需要使用项目目录时，请新建对话。</p>}
         {session?.forkOf && <div className={styles.forkContext}><span>分支对话</span><button onClick={()=>safely(commands.openSession(session.forkOf.sessionId,session.forkOf.taskId))}>返回来源对话</button></div>}
         {showNotes && <div className={styles.releaseNotice} role="status"><span>CoThink {boot.version} 已安装，有新的本地更新记录。</span><button onClick={onNotes}>查看</button><button aria-label="暂时收起本地更新提示" onClick={onHideNotes}>×</button></div>}
@@ -173,7 +183,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
           <button disabled={!!workspace?.archived} onClick={()=>safely(commands.setSessionNavigation({sessionId:session.id,expectedRevision:session.navigation.revision,change:{archived:false}}))}>恢复对话</button></div>}
         {error && (
           <div className="error-banner" role="alert">
-            <span>{error}</span>
+            <span>{error.split("\n")[0]}</span>
+            {error.includes("\n")&&<details className={styles.errorDetails}><summary>展开诊断</summary><pre>{error}</pre></details>}
+            {onLocalCommand&&/命令/.test(error)&&<button onClick={()=>onLocalCommand("help")}>可用命令</button>}
             <button
               onClick={() => {
                 setError("");
@@ -218,7 +230,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
               <section className={styles.emptyState}>
                 {!ready || state.navigationLoading ? <p>正在读取…</p> : error ? <p>请先核对上方提示，已保存的 Team 和历史会保留。</p> : state.workspaceId === undefined ? <p>Team 归属暂时无法确认。请从左侧选择 Team，或搜索已保存的对话。</p> : <>
                   <h2>{workspace ? "继续这个 Team 的工作" : "从一件想做的事开始"}</h2>
-                  <p>{workspace ? "这个 Team 还没有可打开的对话。从‘对话’中新建，或查找已归档对话。" : "从左侧新建 Team，或搜索已保存的对话。"}</p>
+                  <p>{workspace ? "这个 Team 还没有可打开的对话。从‘对话’中新建，或查找已归档对话。" : "直接输入即可开始，也可搜索已保存的对话。"}</p>
                   <button onClick={onConversations}>打开对话</button>
                 </>}
               </section>
@@ -235,7 +247,11 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                 >
                   <div className={styles.turnInput} data-task-id={turn.taskId} data-reading-part="input" tabIndex={-1}>
 
-                    <div className={styles.userText}>{turn.input}</div>
+                    <div className={styles.userText}>{turn.input}
+                      {!!turn.materials?.length&&<ul className={styles.sentMaterials} aria-label="已发送材料">
+                        {turn.materials.map(item=><li key={item.id}>{item.name??"已保存材料"}</li>)}
+                      </ul>}
+                    </div>
                   </div>
                   <article className={styles.answer} data-task-id={turn.taskId} data-reading-part="result" data-result-revision={turn.resultRevision || undefined} tabIndex={-1}>
                     <header className={styles.answerHeading}>
@@ -250,7 +266,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。请核对已保存的执行记录。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。" : turn.status === "cancelled" ? "已停止。已完成的内容保留，停止不等于回滚；可查看此条执行记录后继续说明下一步。" : "本次未完整完成。请核对已有内容和执行记录；若有成果，文件入口会列在下方。"}</p>}
                     {turn.finalText ? (
                       <div className="prose">
-                        <Markdown text={turn.finalText} />
+                        <TurnMarkdown text={turn.finalText} sessionId={session.id} taskId={turn.taskId} resolveImage={commands.resolveImage} />
                       </div>
                     ) : (
                       <div className={styles.incompleteAnswer}>
@@ -264,6 +280,12 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                         )}
                       </div>
                     )}
+                    {turn.projectPreparationBlocked && <div className={styles.incompleteAnswer}>
+                      <p>已保存原任务。准备目录后可明确发起一次新请求继续。</p>
+                      {session.turns.some(item=>item.continuationSource?.taskId===turn.taskId) ? <p>此任务已有一条续作。</p> : session.projectStatus?.executionReady
+                        ? <button disabled={!!boot.active||!!pending||session.readOnly||submitting} onClick={()=>safely(commands.continuePrepared(turn))}>继续原任务（将新增请求）</button>
+                        : <button disabled={session.projectDirectoryAvailable===false} onClick={()=>onPrepareProject(turn.projectPreparationBlocked.path,session.projectStatus?.preparation)}>准备文件工作</button>}
+                    </div>}
                     {turn.proposalRef && !turn.confirmationIntent?.consumedByTaskId && <button disabled={!!boot.active||!!pending||session.readOnly} onClick={()=>safely(commands.confirmWork(turn))}>确认上述计划并执行</button>}
                     {turn.hasWork && <OutcomeFiles taskId={turn.taskId} status={turn.status} commands={commands} onOpen={onOpenFile}/>}
                     <footer className={styles.answerActions}>
@@ -300,21 +322,41 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             {boot.extensionUI?.notifications.filter(n => n.sessionId === session?.id).slice(-4).map(n =>
               <p key={n.id} role={n.type === "error" ? "alert" : "status"}>{n.message}</p>)}
           </div>
+          {state.creating && <p role="status">正在确认新对话，当前草稿保留…</p>}
+          {(state.creationNotice || state.homeReady && state.homeDraft?.pendingCreateSessionId) && <p role="status">
+            创建待确认 · {state.creationNotice?.sessionId ?? state.homeDraft?.pendingCreateSessionId}{" "}
+            <button type="button" disabled={state.creating} onClick={()=>safely(commands.recoverCreation())}>查询原会话</button>
+          </p>}
+          {state.homeReady && <p className={styles.contextNote}>首次发送将建立未分组对话。</p>}
+          {!session && boot.homeDraftError && <p className="error-text" role="alert">{boot.homeDraftError}</p>}
           <Composer
             session={session}
+            homeReady={state.homeReady}
+            creating={state.creating || !!(state.homeReady && state.homeDraft?.pendingCreateSessionId)}
             boot={boot}
             draft={draft}
             draftConflict={state.draftConflict}
-            onResolveDraft={choice=>safely(commands.resolveDraft(session.id,choice))}
+            onResolveDraft={choice=>safely(commands.resolveDraft(session?.id,choice))}
             onDraft={editDraft}
             turnOptions={state.turnOptions} onTurnOptions={change=>commands.setTurnOptions(session?.id,change)}
             onSubmit={submit}
-            onOrganize={()=>safely(commands.organizeContext())}
-            onChange={change}
             busy={!!boot.active || !!boot.extensionUI?.command || !!boot.shutdown?.requested || state.connection === "reconnecting"}
             submitting={submitting}
             pending={!!pending}
             onPlugins={onPlugins}
+            editorKey={state.editorKey??session?.id}
+            materials={state.materials}
+            materialCapabilities={state.materialCapabilities}
+            materialError={state.materialError??session?.materialError??state.homeDraft?.materialError}
+            onImportMaterials={state.materialCapabilities?commands.addMaterials:undefined}
+            onRemoveMaterial={commands.removeMaterial?item=>safely(commands.removeMaterial(item.status==="ready"?item.id:item.uploadId??item.id)):undefined}
+            onPreviewMaterial={onPreviewMaterial}
+            onRetryMaterial={onRetryMaterial}
+            onChooseProjectFiles={onChooseProjectFiles}
+            onAssociateProject={onAssociateProject}
+            onChooseSkill={onChooseSkill}
+            selectedSkill={state.selectedSkill}
+            onRemoveSkill={commands.removeSkill}
             onSettings={() => onSettings("teams")}
             workRequest={state.workRequest} onWorkRequest={value=>commands.setWorkRequest(session?.id,value)}
           />
@@ -330,4 +372,11 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
         </div>
       </main>
   );
+}
+
+function TurnMarkdown({text,sessionId,taskId,resolveImage}) {
+  const latest=useRef(resolveImage);
+  latest.current=resolveImage;
+  const resolve=React.useCallback(src=>latest.current({sessionId,taskId,src}),[sessionId,taskId]);
+  return <Markdown text={text} resolveImage={resolveImage?resolve:undefined}/>;
 }

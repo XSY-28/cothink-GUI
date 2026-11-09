@@ -1,87 +1,68 @@
 import {resolveDelivery} from "./project-turn.js";
 import { createHash } from "node:crypto";
-import { realpathSync, readFileSync, lstatSync } from "node:fs";
+import { realpathSync, readFileSync, lstatSync, statSync, accessSync, constants } from "node:fs";
 import { resolve, join, relative, isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createVersioning } from "./versioning.js";
 import { taskOutputRefs } from "./gui-projection.js";
+import { inspectGuiPreparation, inspectGuiGitChanges } from "./gui-project-preparation.js";
 const exec = promisify(execFile);
-async function git(path, args) {
-  return (
-    await exec("git", ["--no-optional-locks", "-C", path, ...args], {
-      encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
-    })
-  ).stdout.trimEnd();
-}
-export async function inspectGuiProject(home, path, work = {}) {
-  let normalized;
+export function inspectGuiDirectory(path) {
+  let canonicalPath=null;
   try {
-    if (typeof path !== "string" || !path.trim())
-      throw Error("请输入项目路径。");
-    normalized = realpathSync(resolve(path));
-    // Inspection is read only; dirty files are reported before any versioning call.
-    const changes = await git(normalized, [
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-    ]);
-    const root = await git(normalized, ["rev-parse", "--show-toplevel"]);
-    normalized = realpathSync(root);
-    const head = await git(normalized, ["rev-parse", "HEAD"]);
-    let checks = work.checks;
+    if(typeof path!=="string"||!path.trim())throw Error("请选择目录。");
+    canonicalPath=realpathSync(resolve(path));
+    if(!statSync(canonicalPath).isDirectory())throw Error("该路径不是文件夹。");
+    accessSync(canonicalPath,constants.R_OK|constants.X_OK);
+    return {directoryAvailable:true,canonicalPath,reason:null};
+  } catch(error) {
+    const reason=error.code==="ENOENT"?"目录已不存在。":
+      ["EACCES","EPERM"].includes(error.code)?"无法读取此目录。":error.message;
+    return {directoryAvailable:false,canonicalPath,reason};
+  }
+}
+export async function inspectGuiProject(home, path, work = {}, { includeChanges = true } = {}) {
+  const directory = inspectGuiDirectory(path);
+  const unavailable = (reason, extra = {}) => ({
+    ...directory, path: directory.canonicalPath, valid:false, executionReady:false,
+    dirty:null, head:null, version:null, execution:null, checks:[], reason, error:reason, ...extra,
+  });
+  if (!directory.directoryAvailable) return unavailable(directory.reason);
+  try {
+    const repo = await inspectGuiPreparation(directory.canonicalPath, home);
+    const {root,relativePath,head,preparation} = repo;
+    const facts = {root,relativePath,head,preparation:preparation??null};
+    if (!head || preparation) return unavailable("此目录需要先准备文件工作。",facts);
+    const changes = includeChanges ? await inspectGuiGitChanges(repo) : null;
+    let checks = work?.checks;
     if (checks === undefined) {
       try {
-        const pkg = JSON.parse(
-          readFileSync(resolve(normalized, "package.json"), "utf8"),
-        );
+        const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
         checks = pkg.scripts?.test ? [{ command: "npm", args: ["test"] }] : [];
       } catch (e) {
         if (e.code !== "ENOENT") throw e;
         checks = [];
       }
     }
-    let version = head,
-      execution = work.execution ?? null,
-      error = null;
+    let version = head, execution = work?.execution ?? null, error = null;
     try {
-      const v = await createVersioning({
-        home,
-        project: normalized,
-        readOnly: true,
-      });
+      const v = await createVersioning({home,project:root,readOnly:true});
       try {
         const fact = await v.inspect();
         version = fact.version;
         execution = fact.execution;
-      } finally {
-        await v.close();
-      }
+      } finally { await v.close(); }
     } catch (e) {
-      if (!["NO_PROJECT", "ENOENT"].includes(e.code)) error = e.message;
+      if (!["NO_PROJECT","ENOENT"].includes(e.code)) error=e.message;
     }
     return {
-      path: normalized,
-      valid: true,
-      dirty: changes.length > 0,
-      head,
-      version,
-      execution,
-      checks,
-      error,
+      ...directory,...facts,path:root,valid:true,executionReady:!error,
+      dirty:changes?Object.values(changes).some(paths=>paths.length):null,
+      changes,version,execution,checks,error,reason:error,
     };
   } catch (error) {
-    return {
-      path: normalized ?? (typeof path === "string" ? resolve(path) : null),
-      valid: false,
-      dirty: null,
-      head: null,
-      version: null,
-      execution: null,
-      checks: [],
-      error: error.message,
-    };
+    return unavailable(error.message);
   }
 }
 export async function withGuiWork(home, record, fn) {

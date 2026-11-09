@@ -1,9 +1,11 @@
+import {loadInputMaterials} from "./context.js";
 import {assertCleanProjectProcess} from "./pi-runtime.js";
 import {createHash,randomUUID} from 'node:crypto';
 import {readFileSync,existsSync,realpathSync} from 'node:fs';
-import {join} from 'node:path';
+import {join,relative,sep} from 'node:path';
 import {runTurn} from './discussion.js';
-import {problem,readRequest,readTask,taskDisplayStatus} from './task.js';
+import {conversationTaskIds} from './conversation.js';
+import {problem,readRequest,readRequests,readTask,taskDisplayStatus} from './task.js';
 import {legacyGit} from './git-versioning.js';
 import {validProjectPath,inScope,createVersioning} from './versioning.js';
 import {projectChatState,validateChatPlan,assertProjectReviewRequirement} from './project.js';
@@ -84,13 +86,43 @@ export function createRootOwner(task) {
   };
   owners.add(owner);task.rootOwner=owner;task.save();return owner;
 }
+function selectedExecutionScope(selectedPath, root, reportedPath) {
+  const path=realpathSync(selectedPath),canonicalRoot=realpathSync(root);
+  const relativePath=relative(canonicalRoot,path).split(sep).join('/')||'.';
+  if(!validProjectPath(relativePath,true)||(reportedPath!==undefined&&reportedPath!==relativePath))
+    throw problem('PROJECT_SCOPE','所选目录与已核实的仓库范围不一致。');
+  return {path,root:canonicalRoot,relativePath};
+}
+function checkPlanScope(plan, scope) {
+  if(!plan||!scope||scope.relativePath==='.')return;
+  const within=paths=>paths===undefined||(Array.isArray(paths)&&paths.every(path=>
+    validProjectPath(path,true)&&inScope(path,[scope.relativePath])));
+  const units=[plan,...(Array.isArray(plan.steps)?plan.steps:[])];
+  for(const unit of units){
+    const nested=[...(Array.isArray(unit?.works)?unit.works:[]),...(Array.isArray(unit?.subworks)?unit.subworks:[])];
+    if([unit,...nested].some(value=>!value||!within(value.scope)||!within(value.readScope)||!within(value.deliverables)))
+      throw problem('PROJECT_SCOPE',`文件工作限于仓库相对目录 ${scope.relativePath}。请提供该目录内的范围和交付路径。`);
+  }
+}
 export async function freezeReadAuthorization({home,workspace,sessionId,submissionId,editorEditId,input}) {
   if(input===undefined||input===null)return null;
   if(!input||Object.keys(input).length!==1||!Array.isArray(input.paths)||!input.paths.length||input.paths.some(p=>!validProjectPath(p,true)))throw problem('READ_AUTHORIZATION','Select valid relative read paths');
   if(!workspace?.project)throw problem('READ_AUTHORIZATION','No project directory is selected');
   const canonicalRepo=realpathSync(await legacyGit(workspace.project,['rev-parse','--show-toplevel']));
+  const executionScope=selectedExecutionScope(workspace.project,canonicalRepo);
+  if(input.paths.some(path=>!inScope(path,[executionScope.relativePath])))
+    throw problem('READ_SCOPE',`已保存版本的读取限于仓库相对目录 ${executionScope.relativePath}。`);
   const {state}=await projectChatState(home,canonicalRepo);
-  const version=state?.version??await legacyGit(canonicalRepo,['rev-parse','--verify','HEAD^{commit}']);
+  let version=state?.version;
+  if(!version){
+    let saved;
+    try {
+      saved=await createVersioning({home,project:canonicalRepo,readOnly:true});
+      version=(await saved.inspect()).version;
+    }catch(error){if(!["NO_PROJECT","ENOENT"].includes(error.code))throw error;}
+    finally{await saved?.close();}
+  }
+  version??=await legacyGit(canonicalRepo,['rev-parse','--verify','HEAD^{commit}']);
   return {canonicalRepo,workspaceId:workspace.id??null,sessionId,version,projectId:state?.id??null,paths:[...new Set(input.paths)],source:{kind:'user_ui',submissionId,...(editorEditId?{editorEditId}:{})},uncommitted:false};
 }
 async function readContext(task,args) {
@@ -126,9 +158,29 @@ async function readContext(task,args) {
   return {version:grant.version,uncommitted:false,items:items.slice(offset,offset+limit),more:items.length>offset+limit};
   }finally{await versioning?.close();}
 }
-export function bindUnifiedActions(task,{workspace,onWork}) {
+export function loadPreparedContinuation({home,manager,sourceTaskId}) {
+  if(!conversationTaskIds(manager).includes(sourceTaskId))
+    throw problem('PROJECT_SOURCE','原工作任务不在当前对话分支。');
+  const source=readTask(home,sourceTaskId);
+  const intent=source.routeIntent;
+  if(source.flow!=='unified'||source.sessionId!==manager.getSessionId()||source.status!=='blocked'||
+     source.projectPreparationBlocked?.code!=='PROJECT_NOT_PREPARED'||intent?.kind!=='start_work'||!intent.preparationBlocked)
+    throw problem('PROJECT_SOURCE','原任务不是本分支等待目录准备的工作。');
+  const requests=readRequests(home,source);
+  if(requests.some(r=>['preparing','in_flight','outcome_unknown'].includes(r.status)))
+    throw problem('PROJECT_PENDING','原任务存在尚未核对的模型请求。');
+  if(!requests.some(r=>r.id===intent.callId&&r.status==='completed'&&r.sent&&
+    r.response?.content?.some(c=>c.type==='toolCall'&&c.id===intent.toolCallId&&c.name==='start_work'&&digest(c.arguments)===intent.argsDigest)))
+    throw problem('PROJECT_SOURCE','无法核实原工作选择的模型回执。');
+  const budget=normalizeRootBudget(source.budget);
+  const spentCalls=requests.filter(r=>r.sent).length;
+  const remainingBudget={...budget,maxCalls:budget.maxCalls===null?null:Math.max(0,budget.maxCalls-spentCalls)};
+  return {source,materials:loadInputMaterials(home,source.materials??[]),spentCalls,remainingBudget};
+}
+export function bindUnifiedActions(task,{workspace,onWork,beforeWork}) {
   task.unifiedReadContext=args=>readContext(task,args);
-  task.unifiedIntent=async(kind,toolCallId,args)=>{
+  let admission=Promise.resolve();
+  const admit=async(kind,toolCallId,args)=>{
     if(task.record.phase!=='draft'||task.record.status!=='running')throw problem('INTENT_STAGE','Only the initial main stage may choose a route');
     const old=task.record.routeIntent;
     if(old){if(old.toolCallId===toolCallId&&old.kind===kind&&old.argsDigest===digest(args))return old;throw problem('INTENT_CONFLICT','A terminal route is already saved');}
@@ -138,14 +190,38 @@ export function bindUnifiedActions(task,{workspace,onWork}) {
       if(!task.record.constraints.allowedSubtasks.includes('review')||!args.draft?.trim())throw problem('REVIEW_REQUIRED','Review is disallowed or has no draft');
     }else{
       if(!workspace?.project)throw problem('PROJECT_REQUIRED','Select a project directory for file work');
+      if(task.record.constraints.readOnly)throw problem('READ_ONLY','This turn is read-only; file execution is not authorized');
+      if(beforeWork){
+        try {
+          const inspected=await beforeWork(task);
+          task.signal.throwIfAborted();
+          if(!inspected||typeof inspected.root!=='string'||typeof inspected.relativePath!=='string')
+            throw problem('PROJECT_SCOPE','目录准备没有返回可核验的仓库范围。');
+          task.record.executionScope=selectedExecutionScope(workspace.project,inspected.root,inspected.relativePath);
+        }
+        catch(error){
+          if(error.code!=='PROJECT_NOT_PREPARED')throw error;
+          task.record.projectPreparationBlocked={code:error.code,path:error.path??workspace.project};
+          const blocked={kind,toolCallId,callId:call.id,args:structuredClone(args),argsDigest:digest(args),preparationBlocked:true};
+          task.record.routeIntent=blocked;task.save();return blocked;
+        }
+      }
       if(!['start','resume','revise'].includes(args.action)||Boolean(args.plan)===Boolean(args.planRef))throw problem('WORK_PLAN','Provide exactly one complete plan or saved plan reference');
       if(args.action==='resume'&&!args.planRef)throw problem('WORK_PLAN','Resume requires the saved proposal reference');
-      if(args.plan){if(Object.hasOwn(args.plan,'repo'))throw problem('WORK_PLAN','Model plans cannot choose a repository');validateChatPlan(args.plan);}
+      if(args.plan){
+        if(Object.hasOwn(args.plan,'repo'))throw problem('WORK_PLAN','Model plans cannot choose a repository');
+        checkPlanScope(args.plan,task.record.executionScope);
+        validateChatPlan(args.plan);
+      }
       if(task.record.constraints.requireDifferentModelReview&&!task.record.constraints.allowedSubtasks.includes('review'))throw problem('REVIEW_REQUIRED','Required independent review conflicts with forbidden review delegation');
-      if(task.record.constraints.readOnly)throw problem('READ_ONLY','This turn is read-only; file execution is not authorized');
     }
     const intent={kind,toolCallId,callId:call.id,args:structuredClone(args),argsDigest:digest(args)};
     task.record.routeIntent=intent;task.save();return intent;
+  };
+  task.unifiedIntent=(...args)=>{
+    const next=admission.then(()=>admit(...args));
+    admission=next.catch(()=>{});
+    return next;
   };
   task.unifiedWork=()=>onWork(task,task.record.routeIntent);
 }
@@ -154,22 +230,29 @@ export async function runProjectTurn({home,cwd,workspace={id:null,project:null},
   const constraints=normalizeConstraints(frozenConstraints),frozenBudget=normalizeRootBudget(budget);
   return runTurn({home,cwd,input,config:frozenConfig,mainRuntime,allowWork:Boolean(workspace.project),flow:'unified',constraints,budget:frozenBudget,workspace,readAuthorization,confirmedOperation,
     id:taskId??randomUUID(),submissionId,onProgress,signal,...options,
-    onTaskCreated(task){task.record.contextTaskIds=options.contextTaskIds??[];createRootOwner(task);bindUnifiedActions(task,{workspace,onWork:options.onWork??prepareWork});options.onTaskCreated?.(task);},
+    onTaskCreated(task){task.record.contextTaskIds=options.contextTaskIds??[];createRootOwner(task);bindUnifiedActions(task,{workspace,onWork:options.onWork??prepareWork,beforeWork:options.beforeWork});options.onTaskCreated?.(task);},
   });
 }
 async function prepareWork(task,intent) {
   // Formal execution and confirmation are connected below; proposal is immutable after saving.
-  const {state,repo}=await projectChatState(task.home,task.record.workspace.project);
+  const admittedScope=task.record.executionScope;
+  const {state,repo}=await projectChatState(task.home,admittedScope?.root??task.record.workspace.project);
+  if(admittedScope&&repo!==admittedScope.root)throw problem('PROJECT_SCOPE','目录的实际仓库已改变，请重新选择。');
+  const scope=selectedExecutionScope(task.record.workspace.project,repo,admittedScope?.relativePath);
+  if(state)checkPlanScope({...state,readScope:state.readScope??['.']},scope);
   const args=intent.args;
   // Keep the actual earlier operation inputs even when their surrounding history
   // has been compacted. Do not re-expand the earlier snapshots' material arrays.
   const inherited=new Map();
+  const attachmentRefs=new Map((task.record.handoffContext.attachmentRefs??[]).map(ref=>[ref.id,ref]));
   for(const attempt of state?.steps.flatMap(step=>step.attempts)??[]){
     if(!attempt.rootTaskId||!attempt.contextRef)continue;
     const context=resolveHandoffContext(task.home,attempt.rootTaskId,attempt.contextRef,{commandId:attempt.commandId});
+    for(const ref of context.attachmentRefs??[])if(!attachmentRefs.has(ref.id))attachmentRefs.set(ref.id,ref);
     for(const item of [...(context.inheritedInputs??[]),{input:context.input,sourceTaskId:context.sourceTaskId,sessionId:context.sessionId,rootTaskId:attempt.rootTaskId,commandId:attempt.commandId,contextRef:attempt.contextRef,source:'Earlier confirmed operation user input; preserve constraints, current confirmed plan defines execution authority'}])inherited.set(item.sourceTaskId,item);
   }
   task.record.handoffContext.inheritedInputs=[...inherited.values()];
+  if(attachmentRefs.size)task.record.handoffContext.attachmentRefs=[...attachmentRefs.values()];
   let plan=args.plan,authorityRoot;
   if(args.planRef){
     const ref=args.planRef;
@@ -190,10 +273,11 @@ async function prepareWork(task,intent) {
   }
   plan={...plan,readScope:plan.readScope??plan.scope};
   if(!Array.isArray(plan.readScope)||!plan.readScope.length||plan.readScope.some(path=>!validProjectPath(path,true)))throw problem("WORK_PLAN","Invalid explicit plan read scope");
+  checkPlanScope(plan,scope);
   const needsReview=plan.independentReview||(plan.steps??[plan]).some(step=>step.independentReview||step.works?.some(work=>work.independentReview));
   if(needsReview&&!task.record.constraints.allowedSubtasks.includes("review"))throw problem("REVIEW_REQUIRED","Plan review requirement conflicts with forbidden review delegation");
   validateChatPlan(plan);
-  task.record.proposal={action:args.action,plan,constraints:task.record.constraints,canonicalRepo:repo,version:state?.version??await legacyGit(repo,['rev-parse','--verify','HEAD^{commit}']),projectId:state?.id??null,expectedRevision:state?.revision??null,toolCallId:intent.toolCallId,workspaceId:task.record.workspace.id??null,sessionId:task.record.sessionId,budget:task.record.budget,contextDigest:digest(task.record.handoffContext),packageDigest:digest(task.record.packageSnapshot),budgetAtProposal:{spentCalls:task.record.rootRequests.filter(r=>!r.notSent).length,remainingCalls:task.record.budget.maxCalls===null?null:Math.max(0,task.record.budget.maxCalls-task.record.rootRequests.filter(r=>!r.notSent).length)},source:{taskId:task.record.id,callId:intent.callId}};
+  task.record.proposal={action:args.action,plan,constraints:task.record.constraints,canonicalRepo:repo,...(scope?{executionScope:scope}:{}),version:state?.version??await legacyGit(repo,['rev-parse','--verify','HEAD^{commit}']),projectId:state?.id??null,expectedRevision:state?.revision??null,toolCallId:intent.toolCallId,workspaceId:task.record.workspace.id??null,sessionId:task.record.sessionId,budget:task.record.budget,contextDigest:digest(task.record.handoffContext),packageDigest:digest(task.record.packageSnapshot),budgetAtProposal:{spentCalls:task.record.rootRequests.filter(r=>!r.notSent).length,remainingCalls:task.record.budget.maxCalls===null?null:Math.max(0,task.record.budget.maxCalls-task.record.rootRequests.filter(r=>!r.notSent).length)},source:{taskId:task.record.id,callId:intent.callId}};
   task.record.proposalRef={sourceTaskId:task.record.id,toolCallId:intent.toolCallId,planDigest:digest(task.record.proposal),workspace:task.record.workspace.id??null,revision:state?.revision??null};
   if(args.action==='resume' && state.status!=='paused' && !authorityRoot?.cancelRequestedAt && authorityRoot?.sessionId===task.record.sessionId && authorityRoot.executionBinding?.projectId===state.id && authorityRoot.executionBinding.canonicalRepo===repo && state.entryPolicy==='unified'){
     const authorizationSource={kind:'existing_project',taskId:authorityRoot.id,projectId:state.id,revision:state.revision};
@@ -215,6 +299,11 @@ export async function reserveConfirmation({home,source,proposalRef,sessionId,wor
   const proposal=checkedProposal(home,source,proposalRef,{sessionId,workspaceId});
   if(source.confirmationIntent)return source.confirmationIntent;
   const {repo,state}=await projectChatState(home,proposal.canonicalRepo);
+  if(proposal.executionScope){
+    selectedExecutionScope(proposal.executionScope.path,repo,proposal.executionScope.relativePath);
+    checkPlanScope(proposal.plan,proposal.executionScope);
+    if(state)checkPlanScope({...state,readScope:state.readScope??['.']},proposal.executionScope);
+  }
   const currentVersion=state?.version??await legacyGit(repo,['rev-parse','--verify','HEAD^{commit}']);
   if(repo!==proposal.canonicalRepo||currentVersion!==proposal.version||(state?.revision??null)!==proposal.expectedRevision)throw problem('PROPOSAL_STALE','Project revision or version changed; inspect the concrete difference before confirming');
   const consumed=(source.rootRequests??[]).filter(r=>!r.notSent).length;
@@ -241,11 +330,16 @@ export async function executeConfirmed(task,source,reservation) {
   task.signal.throwIfAborted();
   if(task.record.status!=='running')throw problem('ROOT_STOPPED','Root ended during confirmed execution admission');
   const p=source.proposal;
+  if(p.executionScope){
+    selectedExecutionScope(p.executionScope.path,p.canonicalRepo,p.executionScope.relativePath);
+    checkPlanScope(p.plan,p.executionScope);
+  }
   if(reservation.authorizationSource)task.record.operationAuthorization=reservation.authorizationSource;
   else task.record.confirmationSource=reservation.proposalRef;
   task.record.budgetSource=reservation.budgetSource;
   task.record.phase='project';
   if(!source.handoffContext||p.contextDigest!==digest(source.handoffContext)||source.handoffContext?.input!==source.input||source.handoffContext?.sourceTaskId!==source.id||source.handoffContext?.sessionId!==source.sessionId)throw problem('CONTEXT_SOURCE','Frozen proposal context changed or is missing');
+  loadInputMaterials(task.home,source.handoffContext.attachmentRefs??[]);
   task.record.handoffContext=structuredClone(source.handoffContext);
   task.record.proposal=structuredClone(p);
   task.record.projectOperation={action:p.action,commandId:reservation.commandId,projectId:p.projectId,expectedRevision:p.expectedRevision,

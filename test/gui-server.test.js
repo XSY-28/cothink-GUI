@@ -28,7 +28,7 @@ async function host(t, configured = false, handler) {
   const origin = new URL(h.url).origin;
   const headers = { Authorization: `Bearer ${h.token}` };
   const action = async (action, args = {}) => {
-    const r = await fetch(origin + "/api/action", { method: "POST", headers: { ...headers, "Content-Type": "application/json", Origin: origin }, body: JSON.stringify({ action, args }) });
+    const r = await fetch(origin + "/api/action", { method: "POST", headers: { ...headers, "Content-Type": "application/json", "X-CoThink-GUI-Input":"2", Origin: origin }, body: JSON.stringify({ action, args }) });
     assert.equal(r.status, 200, await r.clone().text());
     return r.json();
   };
@@ -65,7 +65,7 @@ test("all API reads, events and writes require Bearer, exact Host and same Origi
     assert.equal((await fetch(f.origin + "/api/" + path)).status, 403, path);
     assert.equal((await fetch(f.origin + "/api/" + path, { headers: { Authorization: "Bearer wrong" } })).status, 403, path);
   }
-  assert.equal((await fetch(f.origin + "/api/action", { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } })).status, 403);
+  assert.equal((await fetch(f.origin + "/api/action", { method: "POST", body: "{}", headers: { "Content-Type": "application/json", "X-CoThink-GUI-Input":"2" } })).status, 403);
   for (const path of ["/", "/api/bootstrap", "/api/events", "/api/action"]) {
     assert.equal((await http(f.origin, path, { headers: { ...f.headers, Host: "evil.test" } })).status, 403);
     assert.equal((await http(f.origin, path, { headers: { ...f.headers, Origin: "http://evil.test" } })).status, 403);
@@ -226,7 +226,7 @@ test("CLI gui rejects invalid ports and unrelated arguments before opening", asy
 test("chunked JSON over the byte limit returns 413 while retaining usable HTTP service", async (t) => {
   const f = await host(t);
   const result = await new Promise((yes, no) => {
-    const req = request(f.origin + "/api/action", { method: "POST", headers: { ...f.headers, "Content-Type": "application/json", "Transfer-Encoding": "chunked" } }, (res) => {
+    const req = request(f.origin + "/api/action", { method: "POST", headers: { ...f.headers, "Content-Type": "application/json", "X-CoThink-GUI-Input":"2", "Transfer-Encoding": "chunked" } }, (res) => {
       res.resume();
       res.on("end", () => yes(res.statusCode));
     });
@@ -292,7 +292,7 @@ test("CLI signal cancels an active task, saves partial status and releases its H
   assert.ok(url, "CLI did not produce a startup URL");
   const parsed = new URL(url), token = new URLSearchParams(parsed.hash.slice(1)).get("token");
   const action = async (action, args) => {
-    const r = await fetch(parsed.origin + "/api/action", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ action, args }) });
+    const r = await fetch(parsed.origin + "/api/action", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-CoThink-GUI-Input":"2" }, body: JSON.stringify({ action, args }) });
     assert.equal(r.status, 200);
     return r.json();
   };
@@ -348,7 +348,7 @@ test("workspace actions preserve auth, current conflict entries and unavailable 
   const create = {workspaceId, name:"学习", project:null, defaultRosterId:null};
   const post = async (action, args, authorized = true) => {
     const response = await fetch(f.origin + "/api/action", {method:"POST",
-      headers:{"Content-Type":"application/json", ...(authorized ? f.headers : {})},
+      headers:{"Content-Type":"application/json", "X-CoThink-GUI-Input":"2", ...(authorized ? f.headers : {})},
       body:JSON.stringify({action,args})});
     return {status:response.status, body:await response.json()};
   };
@@ -408,7 +408,7 @@ test("workspace bootstrap keeps the repository index unchanged", async t => {
   assert.deepEqual(readFileSync(index),original);
 });
 
-test("a replaced workspace path cannot redirect task or plugin execution to another repository", async t => {
+test("a replaced workspace path allows plain chat but cannot redirect project reads or plugin execution", async t => {
   const f = await host(t,true), repo = repository(t), replacement = repository(t);
   const session = await f.action("session.create",{project:repo.project});
   renameSync(repo.project,join(repo.root,"moved"));
@@ -423,16 +423,21 @@ test("a replaced workspace path cannot redirect task or plugin execution to anot
   assert.equal(readable.workspaceId,session.workspaceId);
   assert.equal((await get("/api/bootstrap")).workspaces[0].projectAvailable,false);
   for (const [action,args] of [
-    ["task.submit",{input:"Must not run",protocolVersion:1, submissionId:randomUUID()}],
+    ["task.submit",{input:"Must not read a different repository",protocolVersion:1,submissionId:randomUUID(),
+      readAuthorization:{paths:["."]}}],
     ["extension.command",{input:"/must-not-run"}],
   ]) {
     const response = await fetch(f.origin+"/api/action",{method:"POST",
-      headers:{...f.headers,"Content-Type":"application/json"},
+      headers:{...f.headers,"Content-Type":"application/json", "X-CoThink-GUI-Input":"2"},
       body:JSON.stringify({action,args:{sessionId:session.id,...args}})});
     assert.equal(response.status,409,await response.clone().text());
     assert.equal((await response.json()).code,"WORKSPACE_UNAVAILABLE");
   }
   assert.equal(f.calls.length,0);
+  const plain=await f.action("task.submit",{sessionId:session.id,input:"Ordinary question",protocolVersion:1,submissionId:randomUUID()});
+  assert.equal((await completed(f,plain.taskId)).status,"completed");
+  assert.equal(f.calls.length,1);
+  assert.ok(!f.calls[0].body.tools.some(tool=>tool.function.name==="read_project_context"));
 });
 
 test("HTTP reading records reject stale revisions with a safe conflict code", async t => {
@@ -442,7 +447,7 @@ test("HTTP reading records reject stale revisions with a safe conflict code", as
   const saved=await f.action("session.view",args);
   assert.equal(saved.viewRevision,s.viewRevision+1);
   const stale=await fetch(f.origin+"/api/action",{method:"POST",
-    headers:{...f.headers,"Content-Type":"application/json"},body:JSON.stringify({action:"session.view",args})});
+    headers:{...f.headers,"Content-Type":"application/json", "X-CoThink-GUI-Input":"2"},body:JSON.stringify({action:"session.view",args})});
   assert.equal(stale.status,409);
   assert.equal((await stale.json()).code,"VIEW_CONFLICT");
   assert.equal(f.calls.length,0);
@@ -453,4 +458,23 @@ test('browser GUI CLI refuses Node preload before importing the business host',a
  const {invoke}=await import('./helpers/cli-fixture.js');
  const result=await invoke({...f,nodeArgs:['--import',preload]},['gui','--no-open']);
  assert.equal(result.code,2);assert.match(result.stderr,/干净入口/);assert.doesNotMatch(result.stdout,/http:/);assert.equal(f.calls.length,0);
+});
+
+test("older HTTP clients can read history but cannot overwrite a v2 draft or submit", async t=>{
+  const f=await host(t,true), s=await f.action("session.create",{workspaceId:null,sessionId:randomUUID()});
+  const editId=randomUUID();
+  await f.action("session.draft",{sessionId:s.id,editorVersion:2,editId,text:"private draft",workRequest:null,
+    selectionId:null,materials:[],expectedDraftRevision:s.draftRevision,branchAnchor:s.branchAnchor});
+  for(const action of ["session.draft","task.submit"]){
+    const response=await fetch(f.origin+"/api/action",{method:"POST",headers:{...f.headers,"Content-Type":"application/json"},
+      body:JSON.stringify({action,args:{sessionId:s.id,input:"stale",text:"overwrite"}})});
+    assert.equal(response.status,409);
+    assert.equal((await response.json()).code,"GUI_INPUT_UPGRADE");
+  }
+  const response=await fetch(f.origin+"/api/session?id="+s.id,{headers:f.headers});
+  assert.equal(response.status,200);
+  const saved=await response.json();
+  assert.equal(saved.editor.editId,editId);
+  assert.equal(saved.editor.text,"private draft");
+  assert.equal(f.calls.length,0);
 });

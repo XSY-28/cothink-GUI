@@ -4,7 +4,13 @@ import styles from "./Navigation.module.css";
 
 export function SessionRow({session, selected, onOpen, commands, onChanged, active}) {
   const menu = useRef(null);
-  const running = active?.sessionId === session.id;
+  const running = session.running || active?.sessionId === session.id;
+  const lastActivity=session.updatedAt&&new Date(session.updatedAt);
+  const dated=lastActivity&&Number.isFinite(lastActivity.getTime());
+  const activityLabel=dated?new Intl.DateTimeFormat("zh-CN",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(lastActivity):null;
+  const statuses=[session.hasDraft&&"有草稿",running&&"运行中",
+    (session.navigation?.archived||session.workspaceArchived)?"已归档":session.readOnly&&"只读"].filter(Boolean);
+  const summary=session.summary?.trim().replace(/\s+/g," ");
   const [busy,setBusy] = useState(false), [error,setError] = useState("");
   async function change(field, value) {
     setBusy(true); setError("");
@@ -19,10 +25,14 @@ export function SessionRow({session, selected, onOpen, commands, onChanged, acti
   const open=()=>onOpen(session.id,session.match?.taskId,session.match?.fileRef,session.match?.field);
   return <div className={styles.rowWrap}>
     <div className={styles.row}>
-      <button title={session.title} className={`${styles.historyItem} ${selected ? styles.selected : ""}`}
+      <button title={session.title} aria-label={session.title} aria-description={[summary,activityLabel,...statuses].filter(Boolean).join(" · ")||undefined} className={`${styles.historyItem} ${selected ? styles.selected : ""}`}
         aria-current={selected ? "page" : undefined} onClick={open}>
         <span>{session.title}</span>
-        {(session.navigation?.archived || session.workspaceArchived) ? <small>已归档</small> : session.readOnly && <small>只读</small>}
+        {summary&&<small className={styles.rowSummary}>{summary}</small>}
+        {(activityLabel||statuses.length>0)&&<small className={styles.rowMeta}>
+          {activityLabel&&<time dateTime={session.updatedAt} title={session.updatedAt}>{activityLabel}</time>}
+          {statuses.length>0&&<span>{statuses.join(" · ")}</span>}
+        </small>}
       </button>
       {commands && <details ref={menu} className={styles.menu} onKeyDownCapture={event=>{if(event.key === "Escape" && menu.current?.open){event.preventDefault();event.stopPropagation();menu.current.open=false;menu.current.querySelector("summary")?.focus();}}}>
         <summary aria-label={`${session.title}的菜单`}>⋯</summary>
@@ -44,13 +54,16 @@ export function SessionRow({session, selected, onOpen, commands, onChanged, acti
 
 const attentionLabels = {needs_attention:"需处理",unread:"有新结果",running:"运行中"};
 
-export function Navigation({workspaces, workspaceId, ready, mobileOpen, onOpenWorkspace, onSearch, onCreate,
+export function Navigation({workspaces, workspaceId, ready, mobileOpen, onOpenWorkspace, onSearch, onCreate, onNewConversation,
   onSettings, connection, updateLabel, inert}) {
   const active = workspaces?.filter(item=>!item.archived) ?? [];
+  const currentTeam=active.find(row=>row.id===workspaceId);
+  const newScope=currentTeam?.name||"未分组";
   return <nav className={`sidebar ${styles.sidebar} ${mobileOpen ? "mobile-open" : ""}`}
     aria-label="工作导航" inert={inert}>
     <div className={styles.windowSpace} aria-hidden="true" />
     <div className={styles.actions}>
+      {onNewConversation && <button type="button" className={styles.createTeam} disabled={!ready} onClick={()=>onNewConversation(currentTeam?.id??null)} aria-label="新对话" aria-description={newScope} title={`新对话 · ${newScope}`}><Icon name="plus" /><span>新对话</span></button>}
       <button onClick={onSearch} aria-label="搜索" title="搜索"><Icon name="search" /></button>
       <button className={styles.createTeam} disabled={!ready || workspaces === null} onClick={onCreate} aria-label="新建 Team"><Icon name="plus" /><span>新建 Team</span></button>
     </div>
@@ -89,7 +102,7 @@ export function ConversationPicker({state, commands, scope, workspace, busy, onO
   const names = state.bootstrap.workspaces ?? [];
   const matches = global && loaded ? names.filter(row=>workspaceMatches.includes(row.id)) : [];
   return <div className={styles.picker}>
-    {!global && <button className="primary" disabled={!canCreate} onClick={onCreateSession}><span aria-hidden="true">＋ </span>新建对话</button>}
+    {!global && <button className="primary" disabled={!canCreate} onClick={onCreateSession} aria-label="新建对话" aria-description={workspace?.name||"未分组"}><span aria-hidden="true">＋ </span>新建对话 <span className={styles.scopeLabel}>· {workspace?.name||"未分组"}</span></button>}
     {unknown ? <p className={styles.empty}>归属待核对。请从左侧选择工作，或搜索并打开健康的对话后再新建。</p> : <>
     <label className={styles.search}>
       <span className="sr-only">{global ? "搜索工作和对话" : "搜索当前工作中的对话"}</span>

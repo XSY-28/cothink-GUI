@@ -24,7 +24,7 @@ async function host(t, f) {
   async function request(path, body) {
     return fetch(origin + path, {
       method: body ? "POST" : "GET",
-      headers: { Authorization: `Bearer ${h.token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      headers: { Authorization: `Bearer ${h.token}`, ...(body ? { "Content-Type": "application/json", "X-CoThink-GUI-Input":"2" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
   }

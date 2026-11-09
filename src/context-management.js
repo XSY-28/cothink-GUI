@@ -3,9 +3,10 @@ import {readFileSync,realpathSync} from 'node:fs';
 import {join,dirname,isAbsolute} from 'node:path';
 import {SessionManager,CURRENT_SESSION_VERSION} from '@earendil-works/pi-coding-agent';
 import {problem,readTask,readRequests,taskDisplayStatus} from './task.js';
-import {conversationTaskIds,sessionWriteIncomplete} from './conversation.js';
+import {conversationMaterialRefs,conversationTaskIds,sessionWriteIncomplete} from './conversation.js';
 import {resolveDelivery} from './project-turn.js';
 import {finalGuiText} from './gui-projection.js';
+import {loadInputMaterials} from './context.js';
 
 export const contextToolNames=['search_context','read_context','save_context_note'];
 export const contextDigest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -83,8 +84,12 @@ export function createContextAccess({home,manager,getTask,assertOwned,quarantine
       if(!text)return;const ref={sessionId,kind,id,field,sha256:contextDigest(text)};
       items.push({sourceId:contextDigest(ref),ref,kind,...extra,text});
     };
+    const attachmentRefs=conversationMaterialRefs(manager);
     for(const e of branch){
-      if(e.type==='message'&&['user','assistant'].includes(e.message?.role))add(e.message.role,e.id,'text',textOf(e.message.content));
+      if(e.type==='message'&&['user','assistant'].includes(e.message?.role)){
+        const attached=attachmentRefs.filter(ref=>ref.userEntryId===e.id);
+        add(e.message.role,e.id,'text',textOf(e.message.content),attached.length?{attachmentRefs:attached}:{});
+      }
       if(e.type==='custom'&&e.customType==='cothink-context-note'){
         const n=e.data;if(typeof n?.text!=='string'||!Array.isArray(n.sources)||n.sourceDigest!==contextDigest(n.sources)||!branch.slice(0,branch.indexOf(e)).some(x=>x.id===n.sourceLeaf))throw fail('CONTEXT_NOTE','Context note provenance is invalid');
         add('note',e.id,'text',n.text,{derived:true,author:n.author,sources:n.sources,label:n.sources.length?'派生记要':'当前模型建议'});
@@ -130,7 +135,8 @@ export function createContextAccess({home,manager,getTask,assertOwned,quarantine
             ...(text!==original.text?{projection:{originalRef:original.ref,derived:true}}:{})});
         }
       }
-      return {source:contextSnapshot(manager),materials:structuredClone(materials)};
+      const attachmentRefs=conversationMaterialRefs(manager);
+      return {source:contextSnapshot(manager),materials:structuredClone(materials),...(attachmentRefs.length?{attachmentRefs}:{})};
     },
     search({query='',offset=0,limit=20}={}){
       page(offset,limit,50);if(typeof query!=='string'||query.length>500)throw fail('CONTEXT_RANGE','Query too long');
@@ -173,6 +179,7 @@ export async function compactContext({task,runtime,onChange=()=>{},quarantine}){
   task.contextLifecycle=lifecycle;
   const check=()=>{runtime.assertOwned();if(runtime.selectionError)throw fail('CONTEXT_STORAGE',runtime.selectionError);if(task.signal.aborted)throw task.signal.reason;if(task.ioError)throw task.ioError;if(task.record.status!=='running')throw fail('TASK_ENDED','Context operation has stopped');assertContextSource(snapshot,manager);};
   try{
+    task.materialContext=loadInputMaterials(task.home,conversationMaterialRefs(manager));
     stage=task.beginPhase('context-summary','main',task.record.models.main);runtime.bindTask(task,stage);
     check();
     unsubscribe=runtime.onContextPreparation(event=>{

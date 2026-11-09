@@ -432,9 +432,17 @@ details {
 .composer .send .ui-icon { width:18px; height:18px; }
 .composer .send:disabled { background:var(--selected); color:var(--muted); border-color:transparent; opacity:1; }
 .composer-add-menu { position:absolute; bottom:54px; left:14px; z-index:5; width:min(400px,calc(100% - 28px)); max-height:min(70vh,460px); overflow:auto; padding:12px; border-radius:14px; }
+.composer-add-actions { width:min(230px,calc(100% - 28px)); padding:6px; }
+.composer-chips, .composer-materials { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; padding:0; }
+.composer-materials { max-height:min(27dvh,160px); overflow:auto; list-style:none; }
+.composer-materials li, .composer-chip { min-width:0; max-width:100%; display:flex; align-items:center; gap:6px; background:var(--accent-soft); border-radius:8px; padding:3px 6px; font-size:12px; }
+.composer-chip > span, .material-label strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.material-label { min-width:0; }
+.material-label small { color:var(--muted); }
+.material-error { color:var(--error); overflow-wrap:anywhere; }
+.composer-chips button, .composer-materials button { flex:none; padding:2px 5px; min-height:24px; }
 .composer-add-menu .turn-choice { flex-direction:row; align-items:center; gap:8px; margin:0 0 8px; font-weight:400; }
 .composer-add-menu .turn-choice input { flex:none; margin:0; }
-.turn-read-scope p { overflow-wrap:anywhere; color:var(--muted); font-size:12px; line-height:1.55; margin:8px 0; }
 .composer-add-menu > button { display:block; width:100%; text-align:left; border:0; background:none; font-size:13px; }
 .composer-add-menu > button:hover { background:var(--accent-soft); }
 .composer-policy { padding:0 10px; max-height:230px; overflow:auto; overflow-wrap:anywhere; color:var(--muted); font-size:12px; line-height:1.6; }
@@ -951,6 +959,12 @@ details {
   padding: 6px 10px;
   display: inline-block;
 }
+.image-placeholder button { margin-inline-start:8px; font-size:12px; }
+.markdown-image { display:block; max-width:100%; max-height:min(65dvh,580px); object-fit:contain; }
+.markdown-code-block { position:relative; margin:1.4em 0; }
+.prose .markdown-code-block pre { margin:0; }
+.markdown-code-block > button { font-size:12px; margin-bottom:4px; }
+.markdown-code-block > [role="status"] { margin-inline-start:8px; font-size:12px; color:var(--muted); }
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1255,3 +1269,19 @@ details {
   button:disabled { color:GrayText; opacity:1; }
   button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible { outline-color:Highlight; }
 }
+
+.dialog-body { padding:16px 22px 20px; }
+.dialog-body > :first-child { margin-top:0; }
+.modal.wide.material-picker { width:min(660px,100%); }
+.material-source-switch { justify-content:flex-start; }
+.material-picker-list { display:grid; gap:4px; list-style:none; padding:0; margin:8px 0; }
+.material-picker-list li { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid var(--line); }
+.material-picker-list li > span { flex:1; min-width:90px; overflow-wrap:anywhere; }
+.material-picker-list small { color:var(--muted); }
+.material-picker-list button, .material-picker-selection button { font-size:12px; }
+.material-picker-selection { margin:8px 0; }
+.material-picker-selection button { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin:0 6px 6px 0; }
+.material-preview { max-height:32dvh; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+.material-skill-list { display:grid; gap:8px; }
+.material-skill-list button { text-align:left; white-space:normal; }
+.material-skill-list small { display:block; color:var(--muted); margin-top:3px; overflow-wrap:anywhere; }

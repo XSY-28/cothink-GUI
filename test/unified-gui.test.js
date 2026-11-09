@@ -28,7 +28,8 @@ test('two GUI confirmation IDs consume one immutable proposal and open accepted 
  const a=await c.action('task.submit',{sessionId:s.id,input:'Change a.txt',submissionId:'proposal',protocolVersion:1,budget:{maxCalls:7},constraints:{allowedSubtasks:[]}});
  await complete(c,a.taskId);const source=readTask(f.home,a.taskId);
  const editorBefore=await c.session(s.id);
- const nextOptions={id:randomUUID(),readOnly:true,delegate:false,review:false,maxCalls:'2',readAllowed:true,readPaths:'a.txt',readProject:editorBefore.project,readWorkspaceId:editorBefore.workspaceId};
+ const nextVersion=(await c.action("project.materials",{ownerId:s.id,source:"saved"})).version;
+ const nextOptions={id:randomUUID(),readOnly:true,delegate:false,review:false,maxCalls:'2',readAllowed:true,readPaths:'a.txt',readProject:editorBefore.project,readWorkspaceId:editorBefore.workspaceId,readVersion:nextVersion};
  await c.action('session.draft',{sessionId:s.id,text:'Next turn draft stays here',workRequest:null,selectionId:null,editId:randomUUID(),expectedDraftRevision:editorBefore.draftRevision,branchAnchor:editorBefore.branchAnchor,turnOptions:nextOptions});
  const nextTeam=await c.action('team.save',{name:'Next roster',main:f.models.secondary[1],secondary:[f.models.main]});
  await c.action('session.team',{sessionId:s.id,teamId:nextTeam.id});
@@ -101,4 +102,28 @@ test('an inherited visible plan in a GUI fork needs new confirmation and keeps t
  planRef={taskId:first.id,field:'proposal',sha256:digest(first.proposal)};
  const pending=await submit(fork.id,'continue inherited plan');assert.equal(pending.status,'blocked');assert.ok(pending.proposalRef);assert.equal(f.calls.length,3);
  const result=await confirm(fork.id,pending);assert.equal(result.status,'completed',result.error);assert.equal(result.executionBinding.formalRef,first.executionBinding.formalRef);assert.equal(result.deliveryRef.sources[0].relation,'inherited');assert.equal(f.calls.length,3);
+});
+
+test('legacy editor read choice requires reselection before a model request, and the selected version can send',async t=>{
+ const {editorTurnInput}=await import('../src/gui-turn-options.js');
+ const f=await fixture(t),repo=repository(t),c=await controller(t,f);
+ let session=await c.action('session.create',{project:repo.project});
+ const input='Use the fixed project file';
+ const legacy={id:randomUUID(),readAllowed:true,readPaths:'a.txt',readProject:session.project,readWorkspaceId:session.workspaceId};
+ const location={project:session.project,workspaceId:session.workspaceId};
+ const save=async turnOptions=>c.action('session.draft',{sessionId:session.id,text:input,workRequest:null,selectionId:null,
+  editId:randomUUID(),expectedDraftRevision:session.draftRevision,branchAnchor:session.branchAnchor,turnOptions});
+ session=await save(legacy);
+ const request={sessionId:session.id,input,submissionId:randomUUID(),protocolVersion:1,editorEditId:session.editor.editId,readAuthorization:{paths:['a.txt']}};
+ assert.throws(()=>editorTurnInput(session.editor.turnOptions,location),/重新选择项目文件/);
+ await assert.rejects(c.action('task.submit',request),{code:'READ_VERSION'});
+ assert.equal(f.calls.length,0);
+ assert.equal((await c.session(session.id)).editor.editId,request.editorEditId);
+ const {version}=await c.action('project.materials',{ownerId:session.id,source:'saved'});
+ session=await save({...legacy,id:randomUUID(),readVersion:version});
+ const selected=editorTurnInput(session.editor.turnOptions,location);
+ const accepted=await c.action('task.submit',{...request,submissionId:randomUUID(),editorEditId:session.editor.editId,...selected});
+ assert.equal((await complete(c,accepted.taskId)).status,'completed');
+ assert.equal(readTask(f.home,accepted.taskId).readAuthorization.version,version);
+ assert.equal(f.calls.length,1);
 });

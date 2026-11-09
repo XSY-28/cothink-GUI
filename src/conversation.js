@@ -24,8 +24,15 @@ export function conversationTaskIds(manager) {
   ).filter(Boolean))];
 }
 
-export function readSessionFlow(manager) {
-  const entry=manager.getBranch().findLast(e=>e.type==='custom'&&e.customType==='cothink-flow');
+// Only user entries on this exact branch carry attachment provenance. A fork
+// inherits the selected prefix via Pi, so future and sibling entries stay out.
+export function conversationMaterialRefs(manager) {
+  return manager.getBranch().flatMap(entry => entry.type === "message" && entry.message?.role === "user" ?
+    (entry.message.cothinkInputMaterials ?? []).map(ref => ({...ref,userEntryId:entry.id})) : []);
+}
+
+export function readSessionFlow(manager,{allBranches=false}={}) {
+  const entry=(allBranches?manager.getEntries():manager.getBranch()).findLast(e=>e.type==='custom'&&e.customType==='cothink-flow');
   if(!entry)return 'legacy';
   if(entry.data?.flow!=='unified'||entry.data?.version!==1)throw Error('Unsupported conversation flow; open a compatible GUI');
   return 'unified';
@@ -184,20 +191,31 @@ export async function selectConversationTeam({
   }
   return next;
 }
+export function normalizeConversationEditor(data) {
+  if (data?.editorVersion !== undefined && data.editorVersion !== 2)
+    throw Error("草稿版本不支持；请使用兼容界面。");
+  const editor = {editorVersion:2,text:data?.text ?? "",workRequest:data?.workRequest ?? null,
+    selectionId:data?.selectionId ?? null,editId:data?.editId ?? null,
+    ...(data?.turnOptions!==undefined?{turnOptions:validateEditorTurnOptions(data.turnOptions)}:{}),
+    materials:data?.materials ?? []};
+  if (!Array.isArray(editor.materials) || editor.materials.some(ref => !ref || !isWorkspaceId(ref.id) ||
+    typeof ref.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(ref.sha256) ||
+    Object.keys(ref).some(k=>!["id","sha256"].includes(k)))) throw Error("草稿材料引用无效；原记录保留。");
+  if (typeof editor.text !== "string" || (editor.workRequest !== null &&
+      (editor.workRequest.kind !== "html-svg" || Object.keys(editor.workRequest).length !== 1)) ||
+      (editor.selectionId !== null && !isWorkspaceId(editor.selectionId)) ||
+      (editor.editId !== null && !isWorkspaceId(editor.editId)) ||
+      (editor.workRequest === null) !== (editor.selectionId === null)) throw Error("草稿记录损坏；原记录保留。");
+  return editor;
+}
+
 export function readConversationMetadata(manager) {
   const entries = manager.getBranch();
   const last = (type) =>
     entries.findLast((e) => e.type === "custom" && e.customType === type)?.data;
   const draftEntry = entries.findLast(e => e.type === "custom" && e.customType === "cothink-draft");
   const data = draftEntry?.data;
-  const editor = {text:data?.text ?? "", workRequest:data?.workRequest ?? null,
-    selectionId:data?.selectionId ?? null, editId:data?.editId ?? null,
-    ...(data?.turnOptions!==undefined?{turnOptions:validateEditorTurnOptions(data.turnOptions)}:{})};
-  if (typeof editor.text !== "string" || (editor.workRequest !== null &&
-      (editor.workRequest.kind !== "html-svg" || Object.keys(editor.workRequest).length !== 1)) ||
-      (editor.selectionId !== null && !isWorkspaceId(editor.selectionId)) ||
-      (editor.editId !== null && !isWorkspaceId(editor.editId)) ||
-      (editor.workRequest === null) !== (editor.selectionId === null)) throw Error("草稿记录损坏；原记录保留。");
+  const editor = normalizeConversationEditor(data);
   return {
     title: last("cothink-title")?.title ?? entries.findLast((e) => e.type === "session_info")?.name ?? "",
     draft: editor.text,

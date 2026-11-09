@@ -112,7 +112,7 @@ test('successful restart is read-only and historical reply fork preserves summar
 });
 test('HTTP context action and read-only operation route enforce authentication and identity',async t=>{
  const {f,c,s,leaf}=await setup(t,()=>({text:'HTTP summary'}));await c.close();
- const {startGuiServer}=await import('../src/gui-server.js');const server=await startGuiServer({home:f.home,cwd:f.cwd,open:false,port:0});t.after(()=>server.close());const origin=new URL(server.url).origin,headers={Authorization:'Bearer '+server.token,'Content-Type':'application/json'},operationId=randomUUID();
+ const {startGuiServer}=await import('../src/gui-server.js');const server=await startGuiServer({home:f.home,cwd:f.cwd,open:false,port:0});t.after(()=>server.close());const origin=new URL(server.url).origin,headers={Authorization:'Bearer '+server.token,'Content-Type':'application/json', "X-CoThink-GUI-Input":"2"},operationId=randomUUID();
  const response=await fetch(origin+'/api/action',{method:'POST',headers,body:JSON.stringify({action:'context.organize',args:{sessionId:s.id,operationId,sourceLeaf:leaf,budget:{maxCalls:2},protocolVersion:1}})});assert.equal(response.status,200,await response.clone().text());assert.equal((await response.json()).taskId,operationId);
  let result;for(let i=0;i<500;i++){result=await (await fetch(origin+'/api/context-operation?operationId='+operationId,{headers})).json();if(result.status==='completed')break;await new Promise(r=>setTimeout(r,10));}assert.equal(result.applied,true);const count=f.calls.length;
  assert.equal((await fetch(origin+'/api/context-operation?operationId='+operationId)).status,403);assert.equal((await fetch(origin+'/api/context-operation?operationId='+operationId+'&path=/etc/passwd',{headers})).status,400);

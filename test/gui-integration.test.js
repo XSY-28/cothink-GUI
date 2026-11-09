@@ -38,7 +38,7 @@ async function host(t, f) {
   const action = async (action, args) => {
     const r = await fetch(origin + "/api/action", {
       method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
+      headers: { ...headers, "Content-Type": "application/json", "X-CoThink-GUI-Input":"2" },
       body: JSON.stringify({ action, args }),
     });
     assert.equal(r.status, 200, await r.clone().text());

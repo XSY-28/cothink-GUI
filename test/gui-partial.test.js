@@ -18,7 +18,7 @@ async function host(t, f) {
   const json = async (path, body) => {
     const r = await fetch(origin + path, {
       method: body ? "POST" : "GET",
-      headers: { Authorization: `Bearer ${h.token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      headers: { Authorization: `Bearer ${h.token}`, ...(body ? { "Content-Type": "application/json", "X-CoThink-GUI-Input":"2" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
     assert.equal(r.status, 200, await r.clone().text());

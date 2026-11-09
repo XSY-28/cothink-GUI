@@ -1,6 +1,6 @@
 {
   "name": "cothink-v2",
-  "version": "0.8.14-desktop.2",
+  "version": "0.8.14-desktop.3",
   "files": [
     "bin/cothink.js",
     "src/cli.js",
@@ -98,7 +98,9 @@
     "vendor/project-handoff",
     "src/builtin-skills.js",
     "resources/builtin-skills",
-    "scripts/build-builtin-skills.mjs"
+    "scripts/build-builtin-skills.mjs",
+    "src/gui-materials.js",
+    "src/gui-project-preparation.js"
   ],
   "type": "module",
   "engines": {

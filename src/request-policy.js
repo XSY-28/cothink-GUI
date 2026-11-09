@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { redact } from "./storage.js";
 import { problem } from "./task.js";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
+import { materialImageHash, materialText, prepareMaterialImages } from "./context.js";
 // These pinned Pi adapters pass options.fetch to their actual HTTP client.
 // Codex Responses is pinned to SSE in projects because WebSocket skips the fetch fence.
 const projectHttpApis = new Set(["openai-completions","openai-responses","openai-codex-responses",
@@ -20,7 +22,73 @@ const textOf = (m) =>
     .map((c) => c.text)
     .join("\n") ?? "";
 export { textOf };
-export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
+async function applyMaterials(binding, context, model, autoResize) {
+  const materials=binding.task.materialContext??[];
+  if(!materials.length||binding.stage.phase==="project-effect")return {context,images:[]};
+  const required=binding.requiredPromptImages??[];
+  if(required.length){
+    const user=context.messages.findLast(message=>message.role==="user"&&Array.isArray(message.content)&&
+      message.content.some(block=>block.type==="text"&&required.every(image=>block.text.includes(`materialId=${image.id};`))));
+    const actual=user?.content.filter(block=>block.type==="image").map(materialImageHash)??[];
+    for(const image of required){
+      const index=actual.indexOf(image.payloadSha256);
+      if(index<0)throw problem("MATERIAL_IMAGE_OMITTED","Pi 预处理后缺少已选图片。未发送模型请求。");
+      actual.splice(index,1);
+    }
+  }
+  const modelKey=JSON.stringify([model.provider,model.id,model.inputLimits?.images?.resize,autoResize]);
+  if(binding.materialModelKey!==modelKey){
+    binding.materialModelKey=modelKey;
+    binding.preparedMaterials=prepareMaterialImages(materials,model,autoResize);
+  }
+  const prepared=await binding.preparedMaterials;
+  const knownImages=new Set();
+  const messages=context.messages.map(message=>{
+    if(!Array.isArray(message.content)||!message.content.some(part=>part.type==="image"))return message;
+    const candidates=message.role==="user"?prepared.filter(({evidence})=>
+      message.cothinkInputMaterials?.some(ref=>ref.id===evidence.id)||
+      message.content.some(part=>part.type==="text"&&part.text.includes(`materialId=${evidence.id};`))):[];
+    let changed=false;
+    const content=message.content.map(part=>{
+      if(part.type!=="image")return part;
+      const hash=materialImageHash(part);
+      const replacement=candidates.some(({evidence})=>evidence.payloadSha256===hash)?undefined:
+        candidates.find(({evidence,previousSha256})=>evidence.originalSha256===hash||previousSha256===hash);
+      knownImages.add(replacement?.evidence.payloadSha256??hash);
+      if(!replacement)return part;
+      changed=true;
+      return replacement.block;
+    });
+    return changed?{...message,content}:message;
+  });
+  context={...context,messages};
+  const texts=context.messages.map(message=>typeof message.content==="string"?message.content:
+    Array.isArray(message.content)?message.content.filter(block=>block.type==="text").map(block=>block.text).join("\n"):"");
+  const included=new Set(),additional=[];
+  for(const material of materials){
+    const text=materialText(material);
+    if(included.has(material.manifest.id))continue;
+    included.add(material.manifest.id);
+    if(!texts.some(value=>value.includes(text)))additional.push({type:"text",text});
+  }
+  const images=prepared.map(({block,evidence})=>{
+    if(knownImages.has(evidence.payloadSha256))return evidence;
+    additional.push(block);
+    knownImages.add(evidence.payloadSha256);
+    return evidence;
+  });
+  if(additional.length){
+    const messages=[...context.messages];
+    const index=messages.findLastIndex(message=>message.role==="user");
+    messages.splice(Math.max(0,index),0,{role:"user",content:additional,timestamp:messages[index]?.timestamp??0});
+    context={...context,messages};
+  }
+  const estimate=context.messages.reduce((sum,message)=>sum+estimateTokens(message),0)+Math.ceil((context.systemPrompt?.length??0)/4);
+  if(model.contextWindow>0&&estimate>=model.contextWindow)
+    throw problem("MATERIAL_CONTEXT_LIMIT","材料及对话超出模型上下文估算上限。请减少材料或手动整理上下文。");
+  return {context,images};
+}
+export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAutoResize = () => true }) {
   return {
     stream(model, context, options, send) {
       const output = createAssistantMessageEventStream();
@@ -57,9 +125,12 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
           fenced = Boolean(task.projectPolicy || task.rootOwner);
           if (fenced && (!projectHttpApis.has(model.api) || options?.client))
             throw problem("PROJECT_TRANSPORT", "Selected Pi adapter has no project-controlled HTTP dispatch fence: " + model.api);
+          const sendIntent = task.projectPolicy?.locateSend({ task, stage, context, model });
+          const materialContext=await applyMaterials(binding,context,model,imageAutoResize());
+          context=materialContext.context;
+          const expectedMaterialImages=materialContext.images;
           const secrets = await getSecrets(model);
           const clean = (v) => redact(v, secrets);
-          const sendIntent = task.projectPolicy?.locateSend({ task, stage, context, model });
           const original = sendIntent && task.projectPolicy.originalResult(sendIntent, task);
           if (original) {
             if (!stage.callIds.includes(original.id)) stage.callIds.push(original.id);
@@ -122,6 +193,19 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
             fetch: async (url, init) => {
               if (signal.aborted) throw signal.reason;
               let response;
+              if(expectedMaterialImages.length){
+                let body;
+                try {
+                  if(typeof init?.body==="string")body=JSON.parse(init.body);
+                  else if(init?.body instanceof Uint8Array)body=JSON.parse(Buffer.from(init.body).toString("utf8"));
+                  else if(url instanceof Request)body=await url.clone().json();
+                } catch {}
+                const hashes=payloadImageHashes(body);
+                if(!call.materialImages||expectedMaterialImages.some(image=>!hashes.has(image.payloadSha256))){
+                  binding.error=problem("MATERIAL_IMAGE_OMITTED","实际 HTTP 正文缺少可核验的材料图片。未发送模型请求。");
+                  throw binding.error;
+                }
+              }
               if (fenced) {
                 // Pi may perform fetch after yielding since onPayload. Recheck live authority.
                 if (!call.payload || call.transport.projectDispatched)
@@ -203,6 +287,14 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [] }) {
                 api: actual.api,
                 baseUrl: actual.baseUrl,
               };
+              if(expectedMaterialImages.length){
+                const hashes=payloadImageHashes(body);
+                if(expectedMaterialImages.some(image=>!hashes.has(image.payloadSha256))){
+                  binding.error=problem("MATERIAL_IMAGE_OMITTED","模型请求正文缺少已选图片。未发送模型请求。");
+                  throw binding.error;
+                }
+                call.materialImages=expectedMaterialImages;
+              }
               call.payload = clean(body);
               if(task.record.work?.visualEvidence) {
                 const hashes=payloadImageHashes(body), serialized=JSON.stringify(body);

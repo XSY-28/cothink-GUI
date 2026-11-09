@@ -153,6 +153,7 @@ export function projectGuiTask(record, requests = [], sessionEntries = []) {
       }
     : null;
   return {
+    projectPreparationBlocked:clone(record.projectPreparationBlocked),continuationSource:clone(record.continuationSource),
     origin:record.origin??null,contextResult:record.contextResult??null,preparation:record.preparation??null,
     id: record.id,
     flow:record.flow,constraints:clone(record.constraints),budget:clone(record.budget),readAuthorization:clone(record.readAuthorization),projectOperation:clone(record.projectOperation),deliveryRef:clone(record.deliveryRef),
@@ -161,6 +162,7 @@ export function projectGuiTask(record, requests = [], sessionEntries = []) {
     endedAt: record.endedAt ?? null,
     cancelSettledAt: record.cancelSettledAt ?? null,
     input: record.input,
+    materials:(record.materials??[]).map(({ownerId,...ref})=>clone(ref)),
     status: taskDisplayStatus(record),
     resultRevision: guiResultRevision(record, finalGuiText(record, requests)),
     phase: record.phase,

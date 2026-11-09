@@ -411,7 +411,7 @@ export async function runInteractive({
   } = {}) {
     const fresh = !sessionManager || sessionStartEvent?.reason === "new";
     const manager = sessionManager ?? SessionManager.create(targetCwd, join(agentDir,"sessions","main"));
-    if(readSessionFlow(manager)==="unified")throw Error("此分支使用统一项目会话；CLI 仅支持查看历史，请在新版 GUI 中继续。未初始化模型或插件。");
+    if(readSessionFlow(manager,{allBranches:true})==="unified")throw Error("此分支使用统一项目会话；CLI 仅支持查看历史，请在新版 GUI 中继续。未初始化模型或插件。");
     const projectMode=initialProjectMode||(!fresh&&readTerminalMode(manager)==='project');
     targetCwd = conversationCwd(manager, home);
     const project = readSessionProject(manager);

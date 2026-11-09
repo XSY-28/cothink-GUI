@@ -5,6 +5,10 @@ import styles from "./TeamPanel.module.css";
 
 const identity = ref => JSON.stringify([ref?.provider, ref?.modelId]);
 const emptyRef = () => ({provider:"",modelId:""});
+const matchesSearch = (query, values) => {
+  const text=values.filter(Boolean).join(" ").toLowerCase();
+  return query.trim().toLowerCase().split(/\s+/).every(word=>text.includes(word));
+};
 const catalogModel = (models, ref) => models.find(m => identity(m) === identity(ref));
 // Model refs have four allowed fields. Compare their values, not object key order.
 const rosterParameters = team => JSON.stringify([team.main,...team.secondary].map(r=>[r.provider,r.modelId,r.thinkingLevel ?? null,r.maxOutputTokens ?? null]));
@@ -12,17 +16,44 @@ const rosterText = team => `主：${modelName(team.main)}；副：${team.seconda
 function parameterText(ref) {
   return `${modelName(ref)} · 思考 ${ref.thinkingLevel ?? "默认"} · ${ref.maxOutputTokens == null ? "未设输出额度" : ref.maxOutputTokens+" tokens"}`;
 }
-function ModelEditor({label, value, models, used, onIdentity, onParameters}) {
+function rosterIssue(team, models, providers) {
+  for (const ref of [team.main, ...team.secondary]) {
+    const model = catalogModel(models, ref);
+    if (!model) return `${modelName(ref)}：目录不可用`;
+    if (!providers.find(provider => provider.id === ref.provider)?.configured) {
+      return `${ref.provider} 缺少认证（${modelName(ref)}）`;
+    }
+    if (ref.thinkingLevel != null && !model.thinkingLevels?.includes(ref.thinkingLevel)) {
+      return `${modelName(ref)} 不支持思考档位 ${ref.thinkingLevel}`;
+    }
+    if (model.api === "anthropic-messages" && ref.maxOutputTokens == null) {
+      return `${modelName(ref)} 需要设置输出额度`;
+    }
+  }
+  return "";
+}
+function ModelEditor({label, value, models, providers, used, onIdentity, onParameters}) {
+  const [search,setSearch]=useState("");
   const model = catalogModel(models,value);
+  const options=models.filter(m=>matchesSearch(search,[m.name,m.provider,m.modelId]));
   return <section className={styles.model}>
+    <label>搜索{label}<input type="search" aria-label={`搜索${label}`} value={search}
+      placeholder="名称、服务商或模型 ID" onChange={e=>setSearch(e.target.value)}
+      onKeyDown={e=>{if(e.key==="Enter" && !e.nativeEvent.isComposing)e.preventDefault();}}/></label>
     <label>{label}<select required aria-label={label} value={value.modelId ? identity(value) : ""}
-      onChange={e=>{const [provider,modelId]=JSON.parse(e.target.value);onIdentity({provider,modelId});}}>
+      onChange={e=>{const [provider,modelId]=JSON.parse(e.target.value);onIdentity({provider,modelId});setSearch("");}}>
       <option value="" disabled>选择模型</option>
       {value.modelId && !model && <option value={identity(value)} disabled>{modelName(value)}（目录不可用）</option>}
-      {models.map(m=><option key={identity(m)} value={identity(m)} disabled={used?.has(identity(m))}>
-        {m.name} · {m.provider} / {m.modelId}
-      </option>)}
+      {(model && !options.includes(model) ? [model,...options] : options).map(m=>{
+        const duplicate=used?.has(identity(m));
+        const auth=providers.find(provider=>provider.id===m.provider);
+        return <option key={identity(m)} value={identity(m)} disabled={duplicate}>
+          {m.name} · {m.provider} / {m.modelId}{duplicate ? "（已占用其他席位）" : ""}{!auth?.configured ? "（缺少认证）" : ""}
+        </option>;
+      })}
     </select></label>
+    {search.trim() && !options.length && <p className="field-note" role="status">没有匹配的模型。</p>}
+    {value.modelId && !model && <p className="field-note">所选模型已不在当前目录中，请选择可用的模型。</p>}
     <details className={styles.parameters}><summary>思考与输出额度</summary>
       <div className="form-grid">
         <label>思考档位<select aria-label={`${label}思考档位`} value={value.thinkingLevel ?? ""}
@@ -45,6 +76,7 @@ function ModelEditor({label, value, models, used, onIdentity, onParameters}) {
 /** Feature-local edits; the caller owns the modal and focus restoration. */
 export const TeamPanel = forwardRef(function TeamPanel({session, workspace, teams=[], models=[], providers=[], busy, commands, onClose}, ref) {
   const [draft,setDraft]=useState(null), [baseline,setBaseline]=useState("");
+  const [search,setSearch]=useState(""), [menu,setMenu]=useState(null);
   const [deleting,setDeleting]=useState(null), [leave,setLeave]=useState(null);
   const [pending,setPending]=useState(false), [error,setError]=useState(""), [notice,setNotice]=useState("");
   const [defaultRetry,setDefaultRetry]=useState(null);
@@ -63,7 +95,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
     const usable=node=>node?.isConnected && !node.matches(":disabled") && !node.closest("[hidden],[inert]") && node.getClientRects().length;
     if(!requested && active!==document.body && usable(active))return;
     const target=typeof requested==="string" ? root.querySelector(requested) : requested;
-    const field=root.querySelector('[aria-label="新阵容名称"]');
+    const field=root.querySelector('[aria-label="新阵容名称"], [aria-label="搜索阵容"]');
     for(const candidate of [target,field,root]){
       if(usable(candidate)){candidate.focus();if(document.activeElement===candidate)break;}
     }
@@ -73,7 +105,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
   const sessionId=session?.id, current=session?.team;
   const writable=!!sessionId && !workspace?.archived && !session.readOnly && !session.navigation?.archived && !session.selectionError && !session.navigationError;
   const disabled=busy || pending;
-  const canSetDefault=writable && workspace && !workspace.archived;
+  const canSetDefault=!!workspace?.id && !workspace.archived;
   const defaultRoster=teams.find(team=>team.id===workspace?.defaultRosterId);
   const currentModel=catalogModel(models,current?.main);
   const actualThinking=session?.thinking ?? current?.main.thinkingLevel ?? (currentModel?.reasoning ? "high" : currentModel ? "off" : "未知");
@@ -89,11 +121,11 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
     window.addEventListener("beforeunload",prevent);
     return()=>window.removeEventListener("beforeunload",prevent);
   },[dirty,unknown,hasKeys]);
-  function home(){setDraft(null);setUnknown(null);setDeleting(null);setKeys({});setError("");}
+  function home(){focusRequest.current='[aria-label="搜索阵容"]';setMenu(null);setDraft(null);setUnknown(null);setDeleting(null);setKeys({});setError("");}
   function begin(source){requestLeave(()=>{
     const value=source ? {name:"",main:structuredClone(source.main),secondary:structuredClone(source.secondary)}
       : {name:"",main:emptyRef(),secondary:[emptyRef()]};
-    setDraft(value);setBaseline(JSON.stringify(value));setUnknown(null);setSaved(null);setDeleting(null);setError("");setNotice("");setKeys({});
+    focusRequest.current='[aria-label="新阵容名称"]';setMenu(null);setDraft(value);setBaseline(JSON.stringify(value));setUnknown(null);setSaved(null);setDeleting(null);setError("");setNotice("");setKeys({});
   });}
   async function run(action) {
     if(operation.current)return;
@@ -102,40 +134,39 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
     try{return await action();}catch(e){setError(e.message);if(e.unknown) await commands.refresh();}
     finally{operation.current=false;focusRequest.current=trigger;setPending(false);}
   }
-  async function saveDefault(team, row, prefix) {
+  async function saveDefault(team, row) {
     try {
       await commands.updateWorkspace(row,{defaultRosterId:team.id});
       setDefaultRetry(null);
-      setNotice(prefix + `此 Team 的新对话默认使用「${team.name}」。`);
+      setNotice(`此 Team 的新对话默认使用「${team.name}」。`);
     } catch(error) {
       if (error.unknown) {
         const latest=await commands.refreshTeams().catch(()=>null);
         const observed=latest?.workspaces?.find(item=>item.id===row.id);
         if (observed?.defaultRosterId===team.id) {
           setDefaultRetry(null);
-          setNotice(prefix + `已读取保存状态。此 Team 的新对话默认使用「${team.name}」。`);
+          setNotice(`已读取保存状态。此 Team 的新对话默认使用「${team.name}」。`);
           return;
         }
       }
-      setDefaultRetry({team,workspaceId:row.id,prefix});
-      setNotice(prefix + (error.unknown ? "默认阵容保存结果未知，请先核对。" : "默认阵容未保存。"));
+      setDefaultRetry({team,workspaceId:row.id});
+      setNotice(error.unknown ? "默认阵容保存结果未知，请先核对。" : "默认阵容未保存。");
       throw error;
     }
   }
   async function retryDefault() {
-    const {team,workspaceId,prefix}=defaultRetry;
+    const {team,workspaceId}=defaultRetry;
     const fresh=await commands.refreshTeams();
     const row=fresh.workspaces?.find(item=>item.id===workspaceId);
     if (!row || row.archived) throw Error("Team 已归档或暂不可用，无法保存默认阵容。");
     if (row.defaultRosterId===team.id) {
       setDefaultRetry(null);
-      setNotice(prefix + `当前默认阵容已是「${team.name}」。`);
+      setNotice(`当前默认阵容已是「${team.name}」。`);
       return;
     }
-    await saveDefault(team,row,prefix);
+    await saveDefault(team,row);
   }
-  async function select(team, prefix="", useDefault=false) {
-    setDefaultRetry(null);
+  async function select(team, prefix="") {
     try {
       await commands.selectTeam({sessionId,teamId:team.id});
       setNotice(`${prefix}当前对话已使用「${team.name}」，旧回复保持原阵容。`);
@@ -144,7 +175,6 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
       if(e.unknown) await commands.refresh();
       throw e;
     }
-    if (useDefault && canSetDefault) await saveDefault(team,workspace,`${prefix}当前对话已使用「${team.name}」。`);
   }
   async function save(use) {
     const value=structuredClone(draft);
@@ -167,8 +197,17 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
   const authProviders=[...new Set((draft ? [draft.main,...draft.secondary] : []).map(r=>r.provider).filter(Boolean))];
   const shortModel = value => catalogModel(models,value)?.name || value.modelId || "目录不可用";
   const rosterLabel = team => `主：${shortModel(team.main)}；副：${team.secondary.map(shortModel).join("、")}`;
+  const matchingTeams=teams.filter(team=>matchesSearch(search,[team.name,...[team.main,...team.secondary].flatMap(model=>[shortModel(model),model.provider,model.modelId])]));
   const sameName=unknown ? teams.filter(t=>t.name===unknown.name.trim().normalize("NFC")) : [];
-  return <div className={styles.panel} ref={panel} tabIndex={-1} onFocusCapture={e=>{
+  return <div className={styles.panel} ref={panel} tabIndex={-1} onKeyDownCapture={e=>{
+    if(e.key!=="Escape" || (!menu && !deleting && !leave))return;
+    e.preventDefault();e.stopPropagation();
+    if(leave){focusRequest.current=editingFocus.current || '[aria-label="新阵容名称"]';setLeave(null);}
+    else if(!operation.current){
+      focusRequest.current=panel.current.querySelector('[aria-expanded="true"][data-roster-actions]') || '[aria-label="搜索阵容"]';
+      if(deleting)setDeleting(null);else setMenu(null);
+    }
+  }} onFocusCapture={e=>{
     if(e.target.matches("input,select,textarea") && e.target.closest("form"))editingFocus.current=e.target;
   }}>
     <div className={styles.intro}><div><small>当前对话</small><h3>{current?.name || "尚未选择阵容"}</h3>
@@ -176,7 +215,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
       <button type="button" className="primary" disabled={disabled} onClick={()=>begin(null)}>＋ 新建阵容</button></div>
     {workspace && <p className="field-note">此 Team 的新对话默认阵容：{defaultRoster?.name || (workspace.defaultRosterId ? "原阵容已删除，请为新对话选择" : "尚未设置")}</p>}
     {busy && <p className="field-note">任务进行中，阵容暂只读；结束或停止后可修改。草稿不会排队。</p>}
-    {!writable && <p className="field-note">当前对话不可切换或删除阵容；仍可查看已有阵容。</p>}
+    {!writable && <p className="field-note">当前没有可编辑的对话，无法切换当前阵容或删除保存的阵容。</p>}
     {current && <details className={styles.thinking}>
       <summary>对话参数 · 思考 {actualThinking}</summary>
       <p>本对话主模型实际思考：<strong>{actualThinking}</strong>{session.thinking != null ? `（对话设置，覆盖阵容中的 ${current.main.thinkingLevel ?? "默认值"}）` : "（跟随阵容）"}</p>
@@ -207,12 +246,12 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
         <fieldset disabled={disabled || !!unknown} className={styles.fields}>
           <label>新阵容名称<input aria-label="新阵容名称" required maxLength={80} value={draft.name} placeholder="为新阵容取名，原阵容保留"
             onChange={e=>setDraft({...draft,name:e.target.value})}/></label>
-          <ModelEditor label="主模型" value={draft.main} models={models}
+          <ModelEditor label="主模型" value={draft.main} models={models} providers={providers}
             onIdentity={next=>setDraft(d=>d.main.modelId ? switchModelRoles(d,next) : {...d,main:next})}
             onParameters={main=>setDraft({...draft,main})}/>
           {session?.thinking != null && <p className="field-note">当前对话的 {session.thinking} 会优先于这里的主模型思考参数；另存只保存阵容参数，可在上方明确选择“跟随阵容”。</p>}
           {draft.secondary.map((value,index)=><div key={index}>
-            <ModelEditor label={`副模型 ${index+1}`} value={value} models={models}
+            <ModelEditor label={`副模型 ${index+1}`} value={value} models={models} providers={providers}
               used={new Set([draft.main,...draft.secondary.filter((_,i)=>i!==index)].map(identity))}
               onIdentity={next=>setDraft(d=>({...d,secondary:d.secondary.map((r,i)=>i===index ? next : r)}))}
               onParameters={next=>setDraft(d=>({...d,secondary:d.secondary.map((r,i)=>i===index ? next : r)}))}/>
@@ -255,31 +294,56 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
       </form>
     </> : <>
       <div className={styles.heading}><h3>已保存的阵容</h3><small>切换仅影响之后的提交</small></div>
-      <div className={styles.list}>{teams.map(team=>{
+      <input type="search" aria-label="搜索阵容" placeholder="搜索阵容名称或模型" value={search}
+        onChange={e=>{setSearch(e.target.value);setMenu(null);setDeleting(null);}}/>
+      {!matchingTeams.length && <p className="field-note" role="status">{teams.length ? "没有匹配的阵容。" : "尚无已保存的阵容。"}</p>}
+      <div className={styles.list}>{matchingTeams.map(team=>{
         const selected=team.id===current?.id;
-        const sameSnapshot=selected && rosterParameters(team)===rosterParameters(current);
+        const differsFromCurrent=selected && rosterParameters(team)!==rosterParameters(current);
+        const issue=rosterIssue(team,models,providers);
         const reason=selected ? "当前对话正在使用，请先切换" : teams.length<=1 ? "至少保留一个阵容" : !writable ? "当前对话不可管理" : "";
+        const isOpen=menu===team.id;
+        const isDefault=workspace?.defaultRosterId===team.id;
         return <div className={`${styles.card} ${selected ? styles.selected : ""}`} key={team.id}>
-          <div><strong>{team.name}{selected && <span className={styles.tag}>当前</span>}</strong><p title={rosterText(team)}>{rosterLabel(team)}</p>{selected && !sameSnapshot && <small>当前对话保留不同参数的历史快照，可明确使用已保存参数；旧回复不变。</small>}</div>
-          <div className={styles.actions}>
-            <button type="button" disabled={disabled || !writable || sameSnapshot} aria-label={`使用 ${team.name}`} onClick={()=>run(()=>select(team))}>{sameSnapshot ? "使用中" : selected ? "使用已保存参数" : "使用"}</button>
-            {canSetDefault && <button type="button" disabled={disabled || (sameSnapshot && workspace.defaultRosterId===team.id)}
-              aria-label={`使用${team.name}，并用于此 Team 的新对话`} onClick={()=>run(()=>select(team,"",true))}>使用并设为新对话默认</button>}
-            <button type="button" disabled={disabled} aria-label={`调整 ${team.name}`} onClick={()=>begin(team)}>调整另存</button>
-            <button type="button" disabled={disabled || !!reason} title={reason} aria-label={`删除 ${team.name}`} onClick={()=>{focusRequest.current="[data-team-cancel-delete]";setDeleting(team);}}>删除</button>
+          <div className={styles.row}>
+            <button type="button" className={styles.pick} aria-current={selected || undefined}
+              disabled={disabled || !writable || selected} aria-label={`使用 ${team.name}`}
+              onClick={()=>{setMenu(null);setDeleting(null);run(()=>select(team));}}>
+              <span><strong>{team.name}</strong>{selected && <span className={styles.tag}>当前</span>}{isDefault && <span className={styles.tag}>Team 默认</span>}</span>
+              <span className={styles.rosterModels} title={rosterText(team)}>{rosterLabel(team)}</span>
+              {differsFromCurrent && <span className={styles.rosterModels}>已保存参数与当前快照不同</span>}
+              {issue && <span className={styles.rosterModels}>{issue}</span>}
+            </button>
+            <button type="button" className={styles.more} aria-label={`管理 ${team.name}`} aria-expanded={isOpen} data-roster-actions
+              onClick={()=>{setMenu(isOpen ? null : team.id);setDeleting(null);}}>⋯</button>
           </div>
+          {isOpen && <div className={styles.management} role="group" aria-label={`${team.name}的管理操作`}>
+            {differsFromCurrent && <>
+              <p className="field-note">当前对话保留不同参数的历史快照，可明确使用已保存参数；旧回复不变。</p>
+              <button type="button" disabled={disabled || !writable} onClick={()=>run(()=>select(team))}>使用已保存参数</button>
+              <button type="button" disabled={disabled} onClick={()=>begin(current)}>按当前快照另存</button>
+            </>}
+            {workspace && <button type="button" disabled={disabled || !canSetDefault || isDefault || !!issue}
+              aria-label={`将 ${team.name} 设为此 Team 默认`} onClick={()=>run(()=>saveDefault(team,workspace))}>设为此 Team 默认</button>}
+            <button type="button" disabled={disabled} aria-label={`调整 ${team.name}`} onClick={()=>begin(team)}>调整另存</button>
+            <button type="button" disabled={disabled || !!reason} title={reason} aria-label={`删除 ${team.name}`}
+              onClick={()=>{focusRequest.current="[data-team-cancel-delete]";setDeleting(team);}}>删除</button>
+            {reason && <p className="field-note">{reason}{selected && teams.length<=1 ? "；至少保留一个阵容" : ""}。</p>}
+            {deleting?.id===team.id && <div className={styles.confirm} role="alert"><p>删除已保存的「{deleting.name}」？模型、认证和已有对话快照保留。</p>
+              <button type="button" data-team-cancel-delete disabled={pending} onClick={()=>{focusRequest.current=panel.current.querySelector('[aria-expanded="true"][data-roster-actions]');setDeleting(null);}}>取消删除</button>
+              <button type="button" disabled={disabled || deleting.id===current?.id || teams.length<=1 || !writable} onClick={()=>run(async()=>{
+                const target=deleting;setDeleting(null);setMenu(null);
+                try{await commands.removeTeam({sessionId,teamId:target.id});setNotice(`已删除「${target.name}」，历史快照保留。`);}
+                catch(e){if(e.unknown){await commands.refreshTeams();setNotice("删除结果未知，已读取当前列表；不会自动再次删除。");}throw e;}
+              })}>确认删除</button></div>}
+          </div>}
         </div>;
       })}</div>
-      {current && !teams.some(t=>t.id===current.id) && <p className="field-note">当前阵容已从保存列表删除，此对话仍保留历史快照。</p>}
-      {current && <button type="button" disabled={disabled} onClick={()=>begin(current)}>基于当前阵容调整</button>}
-      {deleting && <div className={styles.confirm} role="alert"><p>删除已保存的「{deleting.name}」？模型、认证和已有对话快照保留。</p>
-        <button type="button" data-team-cancel-delete disabled={pending} onClick={()=>setDeleting(null)}>取消删除</button>
-        <button type="button" disabled={disabled || deleting.id===current?.id || teams.length<=1 || !writable} onClick={()=>run(async()=>{
-          const target=deleting;setDeleting(null);
-          try{await commands.removeTeam({sessionId,teamId:target.id});setNotice(`已删除「${target.name}」，历史快照保留。`);}
-          catch(e){if(e.unknown){await commands.refreshTeams();setNotice("删除结果未知，已读取当前列表；不会自动再次删除。");}throw e;}
-        })}>确认删除</button></div>}
-      <p className={styles.footer}>调整另存新阵容，历史与认证保留。当前与最后一个阵容 不可删除。</p>
+      {current && !teams.some(t=>t.id===current.id) && <>
+        <p className="field-note">当前阵容已从保存列表删除，此对话仍保留历史快照。</p>
+        <button type="button" disabled={disabled} onClick={()=>begin(current)}>基于当前阵容调整</button>
+      </>}
+      <p className={styles.footer}>调整另存新阵容，历史与认证保留。当前与最后一个阵容不可删除。</p>
     </>}
   </div>;
 });

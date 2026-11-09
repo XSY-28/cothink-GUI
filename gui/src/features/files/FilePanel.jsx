@@ -1,4 +1,4 @@
-import React,{useEffect,useRef,useState} from 'react';
+import React,{useCallback,useEffect,useRef,useState} from 'react';
 import {Markdown} from '../../Markdown.js';
 import {VisualEvidence} from '../../Collaboration.jsx';
 import {checkLabel} from '../../view.js';
@@ -19,7 +19,7 @@ export function OutcomeFiles({taskId,status,commands,onOpen}) {
       <p className="field-note">{error|| (result?'本轮没有文件变更或可交付文件；可查看对应执行记录。':'读取本轮成果清单…')}</p>}
   </div>;
 }
-export function FilePanel({task,selection,commands,onSelection,onRecords}) {
+export function FilePanel({task,sessionId,selection,commands,onSelection,onRecords}) {
   const [list,setList]=useState(null),[listError,setListError]=useState(''),[loadedContent,setContent]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(false),[downloading,setDownloading]=useState(false);
   const current=useRef(commands);current.current=commands;
   const callbacks=useRef({onSelection});callbacks.current={onSelection};
@@ -37,6 +37,8 @@ export function FilePanel({task,selection,commands,onSelection,onRecords}) {
   },[task?.id,task?.work?.version,task?.status]);
   const item=list?.items.find(i=>key(i.ref)===key(selection?.fileRef)),tab=selection?.tab??'preview';
   const identity=key(item?.ref)+':'+tab;
+  const fileRef=item?.ref;
+  const resolveImage=useCallback(src=>current.current.resolveImage({sessionId,taskId:fileRef.taskId,src,fileRef}),[sessionId,fileRef]);
   const content=loadedContent?.identity===identity?loadedContent:null;
   useEffect(()=>{
     const abort=new AbortController();let alive=true,url;
@@ -78,7 +80,7 @@ export function FilePanel({task,selection,commands,onSelection,onRecords}) {
       {error&&<div className={styles.fallback}><p role="alert">{error}</p><p>原始文件未改写。可切换源码、差异，或查看下方已有截图。</p></div>}
       {content?.diff&&(content.diff.binary?<p className={styles.fallback}>二进制变更；完整二进制内容保留在原文件和完整补丁中。</p>:<pre className={styles.code} tabIndex={0}>{content.diff.patch}</pre>)}
       {content?.url&&(content.representation==='static-preview'?<><p className="field-note">静态预览：脚本、表单、导航和外部资源未运行。</p><iframe sandbox="" referrerPolicy="no-referrer" src={content.url} title={`静态预览 ${item.name}`} className={styles.frame}/></>:<img className={styles.image} src={content.url} alt={item.name}/>)}
-      {content?.text!==undefined&&(tab==='preview'&&item.previewKind==='markdown'?<div className={`prose ${styles.markdown}`}><Markdown text={content.text}/></div>:<pre className={styles.code} tabIndex={0}>{content.text}</pre>)}
+      {content?.text!==undefined&&(tab==='preview'&&item.previewKind==='markdown'?<div className={`prose ${styles.markdown}`}><Markdown text={content.text} resolveImage={commands.resolveImage&&fileRef?resolveImage:undefined}/></div>:<pre className={styles.code} tabIndex={0}>{content.text}</pre>)}
     </>}
     {(task?.executionTasks??(task?.work?[task]:[])).filter(source=>source.work).map(source=><details key={source.id} className={styles.facts}><summary>检查、截图与版本详情</summary>
       <p>{checkLabel(source.work.finalCheck)}。文件保存状态、截图生成情况与模型判断分别记录。</p>

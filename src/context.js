@@ -1,7 +1,41 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { loadSkills, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { loadSkills, parseFrontmatter, resizeImage } from "@earendil-works/pi-coding-agent";
+
+import { createGuiMaterialStore } from "./gui-materials.js";
+import { problem } from "./task.js";
+
+export const materialImage = (m) => m.mediaType.startsWith("image/");
+export const materialImageHash = (block) => createHash("sha256").update(Buffer.from(block.data,"base64")).digest("hex");
+export function materialReference({id,ownerId,sha256,name,mediaType,byteLength}) {
+  return {id,ownerId,sha256,name,mediaType,byteLength};
+}
+export function loadInputMaterials(home, references) {
+  const store = createGuiMaterialStore(home);
+  return references.map(({id,ownerId,sha256,payloadSha256}) => ({...store.read({id,ownerId,sha256}),payloadSha256}));
+}
+export function materialText({manifest,bytes}) {
+  const label = `[User attachment ${JSON.stringify(manifest.name)}; materialId=${manifest.id}; sha256=${manifest.sha256}]`;
+  if (materialImage(manifest)) return label;
+  const body = new TextDecoder("utf-8",{fatal:true,ignoreBOM:true}).decode(bytes);
+  return `${label}\n${body}\n[End of user attachment ${manifest.id}]`;
+}
+export function requireMaterialImageModel(model, ref) {
+  if (!model?.input?.includes("image"))
+    throw problem("MATERIAL_IMAGE_MODEL", `阵容中的 ${ref.provider}/${ref.modelId} 不支持图片。请换用支持图片的阵容，或移除本条图片。`);
+}
+export async function prepareMaterialImages(materials, model, autoResize = true) {
+  return Promise.all(materials.filter(m=>materialImage(m.manifest)).map(async ({manifest,bytes,payloadSha256}) => {
+    requireMaterialImageModel(model,{provider:model.provider,modelId:model.id});
+    const processed = autoResize ? await resizeImage(bytes,manifest.mediaType,model.inputLimits?.images?.resize) :
+      {data:bytes.toString("base64"),mimeType:manifest.mediaType};
+    if (!processed) throw problem("MATERIAL_IMAGE_NORMALIZE",`图片 ${manifest.name} 无法完成 Pi 预处理。请重新选择图片。`);
+    const block = {type:"image",data:processed.data,mimeType:processed.mimeType};
+    const evidence = {id:manifest.id,originalSha256:manifest.sha256,payloadSha256:materialImageHash(block)};
+    return {block,evidence,previousSha256:payloadSha256};
+  }));
+}
 
 /** Discover only configured sources; diagnostics are fatal before generation. */
 export function freezeAnswerSkills({ cwd, home, paths = [], project = false, input = "", explicitSkills = [], includeRestricted = false }) {

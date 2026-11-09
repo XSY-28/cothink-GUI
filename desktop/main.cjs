@@ -1,11 +1,18 @@
 const {app,BrowserWindow,Menu,ipcMain,dialog,shell}=require('electron');
 const {spawn}=require('node:child_process');
-const {join}=require('node:path');
-const {readFileSync}=require('node:fs');
+const {dirname,isAbsolute,join}=require('node:path');
+const {readFileSync,realpathSync,statSync}=require('node:fs');
 const {randomUUID}=require('node:crypto');
 app.setName('CoThink');
 let win,child,origin,ready=false,hostStopped=false,exiting=false,quitting=false,quitId;
 const directoryRequests=new Set();
+let lastSelectedDirectory;
+const absolutePath=value=>typeof value==='string' && value.length<=32768 && !value.includes('\0') && isAbsolute(value);
+function availableDirectory(value) {
+  if (!absolutePath(value)) return undefined;
+  try { const path=realpathSync(value); return statSync(path).isDirectory()?path:undefined; }
+  catch { return undefined; }
+}
 let pendingClose,drained=false,draftsSaved=false,pageLoaded=false,rendererCrashed=false,finalRequested=false,closedEditorId;
 const build=JSON.parse(readFileSync(join(__dirname,'build.json'),'utf8'));
 const validId=value=>typeof value==='string' && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(value);
@@ -104,14 +111,20 @@ else {
       if(pendingClose){clearTimeout(pendingClose.timer);pendingClose=null;}
       explain('页面进程已停止。宿主只保留已确认保存的草稿；任务不会因为页面重开而重发。请从窗口菜单重新打开已保存页面。');
     });
-    ipcMain.handle('cothink:directory',async(event,{requestId}={})=>{
+    ipcMain.handle('cothink:directory',async(event,{requestId,defaultPath}={})=>{
       if(!trusted(event)||!validId(requestId)||quitting||directoryRequests.has(requestId))throw Error('目录选择请求无效。');
       directoryRequests.add(requestId);
       if(directoryRequests.size>256)directoryRequests.delete(directoryRequests.values().next().value);
       const frame=event.senderFrame;
-      const result=await dialog.showOpenDialog(win,{title:'选择 CoThink 项目目录',properties:['openDirectory']});
+      const directory=availableDirectory(defaultPath) ?? availableDirectory(lastSelectedDirectory) ??
+        (absolutePath(defaultPath)?availableDirectory(dirname(defaultPath)):undefined);
+      const result=await dialog.showOpenDialog(win,{title:'选择或新建 CoThink 项目目录',properties:['openDirectory','createDirectory'],
+        ...(directory && {defaultPath:directory})});
       if(!trusted(event)||frame!==win.webContents.mainFrame)throw Error('页面身份已改变。');
-      return result.canceled?null:result.filePaths[0]??null;
+      if (result.canceled) return null;
+      const selected=availableDirectory(result.filePaths[0]);
+      if (selected) lastSelectedDirectory=selected;
+      return selected??null;
     });
     ipcMain.on('cothink:close-ack',(event,value)=>{
       if(!trusted(event)||!pendingClose||!value||Object.keys(value).some(k=>!['requestId','saved'].includes(k))||value.requestId!==pendingClose.requestId||typeof value.saved!=='boolean')return;

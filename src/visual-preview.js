@@ -394,21 +394,24 @@ export function createPreviewTool({
 /** Only provider image fields count; textual claims or paths do not. */
 export function payloadImageHashes(payload) {
   const hashes = new Set();
-  function image(data) {
+  function image(data, mimeType) {
     if (typeof data !== "string") return;
-    const b64 = data.startsWith("data:image/png;base64,")
-      ? data.slice(22)
-      : data;
-    if (!b64.startsWith("iVBORw0KGgo")) return;
-    hashes.add(sha(Buffer.from(b64, "base64")));
+    const inline=/^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(data);
+    if(inline){mimeType=inline[1];data=inline[2];}
+    if(!["image/png","image/jpeg","image/webp"].includes(mimeType))return;
+    const bytes=Buffer.from(data,"base64");
+    if(mimeType==="image/png"&&!bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))return;
+    if(mimeType==="image/jpeg"&&(bytes[0]!==255||bytes[1]!==216))return;
+    if(mimeType==="image/webp"&&(bytes.toString("ascii",0,4)!=="RIFF"||bytes.toString("ascii",8,12)!=="WEBP"))return;
+    hashes.add(sha(bytes));
   }
   function visit(v) {
     if (!v || typeof v !== "object") return;
-    if (v.type === "image_url") image(v.image_url?.url);
+    if (v.type === "image_url") image(v.image_url?.url??v.image_url??v.imageUrl?.url??v.imageUrl);
     if (v.type === "input_image") image(v.image_url);
-    if (v.type === "image" && v.source?.media_type === "image/png")
-      image(v.source.data);
-    if (v.inlineData?.mimeType === "image/png") image(v.inlineData.data);
+    if (v.type === "image") image(v.source?.data,v.source?.media_type);
+    if (v.inlineData) image(v.inlineData.data,v.inlineData.mimeType);
+    if (v.inline_data) image(v.inline_data.data,v.inline_data.mime_type);
     for (const x of Object.values(v)) if (typeof x === "object") visit(x);
   }
   visit(payload);

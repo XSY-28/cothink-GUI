@@ -13,7 +13,7 @@ function home(t) { const p=mkdtempSync(join(tmpdir(),'cothink-desktop-test-'));t
 test('desktop shutdown freezes writes but keeps authenticated history and draft persistence until final close', async t=>{
  const controller=await createGuiController({home:home(t),suggestedProject:null,installation:'desktop'});
  const h=await startGuiServer({controller,open:false});t.after(()=>h.close());
- const headers={Authorization:`Bearer ${h.token}`,'Content-Type':'application/json'};
+ const headers={Authorization:`Bearer ${h.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"2"};
  const origin=new URL(h.url).origin;
  const read=()=>fetch(origin+'/api/bootstrap',{headers});
  const action=(action,args={})=>fetch(origin+'/api/action',{method:'POST',headers,body:JSON.stringify({action,args})});
@@ -100,7 +100,7 @@ test('IPC parent loss cancels an in-flight real HTTP fixture request and persist
  const model=await fixture(t,async()=>{await new Promise(resolve=>setTimeout(resolve,800));return {text:'late fixture'};});
  saveConfig(model.home,createTeamConfig({formatVersion:2,...model.models},'Fixture',randomUUID()));
  const f=await childHost(t,{COTHINK_HOME:model.home});const ready=await f.next('ready');
- const action=async(action,args)=>{const r=await fetch(ready.origin+'/api/action',{method:'POST',headers:{Authorization:`Bearer ${ready.token}`,'Content-Type':'application/json'},body:JSON.stringify({action,args})});assert.equal(r.status,200,await r.clone().text());return r.json();};
+ const action=async(action,args)=>{const r=await fetch(ready.origin+'/api/action',{method:'POST',headers:{Authorization:`Bearer ${ready.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"2"},body:JSON.stringify({action,args})});assert.equal(r.status,200,await r.clone().text());return r.json();};
  const session=await action('session.create',{project:null});
  const submitted=await action('task.submit',{sessionId:session.id,input:'local fixture only',protocolVersion:1, submissionId:randomUUID()});
  for(let n=0;n<500&&!model.calls.length;n++)await new Promise(resolve=>setTimeout(resolve,10));

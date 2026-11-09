@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { acquireSessionWriter, writePrivateJson } from "./storage.js";
+import { acquireSessionWriter, writePrivateBytes, writePrivateJson } from "./storage.js";
 
 const writerId = "00000000-0000-4000-8000-000000000001";
 export const isWorkspaceId = id =>
@@ -22,24 +22,26 @@ const sameDirectory = (a, b) => a !== null && b !== null && projectKey(a) === pr
 const sameName = (a, b) => a.project === null && b.project === null && nameKey(a.name) === nameKey(b.name);
 const rosterId = id => id === null || isWorkspaceId(id);
 
-export function readGuiWorkspaces(home) {
+function readSnapshot(home) {
   const path = pathFor(home);
   try {
     if (!lstatSync(path).isFile()) throw unavailable();
   } catch (error) {
-    if (error.code === "ENOENT") return {schemaVersion:1, revision:0, workspaces:[]};
+    if (error.code === "ENOENT") return {bytes:null, state:{schemaVersion:1, revision:0, workspaces:[]}};
     throw unavailable();
   }
   try {
-    const state = JSON.parse(readFileSync(path, "utf8"));
-    if (!record(state) || state.schemaVersion !== 1 || !revision(state.revision) || !Array.isArray(state.workspaces))
+    const bytes = readFileSync(path);
+    const state = JSON.parse(bytes.toString("utf8"));
+    if (!record(state) || ![1,2].includes(state.schemaVersion) || !revision(state.revision) || !Array.isArray(state.workspaces))
       throw unavailable();
     const ids = new Set(), projects = new Set(), names = new Set();
     for (const w of state.workspaces) {
       if (!record(w) || !isWorkspaceId(w.id) || !revision(w.revision) || w.revision > state.revision ||
           !validName(w.name) || !(w.project === null || isWorkspaceProject(w.project)) ||
           !rosterId(w.defaultRosterId) || typeof w.archived !== "boolean" ||
-          typeof w.createdAt !== "string" || !Number.isFinite(Date.parse(w.createdAt)))
+          typeof w.createdAt !== "string" || !Number.isFinite(Date.parse(w.createdAt)) ||
+          (w.mutationId !== undefined && (state.schemaVersion !== 2 || !isWorkspaceId(w.mutationId))))
         throw unavailable();
       const key = w.project === null ? nameKey(w.name) : projectKey(w.project);
       const unique = w.project === null ? names : projects;
@@ -47,10 +49,45 @@ export function readGuiWorkspaces(home) {
       ids.add(w.id);
       unique.add(key);
     }
-    return state;
+    if (state.schemaVersion === 2) {
+      if (!record(state.legacyMembership)) throw unavailable();
+      for (const [sessionId, branches] of Object.entries(state.legacyMembership)) {
+        if (!isWorkspaceId(sessionId) || !record(branches)) throw unavailable();
+        for (const [project, workspaceId] of Object.entries(branches))
+          if (!isWorkspaceProject(project) || !ids.has(workspaceId)) throw unavailable();
+      }
+    }
+    return {state, bytes};
   } catch {
     throw unavailable();
   }
+}
+
+export function readGuiWorkspaces(home) {
+  return readSnapshot(home).state;
+}
+
+function backupV1(home, bytes, beforeCommit) {
+  const primary = join(home,"gui-workspaces.v1.json");
+  const existing = path => {
+    try {
+      if (!lstatSync(path).isFile()) throw unavailable();
+      return readFileSync(path);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return null;
+    }
+  };
+  let target = primary;
+  const previous = existing(primary);
+  if (previous && !previous.equals(bytes)) {
+    // A prior attempt may have saved its backup before the v2 publication failed.
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    target = join(home,"gui-workspaces.v1." + digest + ".json");
+  }
+  const saved = existing(target);
+  if (!saved) writePrivateBytes(target, bytes, beforeCommit);
+  else if (!saved.equals(bytes)) throw unavailable();
 }
 
 function write(home, update) {
@@ -58,12 +95,20 @@ function write(home, update) {
   try { writer = acquireSessionWriter(join(home,"gui"),writerId); }
   catch { throw unavailable(); }
   try {
-    const state = readGuiWorkspaces(home);
-    const {changed, result} = update(state);
+    const {state, bytes} = readSnapshot(home);
+    const oldVersion = state.schemaVersion;
+    const {changed, result, verify} = update(state);
     if (changed) {
       if (!revision(state.revision + 1)) throw unavailable();
-      try { writePrivateJson(pathFor(home), {...state, revision:state.revision + 1}, writer.assertOwned); }
-      catch { throw unavailable(); }
+      const beforeCommit = () => {
+        writer.assertOwned();
+        const latest = readSnapshot(home).bytes;
+        if (bytes ? !latest?.equals(bytes) : latest !== null) throw unavailable();
+        if (verify) verify();
+      };
+      beforeCommit();
+      if (bytes && oldVersion === 1 && state.schemaVersion === 2) backupV1(home, bytes, beforeCommit);
+      writePrivateJson(pathFor(home), {...state, revision:state.revision + 1}, beforeCommit);
     }
     return result;
   } finally { writer.release(); }
@@ -114,12 +159,13 @@ export function updateGuiWorkspace(home, {workspaceId, expectedRevision, change}
     } else if (key === "archived") {
       if (typeof value !== "boolean") throw Error("归档状态无效。");
     } else if (key === "project") {
-      if (current.project !== null)
+      if (state.schemaVersion === 2 || current.project !== null)
         throw workspaceError("WORKSPACE_CONFLICT", "该 Team 已绑定目录；如需另一目录请新建 Team。", current);
       if (!isWorkspaceProject(value)) throw Error("项目目录无效。");
     } else throw Error("项目 Team 变更参数无效。");
     if (!revision(current.revision + 1)) throw unavailable();
-    const result = {...current, [key]:value, revision:current.revision + 1};
+    const {mutationId: _mutationId, ...previous} = current;
+    const result = {...previous, [key]:value, revision:current.revision + 1};
     assertUnique(state,result);
     state.workspaces[at] = result;
     return {changed:true, result};
@@ -130,19 +176,108 @@ export function workspaceForProject(state, path) {
   return state.workspaces.find(w => sameDirectory(w.project,path));
 }
 
-/** Old paths are historical identities, even if their repositories have moved. */
-export function importGuiWorkspaceProjects(home, paths) {
+function mappedWorkspace(state, sessionId, project) {
+  if (!isWorkspaceId(sessionId) || !isWorkspaceProject(project)) return null;
+  const id = state.legacyMembership?.[sessionId]?.[project];
+  return id ? state.workspaces.find(w => w.id === id) : null;
+}
+
+export function workspaceForSession(state, sessionId, project, workspaceId) {
+  if (workspaceId != null) return state.workspaces.find(w => w.id === workspaceId);
+  return mappedWorkspace(state, sessionId, project) ?? workspaceForProject(state, project ?? null);
+}
+
+function remember(state, sessionId, project, workspaceId) {
+  state.schemaVersion = 2;
+  state.legacyMembership ??= {};
+  const branches = state.legacyMembership[sessionId] ??= {};
+  branches[project] = workspaceId;
+}
+
+function discoverLegacyBinding(state, {sessionId, project}) {
+  if (sessionId && mappedWorkspace(state,sessionId,project)) return false;
+  let target = workspaceForProject(state,project);
+  if (!target) {
+    const name = [...(basename(project).trim() || project.trim())].slice(0,80).join("").trimEnd();
+    target = workspace(randomUUID(),name,project,null);
+    state.workspaces.push(target);
+  } else if (!sessionId) return false;
+  if (sessionId) remember(state,sessionId,project,target.id);
+  return true;
+}
+
+function checkRebind({workspaceId, operationId, expectedRevision}) {
+  if (!isWorkspaceId(workspaceId) || !isWorkspaceId(operationId) || !revision(expectedRevision))
+    throw Error("项目 Team 目录变更参数无效。");
+}
+
+function confirmed(current, {operationId, expectedRevision}) {
+  return current?.mutationId === operationId && current.revision === expectedRevision + 1;
+}
+
+export function queryGuiWorkspaceRebind(home, input) {
+  checkRebind(input);
   const state = readGuiWorkspaces(home);
-  const missing = [...new Set(paths)].filter(path => isWorkspaceProject(path) && !workspaceForProject(state,path));
-  if (!missing.length) return state;
+  const workspace = state.workspaces.find(w => w.id === input.workspaceId) ?? null;
+  return {status:confirmed(workspace, input) ? "confirmed" : "unconfirmed", workspace};
+}
+
+export function rebindGuiWorkspace(home, input, verifyLegacyBindings) {
+  checkRebind(input);
+  const {workspaceId, operationId, expectedRevision, path, legacyBindings} = input;
+  if (!(path === null || isWorkspaceProject(path)) || !Array.isArray(legacyBindings) ||
+      !legacyBindings.every(binding => record(binding) && isWorkspaceId(binding.sessionId) && isWorkspaceProject(binding.project)) ||
+      typeof verifyLegacyBindings !== "function")
+    throw Error("项目 Team 目录或旧会话归属参数无效。");
+
+  return write(home, state => {
+    const at = state.workspaces.findIndex(w => w.id === workspaceId);
+    const current = state.workspaces[at];
+    if (!current) throw workspaceError("WORKSPACE_UNAVAILABLE", "项目 Team 不存在，请刷新。");
+    if (confirmed(current, input) && current.project === path) return {changed:false, result:current};
+    if (current.revision !== expectedRevision || !revision(current.revision + 1))
+      throw workspaceError("WORKSPACE_CONFLICT", "项目 Team 已变化，请读取最新状态。", current);
+    if (current.archived) throw workspaceError("WORKSPACE_CONFLICT", "请先恢复项目 Team。", current);
+    const result = {...current, project:path, mutationId:operationId, revision:current.revision + 1};
+    assertUnique(state,result);
+
+    state.schemaVersion = 2;
+    state.legacyMembership ??= {};
+    // Discover against the old directory table. A destination with new
+    // legacy history needs its own Team before it can participate in rebind.
+    for (const binding of legacyBindings) {
+      if (sameDirectory(binding.project,path) &&
+          !mappedWorkspace(state,binding.sessionId,binding.project) &&
+          !workspaceForProject(state,binding.project))
+        throw workspaceError("WORKSPACE_CONFLICT", "目标目录有尚未归属的旧对话。请刷新历史后查看该目录的 Team。");
+      discoverLegacyBinding(state,binding);
+    }
+    state.workspaces[at] = result;
+    const verify = () => {
+      const result = verifyLegacyBindings();
+      if (result === false || typeof result?.then === "function")
+        throw workspaceError("WORKSPACE_CONFLICT", "旧会话归属已变化，请重新读取。", current);
+    };
+    return {changed:true, result, verify};
+  });
+}
+
+/** Legacy history uses its persisted branch path, even after a Team moves. */
+export function importGuiWorkspaceProjects(home, paths) {
+  const candidates = paths.flatMap(item => {
+    if (isWorkspaceProject(item)) return [{project:item}];
+    if (record(item) && isWorkspaceId(item.sessionId) && isWorkspaceProject(item.project)) return [item];
+    return [];
+  });
+  const missing = (state, {sessionId, project}) => sessionId
+    ? !mappedWorkspace(state, sessionId, project)
+    : !workspaceForProject(state, project);
+  const state = readGuiWorkspaces(home);
+  if (!candidates.some(item => missing(state,item))) return state;
   return write(home, current => {
     let changed = false;
-    for (const path of missing) {
-      if (workspaceForProject(current,path)) continue;
-      const name = [...(basename(path).trim() || path.trim())].slice(0,80).join("").trimEnd();
-      current.workspaces.push(workspace(randomUUID(),name,path,null));
-      changed = true;
-    }
+    for (const item of candidates)
+      if (discoverLegacyBinding(current,item)) changed = true;
     return {changed, result:{...current, revision:current.revision + Number(changed)}};
   });
 }

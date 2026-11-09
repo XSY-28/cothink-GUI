@@ -17,9 +17,28 @@ async function fixture(t) {
    const exited=new Promise(resolve=>appProcess.once('exit',resolve));appProcess.kill('SIGKILL');await exited;
   }rmSync(home,{recursive:true,force:true});});
  const page=await app.firstWindow();await page.waitForURL('http://127.0.0.1:*/**');
- await page.getByRole('button',{name:'新建 Team',exact:true}).click();await page.getByLabel('名称',{exact:true}).fill('Lifecycle');await page.getByRole('button',{name:'创建',exact:true}).click();
- await page.getByLabel('输入问题',{exact:true}).fill('original saved draft');
- await page.waitForTimeout(800);
+ await page.getByRole('button',{name:'新建 Team',exact:true}).click();
+ const creating=page.getByRole('dialog',{name:'新建 Team',exact:true});
+ await creating.getByLabel('名称',{exact:true}).fill('Lifecycle');
+ const actionReceipt=(name,matches=()=>true)=>page.waitForResponse(response=>{
+  if(!response.url().endsWith('/api/action')||!response.ok())return false;
+  const body=response.request().postDataJSON();
+  return body?.action===name&&matches(body.args);
+ });
+ const created=actionReceipt('session.create');
+ await creating.getByRole('button',{name:'创建',exact:true}).click();
+ await creating.waitFor({state:'hidden'});
+ const createdSession=await (await created).json();
+ const editor=page.getByLabel('输入问题',{exact:true});
+ await editor.waitFor({state:'visible'});
+ assert.equal(await editor.evaluate(node=>!!node.closest('[inert]')),false);
+ assert.equal(await page.getByText('首次发送将建立未分组对话。',{exact:true}).count(),0);
+ const saved=actionReceipt('session.draft',args=>args.sessionId===createdSession.id&&args.text==='original saved draft');
+ await editor.click();
+ await editor.pressSequentially('original saved draft');
+ assert.equal(await editor.inputValue(),'original saved draft');
+ const receipt=await (await saved).json();
+ assert.equal(receipt.editor.text,'original saved draft');
  // Use the actual spawned child and preserve its real message payload. Only
  // delay phase-one delivery, making the review's message-order window deterministic.
  await app.evaluate(({dialog})=>{
@@ -31,7 +50,13 @@ async function fixture(t) {
   desktopTest.deliver=()=>{desktopTest.defer=false;for(const m of desktopTest.held.splice(0))emit.call(child,'message',m);};
   child.emit=function(event,...args){if(event==='message'&&args[0]?.type==='shutdownState'&&args[0].settled&&desktopTest.defer){desktopTest.held.push(args[0]);return true;}return emit.call(this,event,...args);};
  });
- const sessionFile=join(home,'pi/sessions/main',readdirSync(join(home,'pi/sessions/main')).find(n=>n.endsWith('.jsonl')));
+ const sessions=join(home,'pi/sessions/main');
+ const sessionFile=readdirSync(sessions).filter(name=>name.endsWith('.jsonl')).map(name=>join(sessions,name)).find(path=>
+  JSON.parse(readFileSync(path,'utf8').split('\n')[0]).id===createdSession.id);
+ assert.ok(sessionFile,'draft receipt identifies the new persisted session');
+ const draft=readFileSync(sessionFile,'utf8').trim().split('\n').map(JSON.parse).findLast(row=>row.customType==='cothink-draft');
+ assert.equal(draft?.data.text,'original saved draft');
+ assert.equal(draft?.data.editId,receipt.editor.editId);
  return {home,app,page,sessionFile,appProcess};
 }
 async function pendingQuit(f) {

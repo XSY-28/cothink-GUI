@@ -1,5 +1,8 @@
 # CoThink 项目 Team 导航修正施工文档
 
+> **后续体验修复方案（2026-11-09）：** 正式 App 使用检查暴露了创建失败恢复、目录准入和日常入口问题，后续方案见[GUI 基础使用路径修复](GUI_USABILITY_REPAIR_PLAN.md)。目前只完成方案工作；本页的已实施事实保留，新方案不表示已修复。
+
+
 > 执行者先读[项目团队设计](TEAM_WORKSPACE_DESIGN.md)和[当前基线](../../DESIGN_BASELINE.md)。获得实现指令后使用 executing-plans，独立任务可使用 subagent-driven-development；以下复选框仅供实际施工时记录完成情况。
 
 **状态：2026-11-09，用户已要求按本文在最新版开始施工；N1／N2 已实现，浏览器与隔离桌面候选专项通过；完整 GUI 回归及证据边界见 [VALIDATION.md](../../VALIDATION.md)。**

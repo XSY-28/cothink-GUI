@@ -2001,6 +2001,10 @@ export async function runWork({
     };
     initialMaterial ??= task.requests().find((r) => r.phase === "draft")
       ?.context?.messages;
+    if(task.materialContext?.length&&Array.isArray(initialMaterial)){
+      initialMaterial=initialMaterial.map(message=>Array.isArray(message.content)?
+        {...message,content:message.content.filter(block=>block.type!=="image")}:message);
+    }
     let result = await leader.prompt(
       `Original user task:\n${task.record.input}\nFrozen initial material: ${JSON.stringify(initialMaterial ?? [])}\nLeader identity and catalog facts: ${JSON.stringify(modelFact(config.main))}\n${staff ? "Project positions reporting to you: " + JSON.stringify(directReports(null)) + "\nRegistered project work: " + JSON.stringify(staff.works(task.record.id)) + "\nEligible frozen project model routes" : "Eligible secondary models"} (matching actualModelIdentity values are aliases of one model, not independent experts): ${JSON.stringify(available.map(modelFact))}\nCurrent singleModel=${task.record.singleModel}; capacity=2; maxCalls=null.\nInput version=${initial.baseVersion}; source projection=${initial.workspace}; readOnly=${initial.readOnly}; write scope=${JSON.stringify(initial.scope)}\nOriginal directory=${v.root} (uncommitted content is outside the formal starting version; the original directory is not automatically overwritten).\nExecution capabilities=${JSON.stringify(work.execution)}; fixed checks=${JSON.stringify(checks)}. Apply the role, authorization and execution rules in the system prompt to these current facts.\n${renderAnswerSkills(task.answerSkills ?? [])}`,
     );

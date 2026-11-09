@@ -87,7 +87,7 @@ export function checkLabel(check) {
 // Local unsent text must survive background snapshots and a late submit response.
 export function createDraftBook() {
   const drafts = new Map();
-  const empty = () => ({text:"",workRequest:null,selectionId:null,editId:null});
+  const empty = () => ({editorVersion:2,text:"",workRequest:null,selectionId:null,editId:null,materials:[]});
   return {
     load(id, editor, draftRevision = null, branchAnchor = null) {
       if (!drafts.has(id)) drafts.set(id,{sessionId:id,...empty(),
@@ -121,7 +121,10 @@ export function createDraftBook() {
       const same = now.editId === sent.editId && (sent.editId !== null || now.revision === sent.revision);
       const consume = sent.selectionId && now.selectionId === sent.selectionId;
       const consumeOptions=sent.turnOptions?.id&&now.turnOptions?.id===sent.turnOptions.id;
-      if (same || consume || consumeOptions) drafts.set(sent.sessionId,{...now,...(same ? {text:""} : {}),
+      const submitted=new Set((sent.materials??[]).map(ref=>`${ref.id}:${ref.sha256}`));
+      const materials=(now.materials??[]).filter(ref=>!submitted.has(`${ref.id}:${ref.sha256}`));
+      if (same || consume || consumeOptions || materials.length!==(now.materials??[]).length)
+        drafts.set(sent.sessionId,{...now,materials,...(same ? {text:""} : {}),
         ...(consume ? {workRequest:null,selectionId:null} : {}),...(consumeOptions?{turnOptions:null}:{}),editId:crypto.randomUUID(),revision:now.revision+1});
     },
   };

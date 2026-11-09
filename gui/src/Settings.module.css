@@ -76,3 +76,38 @@
 .body details { margin:16px 0; }
 .body summary { cursor:pointer; font-size:14px; }
 .body :global(.changelog) { max-height:42vh; overflow:auto; }
+
+.settingSection {
+  margin: 20px 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.settingSection h4 { margin: 0 0 8px; }
+.authStep {
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: var(--panel);
+  border-radius: 8px;
+}
+.authStep p { margin: 4px 0 10px; overflow-wrap: anywhere; }
+.executionResult dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 12px;
+  font-size: 13px;
+}
+.executionResult dt { color: var(--muted); }
+.executionResult dd { margin: 0; overflow-wrap: anywhere; }
+.skillUse { font-size: 12px; color: var(--muted); }
+.skillPaths { list-style: none; padding: 0; }
+.skillPaths li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 0;
+}
+.skillPaths code { min-width: 0; overflow-wrap: anywhere; }
+.skillPaths button { flex-shrink: 0; }
+.skillResults { padding-inline-start: 20px; }
+.skillResults li p { margin: 4px 0 10px; }

@@ -4,16 +4,20 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve, relative, isAbsolute, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { GUI_MATERIAL_CAPABILITIES } from "./gui-materials.js";
 import { createGuiController } from "./gui-controller.js";
 
 const maxBodyBytes = 1024 * 1024;
 const actions = new Set([
+  "material.begin", "material.cancel", "project.materials", "project.material.import",
+  "oauth.start", "oauth.query", "oauth.respond", "oauth.cancel", "oauth.open", "settings.localSkills", "settings.inspectExecution",
+  "home.draft", "home.reserve", "home.transfer", "home.clearReservation",
   "session.create", "session.fork", "session.archive", "session.pin", "session.close", "session.name", "session.draft", "session.mode",
   "session.team", "session.thinking", "session.view", "team.save", "team.remove",
-  "workspace.create", "workspace.update", "workspace.bind",
-  "provider.save", "settings.work", "settings.builtinSkills", "releaseNotes.ack", "project.inspect",
+  "workspace.create", "workspace.update", "workspace.bind", "workspace.rebind", "workspace.rebind.query",
+  "provider.save", "settings.work", "settings.builtinSkills", "releaseNotes.ack", "project.inspect", "project.browse", "project.mkdir", "project.prepare",
   "extension.commands", "extension.command", "extension.reload", "extension.respond",
-  "context.organize", "task.submit", "task.confirmWork", "task.cancel", "task.reveal", "updates.check", "updates.configure",
+  "context.organize", "task.submit", "task.continuePrepared", "task.confirmWork", "task.cancel", "task.reveal", "updates.check", "updates.configure",
 ]);
 const mime = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -81,14 +85,15 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
       const codes = ["HOST_SHUTTING_DOWN", "SHUTDOWN_UNSETTLED", "SESSION_STATE_CONFLICT", "SESSION_BUSY", "SESSION_NOT_PERSISTED", "SESSION_STATE_UNAVAILABLE", "CURSOR_EXPIRED", "WORKSPACE_CONFLICT", "WORKSPACE_UNAVAILABLE", "WORKSPACE_ARCHIVED", "DRAFT_CONFLICT", "VIEW_CONFLICT"];
       const fileCodes = ["FILE_UNSUPPORTED", "FILE_UNAVAILABLE", "FILE_PATH_INVALID", "FILE_IDENTITY_MISMATCH", "FILE_TOO_LARGE", "FILE_ENCODING_UNSUPPORTED", "FILE_TYPE_MISMATCH", "FILE_DIFF_UNSUPPORTED", "FILE_VERSION_MISMATCH", "FILE_NOT_FOUND", "FILE_DELETED", "FILE_PREVIEW_UNSUPPORTED", "FILE_PURPOSE_INVALID", "STATIC_PREVIEW_UNSUPPORTED"];
       const pluginCodes = ["EXTENSION_COMMAND", "EXTENSION_UI_UNSUPPORTED", "COMMAND_UNAVAILABLE", "UNADAPTED_PLUGIN"];
-      const code = [...codes,...fileCodes,...pluginCodes].includes(error.code) ? error.code : undefined;
-      throw Object.assign(fail(code === "FILE_TOO_LARGE" ? 413 : codes.includes(code) ? 409 : 400, String(error.message).replaceAll(token, "[REDACTED]")), {code, ...(code?.startsWith("WORKSPACE_") && error.workspace && {workspace:error.workspace})});
+      const extraCodes=["SUBMISSION_CONFLICT","CONTEXT_BUSY","READ_SCOPE","READ_VERSION","PROJECT_SCOPE","PROJECT_PREPARATION_CHANGED","PROJECT_NOT_PREPARED"];
+      const code = [...codes,...fileCodes,...pluginCodes,...extraCodes].includes(error.code) || /^MATERIAL_[A-Z_]+$/.test(error.code??"") ? error.code : undefined;
+      throw Object.assign(fail(["FILE_TOO_LARGE","MATERIAL_LIMIT"].includes(code) ? 413 : code==="MATERIAL_UNKNOWN" ? 503 : code==="MATERIAL_NOT_FOUND" ? 404 : codes.includes(code)||["SUBMISSION_CONFLICT","MATERIAL_CONFLICT","MATERIAL_PENDING","READ_VERSION"].includes(code) ? 409 : 400, String(error.message).replaceAll(token, "[REDACTED]")), {code, ...(code?.startsWith("WORKSPACE_") && error.workspace && {workspace:error.workspace})});
     }
   };
   const headers = {
     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob: https:; font-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   };
   const send = (res, status, value, type = "application/json; charset=utf-8") => {
     res.writeHead(status, { ...headers, "Content-Type": type });
@@ -105,6 +110,36 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
         const supplied = Buffer.from(req.headers.authorization ?? "");
         if (supplied.length !== bearer.length || !timingSafeEqual(supplied, bearer))
           throw fail(403, "需要本次启动凭据。");
+        if(url.pathname==="/api/materials"){
+          if(req.method==="POST"){
+            query(url,["ownerId","uploadId"]);
+            if(req.headers["x-cothink-gui-input"]!=="2")
+              throw Object.assign(fail(409,"需要新版 CoThink 界面。"),{code:"GUI_INPUT_UPGRADE"});
+            if(req.headers["content-type"]!=="application/octet-stream")throw fail(415,"材料上传需要二进制请求。");
+            const length=req.headers["content-length"];
+            if(length!==undefined&&(!/^\d+$/.test(length)||Number(length)>GUI_MATERIAL_CAPABILITIES.imageBytes))
+              throw Object.assign(fail(413,"材料超过二进制上传上限。"),{code:"MATERIAL_LIMIT"});
+            const abort=new AbortController();
+            const onClose=()=>{if(!res.writableEnded)abort.abort();};
+            res.once("close",onClose);
+            try {
+              const uploaded=await call("materialUpload",{ownerId:url.searchParams.get("ownerId"),uploadId:url.searchParams.get("uploadId"),
+                body:req.iterator({destroyOnReturn:false}),signal:abort.signal,stop:()=>req.destroy()});
+              if(!res.destroyed)return send(res,200,uploaded);
+              return;
+            } finally {res.removeListener("close",onClose);}
+          }
+          if(req.method!=="GET")throw fail(405,"请求方法不允许。");
+          query(url,["ownerId","uploadId","id","sha256","taskId"],["ownerId"]);
+          const args=Object.fromEntries(url.searchParams);
+          if(!args.id){
+            if(args.sha256||args.taskId)throw fail(400,"缺少材料 ID。");
+            return send(res,200,await call("materialQuery",args));
+          }
+          if(args.uploadId)throw fail(400,"请选择上传状态或材料字节。");
+          const {manifest,bytes}=await call("materialRead",args);
+          return send(res,200,bytes,manifest.mediaType.startsWith("text/")?"text/plain; charset=utf-8":manifest.mediaType);
+        }
         const actionRoute = url.pathname === "/api/action";
         if (req.method !== (actionRoute ? "POST" : "GET")) throw fail(405, "请求方法不允许。");
         if (actionRoute) {
@@ -114,6 +149,8 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
               Object.keys(body).some((k) => !["action", "args"].includes(k)) ||
               !actions.has(body.action) || !body.args || typeof body.args !== "object" || Array.isArray(body.args))
             throw fail(400, "操作或参数无效。");
+          if (body.action !== "project.inspect" && req.headers["x-cothink-gui-input"] !== "2")
+            throw Object.assign(fail(409,"需要新版 CoThink 界面。请重新打开应用；已保存草稿和历史保留。"),{code:"GUI_INPUT_UPGRADE"});
           return send(res, 200, await call("action", body.action, body.args));
         }
         if (url.pathname === "/api/events") {
@@ -139,7 +176,14 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
           return send(res, 200, await call("bootstrap"));
         }
         if(url.pathname==='/api/capabilities') {
-          query(url,['sessionId']);return send(res,200,await call('getSessionCapabilities',url.searchParams.get('sessionId')));
+          query(url,['sessionId','draftId'],[]);return send(res,200,await call('getSessionCapabilities',url.searchParams.get('sessionId'),url.searchParams.get('draftId')));
+        }
+        if(url.pathname==="/api/project-material"){
+          query(url,["ownerId","source","version","path"],["ownerId","source","path"]);
+          const {mediaType,bytes,sha256,sourceToken}=await call("projectMaterialPreview",Object.fromEntries(url.searchParams));
+          res.writeHead(200,{...headers,"Content-Type":mediaType.startsWith("text/")?"text/plain; charset=utf-8":mediaType,
+            "X-CoThink-Content-Hash":sha256,"X-CoThink-Material-Source":sourceToken});
+          return res.end(bytes);
         }
         if (url.pathname === "/api/sessions") {
           query(url, ["query", "project", "workspaceId", "archived", "cursor", "limit"], []);
@@ -166,7 +210,7 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
           query(url,["id","ref","index"]);
           return send(res,200,await call("artifact",url.searchParams.get("id"),url.searchParams.get("ref"),pageNumber(url.searchParams.get("index"),0)),"image/png");
         }
-        const method = { "/api/files": "files", "/api/session": "session", "/api/task": "task", "/api/diff": "diff", "/api/patch": "patch", "/api/output": "output" }[url.pathname];
+        const method = { "/api/files": "files", "/api/session": "session", "/api/session-creation": "sessionCreation", "/api/task": "task", "/api/diff": "diff", "/api/patch": "patch", "/api/output": "output" }[url.pathname];
         if (!method) throw fail(404, "接口不存在。");
         const isOutput = method === "output";
         query(url, isOutput ? ["id", "ref", "offset", "limit"] : ["id"], isOutput ? ["id", "ref"] : ["id"]);
@@ -199,6 +243,7 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
       res.writeHead(200, { ...headers, "Content-Type": mime[extname(path)] ?? "application/octet-stream", "Content-Length": data.length });
       res.end(req.method === "HEAD" ? undefined : data);
     } catch (error) {
+      if(res.destroyed)return;
       if (res.headersSent) return res.end();
       // Controller errors are already redacted; do not echo request bodies, URLs or tokens.
       const message = error.status ? error.message : "操作未完成，请刷新状态并检查配置或已保存记录。";

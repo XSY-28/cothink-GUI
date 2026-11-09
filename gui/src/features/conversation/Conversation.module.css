@@ -1,4 +1,7 @@
-.workspaceHeading { min-width:0; flex:1; margin:0; font-size:16px; }
+.workspaceHeading { min-width:0; flex:1; display:flex; align-items:center; gap:3px; margin:0; font-size:15px; }
+.workspaceHeading > button { max-width:46%; flex:none; }
+.workspaceHeading .currentTitle { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin:0; font-size:inherit; font-weight:500; }
+.headingSeparator { color:var(--muted); }
 .workspaceHeading button {
   display:block; max-width:100%; min-height:36px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   padding:4px 7px; border-color:transparent; background:transparent; font-weight:500;
@@ -51,3 +54,8 @@
   .headerActions { gap:4px; }
   .headerActions button { padding-inline:7px; }
 }
+
+.sentMaterials { margin:0; padding-left:1.25em; font-size:13px; }
+.sentMaterials:not(:first-child) { margin-top:7px; }
+.errorDetails { max-width:100%; min-width:0; }
+.errorDetails pre { max-height:170px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }

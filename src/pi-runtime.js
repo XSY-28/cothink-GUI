@@ -18,6 +18,7 @@ import {
   createAgentSessionServices,
   createAgentSessionFromServices,
 } from "@earendil-works/pi-coding-agent";
+import { materialReference, materialText, prepareMaterialImages } from "./context.js";
 import { createRequestPolicy } from "./request-policy.js";
 import {
   privateDirectory,
@@ -189,6 +190,7 @@ export async function createRuntime({
   activeToolNames,
   getWorkspaceAuthority,
   packageSnapshot,
+  packageCwd = cwd,
   allowPackageErrors = false,
 }) {
   if(projectManaged){assertCleanProjectProcess();assertNoUnknownHandoff(home,cwd);}
@@ -241,7 +243,7 @@ export async function createRuntime({
   try {
     let packageError;
     if(packageSnapshot&&!packageSnapshot.project)packageSnapshot={project:realpathSync(cwd),...packageSnapshot};
-    const packageProject=packageSnapshot?.project ?? cwd;
+    const packageProject=packageSnapshot?.project ?? packageCwd;
     try {
     if(existsSync(join(packageProject,".pi/settings.json"))) {
       const hostSettings=existsSync(join(home,"pi/settings.json")) ? JSON.parse(readFileSync(join(home,"pi/settings.json"),"utf8")) : {};
@@ -254,7 +256,7 @@ export async function createRuntime({
       assertPackageReadable(home);
       packageSnapshot ??= await resolvePackageResources({
         home,
-        cwd,
+        cwd: packageProject,
         manual: {
           skills: resourceOptions.additionalSkillPaths ?? [],
           prompts: resourceOptions.additionalPromptTemplatePaths ?? [],
@@ -321,6 +323,7 @@ export async function createRuntime({
     }
     const policy = createRequestPolicy({
       getBinding: () => binding,
+      imageAutoResize: () => settingsManager.getImageAutoResize(),
       getSecrets: async (model) => {
         const resolution = await mr.getAuth(model);
         return [
@@ -488,7 +491,18 @@ export async function createRuntime({
     }
     const appendMessage = manager.appendMessage.bind(manager);
     manager.appendMessage = (message) => {
+      if (binding?.stage.phase === "draft" && message.role === "user" && binding.inputMaterialRefs?.length &&
+          !binding.task.record.branchMarkerId) {
+        message.cothinkInputMaterials = binding.inputMaterialRefs;
+      }
       const id = appendMessage(message);
+      if(binding?.task.record.handoffContext&&message.cothinkInputMaterials?.length){
+        const current=message.cothinkInputMaterials.map(ref=>({...ref,userEntryId:id}));
+        const refs=binding.task.record.handoffContext.attachmentRefs??[];
+        binding.task.record.handoffContext.attachmentRefs=[
+          ...refs.filter(ref=>ref.userEntryId),...current,
+        ];
+      }
       if (
         binding &&
         binding.stage.phase === "draft" &&
@@ -715,7 +729,7 @@ export async function createRuntime({
         stage.sessionFile = manager.getSessionFile();
         task.save();
       },
-      async prompt(input, { custom = false, ...options } = {}) {
+      async prompt(input, { custom = false, inputMaterials = [], ...options } = {}) {
         runtime.assertOwned();
         if (!extensionsBound) await session.bindExtensions({ mode: "print" });
         enforce();
@@ -731,6 +745,19 @@ export async function createRuntime({
         } else if(task.record.flow==='unified'||task.record.rootTaskId) options.expandPromptTemplates=false;
         stopAfterTurn = false;
         await runtime.selectModel(stage.modelRef);
+        if(inputMaterials.length){
+          const images=await prepareMaterialImages(inputMaterials,session.model,settingsManager.getImageAutoResize());
+          binding.requiredPromptImages=images.map(image=>image.evidence);
+          binding.inputMaterialRefs=inputMaterials.map(({manifest})=>{
+            const evidence=images.find(i=>i.evidence.id===manifest.id)?.evidence;
+            const material=inputMaterials.find(m=>m.manifest.id===manifest.id);
+            if(evidence&&material)material.payloadSha256=evidence.payloadSha256;
+            return {...materialReference(manifest),...(evidence?{payloadSha256:evidence.payloadSha256}:{})};
+          });
+          options.images=inputMaterials.filter(({manifest})=>manifest.mediaType.startsWith("image/"))
+            .map(({manifest,bytes})=>({type:"image",data:bytes.toString("base64"),mimeType:manifest.mediaType}));
+          input=[input,...inputMaterials.map(materialText)].join("\n\n");
+        }
         const abort = () => {
           void session.abort();
         };

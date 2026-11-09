@@ -3,7 +3,7 @@ import { Modal } from "./Modal.jsx";
 import styles from "./Settings.module.css";
 import { SessionRow } from "./features/navigation/Navigation.jsx";
 
-function ProviderSettings({ boot, onSave }) {
+function ProviderSettings({ boot, commands, onSave }) {
   const [custom, setCustom] = useState(false),
     [providerId, setProviderId] = useState(""),
     [key, setKey] = useState("");
@@ -81,7 +81,7 @@ function ProviderSettings({ boot, onSave }) {
                 <option key={p.id} value={p.id}>
                   {p.name}
                   {p.configured ? " · 已有认证" : ""}
-                  {!p.apiKey ? " · CLI 登录" : ""}
+                  {p.oauth && commands?.startOAuth ? " · OAuth" : !p.apiKey && !p.configured ? " · 终端或环境认证" : ""}
                 </option>
               ))}
             </select>
@@ -159,38 +159,177 @@ function ProviderSettings({ boot, onSave }) {
             {provider.oauth ? " 此服务商支持 OAuth；已有登录直接复用。" : ""}
           </p>
         )}
-        <label>
-          新的 API Key
-          <input
-            required
-            type="password"
-            autoComplete="new-password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="输入本次要保存的密钥"
-            disabled={!custom && !provider?.apiKey}
-          />
-        </label>
-        <div className="form-actions">
-          <button className="primary" disabled={!custom && !provider?.apiKey}>
-            保存认证
-          </button>
-        </div>
-        <p className="field-note">
-          保存代表本地认证已保存，远端权限尚未验证。提交后输入框清空，不自动发送试题。
-        </p>
+        {(custom || provider?.apiKey) && <>
+          <label>
+            新的 API Key
+            <input required type="password" autoComplete="new-password" value={key}
+              onChange={e=>setKey(e.target.value)} placeholder="输入本次要保存的密钥" />
+          </label>
+          <div className="form-actions"><button className="primary">保存认证</button></div>
+          <p className="field-note">保存后清空输入框。远端权限在实际调用时验证。</p>
+        </>}
       </form>
-      <div className="inset-note">
-        <strong>OAuth 与环境认证</strong>
-        <p>
-          需要新授权时，在终端运行 <code>cothink</code>，使用{" "}
-          <code>/login</code> 完成现有 Pi 登录，然后刷新此页。GUI 复用该认证。
-        </p>
-      </div>
+      {!custom && provider?.oauth && commands?.startOAuth &&
+        <OAuthLogin key={provider.id} provider={provider} commands={commands}
+          existing={boot.oauthOperations?.findLast(op=>op.providerId===provider.id)} />}
+      {!custom && provider && !provider.apiKey && !(provider.oauth && commands?.startOAuth) &&
+        <p className="field-note">此服务商需使用环境认证，或在终端运行 <code>cothink</code> 后通过 <code>/login</code> 授权。</p>}
     </>
   );
 }
-function WorkSettings({ boot, onSave }) {
+const oauthWaiting = operation => ["running","cancelling"].includes(operation?.status);
+
+function OAuthLogin({provider,commands,existing}) {
+  const [operation,setOperation]=useState(existing ?? null);
+  const [busy,setBusy]=useState(false), [error,setError]=useState("");
+  const current=useRef(operation), actions=useRef(commands);
+  const mounted=useRef(true), revision=useRef(0), inFlight=useRef(false);
+  actions.current=commands;
+
+  function update(value) {
+    current.current=value;
+    setOperation(value);
+  }
+
+  useEffect(()=>{
+    mounted.current=true;
+    return ()=>{
+      mounted.current=false;
+      ++revision.current;
+      if(oauthWaiting(current.current))
+        void actions.current.cancelOAuth?.(current.current.operationId).catch(()=>{});
+    };
+  },[]);
+
+  const id=operation?.operationId, waiting=oauthWaiting(operation);
+  useEffect(()=>{
+    if(!id || !waiting || !actions.current.getOAuth) return;
+    let stopped=false, timer;
+    const tick=async()=>{
+      const version=revision.current;
+      try {
+        const next=await actions.current.getOAuth(id);
+        if(!stopped && version===revision.current && !inFlight.current) {
+          update(next);
+          setError("");
+        }
+      } catch {
+        if(!stopped && version===revision.current) setError("登录状态暂时不可用，正在核对。");
+      } finally {
+        if(!stopped && oauthWaiting(current.current)) timer=setTimeout(tick,650);
+      }
+    };
+    timer=setTimeout(tick,650);
+    return ()=>{stopped=true;clearTimeout(timer);};
+  },[id,waiting]);
+
+  async function run(operationAction, {start=false, readOnly=false}={}) {
+    if(inFlight.current) return;
+    const version=++revision.current;
+    inFlight.current=true;
+    setBusy(true);
+    setError("");
+    try {
+      const result=await operationAction();
+      if(!mounted.current || version!==revision.current) {
+        if(start && oauthWaiting(result)) await actions.current.cancelOAuth?.(result.operationId);
+      } else if(!readOnly) update(result);
+    } catch {
+      if(mounted.current && version===revision.current)
+        setError(start ? "无法确认登录是否已开始。请先刷新并核对认证状态。" :
+          "未收到操作结果。请核对当前登录状态。");
+    } finally {
+      inFlight.current=false;
+      if(mounted.current && version===revision.current) setBusy(false);
+    }
+  }
+
+  const prompt=operation?.prompt, notification=operation?.notification;
+  return <section className={styles.settingSection} aria-label="OAuth 登录">
+    <h4>浏览器授权</h4>
+    {!waiting && <button type="button" disabled={busy} onClick={()=>run(()=>commands.startOAuth(provider.id),{start:true})}>
+      {provider.configured ? "重新授权" : "使用 OAuth 登录"}
+    </button>}
+    {operation?.message && <p role="status">{operation.message}</p>}
+    {waiting && notification?.url && <div className={styles.authStep}>
+      <p>授权地址 <strong>{notification.url}</strong></p>
+      {notification.userCode && <p>短码 <code>{notification.userCode}</code></p>}
+      <button type="button" disabled={busy || !commands.openOAuth}
+        onClick={()=>run(()=>commands.openOAuth(id),{readOnly:true})}>在浏览器打开授权页</button>
+    </div>}
+    {waiting && notification?.message && <p className="field-note">{notification.message}</p>}
+    {waiting && prompt && <form key={prompt.id} className={styles.authStep} onSubmit={event=>{
+      event.preventDefault();
+      const field=event.currentTarget.elements.namedItem("authReply"), value=field.value;
+      field.value="";
+      void run(()=>commands.respondOAuth(id,prompt.id,value));
+    }}>
+      <label>{prompt.message}
+        {prompt.type==="select" ? <select name="authReply" defaultValue="" required>
+          <option disabled value="">请选择</option>
+          {prompt.options.map(option=><option key={option.id} value={option.id}>{option.label}</option>)}
+        </select> : <input name="authReply" type={prompt.type==="text" ? "text" : "password"}
+          autoComplete="off" spellCheck={false} maxLength={8192} />}
+      </label>
+      <button disabled={busy || !commands.respondOAuth}>提交授权输入</button>
+    </form>}
+    {waiting && <button type="button" disabled={busy || operation.status==="cancelling" || !commands.cancelOAuth}
+      onClick={()=>run(()=>commands.cancelOAuth(id))}>取消登录</button>}
+    {error && <p className="error-text" role="alert">{error}</p>}
+  </section>;
+}
+
+function ExecutionCheck({boot,inspect}) {
+  const [check,setCheck]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  const configKey=boot.executionConfigDigest ?? JSON.stringify(boot.work ?? {});
+  const stale=check && (check.configKey!==configKey ||
+    boot.executionConfigDigest && check.result.configDigest!==boot.executionConfigDigest);
+
+  async function run(probe) {
+    if(busy) return;
+    setBusy(true);
+    setCheck(null);
+    setError("");
+    try {
+      const result=await inspect({probe});
+      setCheck({configKey,result});
+    } catch(error) {
+      setError(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const result=stale ? null : check?.result;
+  return <div className={styles.settingSection} aria-label="执行环境检查">
+    <h4>检查本机 Docker</h4>
+    <p className="field-note">只读检查核对本机 Docker 和固定镜像。执行环境检查还会启动并清理一个最小容器。</p>
+    <div className="form-actions">
+      <button type="button" disabled={busy} onClick={()=>run(false)}>只读检查 Docker</button>
+      <button type="button" className="primary" disabled={busy || !boot.work?.execution} onClick={()=>run(true)}>检查执行环境</button>
+    </div>
+    {busy && <p role="status">正在检查…</p>}
+    {error && <p className="error-text" role="alert">{error}</p>}
+    {stale && <p role="status">执行配置已变更，请重新检查。</p>}
+    {result && <div role="status" className={styles.executionResult}>
+      <p><strong>只读诊断</strong> {result.diagnostic.message}</p>
+      <p><strong>容器探针</strong> {result.probe.message ?? "尚未运行容器探针。"}</p>
+      <details>
+        <summary>查看检查详情</summary>
+        <dl>
+          <dt>检查时间</dt><dd>{new Date(result.checkedAt).toLocaleString()}</dd>
+          <dt>状态代码</dt><dd>{[result.diagnostic.code,result.probe.code].filter(Boolean).join(" / ")}</dd>
+          {result.diagnostic.daemonVersion && <><dt>Docker 服务</dt><dd>{result.diagnostic.daemonVersion} · {result.diagnostic.endpointKind}</dd></>}
+          {result.diagnostic.image && <><dt>固定镜像</dt><dd><code>{result.diagnostic.image}</code></dd></>}
+          {result.probe.container && <><dt>待核对容器</dt><dd><code>{result.probe.container}</code></dd></>}
+          <dt>配置摘要</dt><dd><code>{result.configDigest}</code></dd>
+        </dl>
+      </details>
+    </div>}
+  </div>;
+}
+
+function WorkSettings({ boot, onSave, inspect }) {
   const [validationError, setValidationError] = useState("");
   const existing = boot.work || {},
     execution = existing.execution;
@@ -275,6 +414,7 @@ function WorkSettings({ boot, onSave }) {
         <p>{execution ? "此处显示已保存配置，不代表 Docker 或镜像已经通过现场检查。" : "Shell 与非空正式检查将被阻止；纯问答不需要执行环境。"}</p>
         <p>当前检查策略：{existing.checks === undefined ? "按项目 package.json 解析" : existing.checks.length ? "使用指定检查命令" : "空检查策略（未验证）"}</p>
       </div>
+      {inspect && <ExecutionCheck boot={boot} inspect={inspect} />}
       <details className="settings-advanced"><summary>编辑执行环境与检查策略</summary>
       <label className="checkbox">
         <input
@@ -415,22 +555,101 @@ function WorkSettings({ boot, onSave }) {
     </form>
   );
 }
+const builtinSkillUse = {
+  "doc-maintenance": "随代码变更维护用法与文档，并核对说明是否准确。",
+  "context-management": "查找当前对话的上下文，并在需要时整理记要。",
+};
+const skillSourceLabels={builtin:"内置",package:"已启用的包",selected:"本地来源"};
+
+function LocalSkillSettings({paths:savedPaths,configured,commands,onSaved}) {
+  const [paths,setPaths]=useState(savedPaths),[path,setPath]=useState("");
+  const [resolved,setResolved]=useState(null),[busy,setBusy]=useState(false);
+  const [error,setError]=useState("");
+  const savedKey=JSON.stringify(savedPaths);
+  const pick=commands.chooseSkillPath ?? window.cothinkDesktop?.chooseProjectDirectory;
+
+  useEffect(()=>{
+    setPaths(savedPaths);
+  },[savedKey]);
+
+  async function save(event) {
+    event.preventDefault();
+    if(busy) return;
+    setError("");
+    setResolved(null);
+    setBusy(true);
+    try {
+      const proposed=[...new Set([...paths,...(path.trim() ? [path.trim()] : [])])];
+      const result=await commands.saveLocalSkills({paths:proposed});
+      setPaths(result.paths);
+      setPath("");
+      setResolved(result.skills);
+      onSaved();
+    } catch(error) {
+      setError(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className={styles.settingSection} aria-label="本地技能来源">
+    <h4>本地技能来源</h4>
+    <p className="field-note">选择 SKILL.md 或包含技能的本机目录。保存会核对技能说明和同名来源，下一条任务才会使用新设置。</p>
+    <form onSubmit={save}>
+      {paths.length ? <ul className={styles.skillPaths}>
+        {paths.map(source=><li key={source}>
+          <code>{source}</code>
+          <button type="button" disabled={busy} aria-label={"移除技能来源 "+source}
+            onClick={()=>setPaths(paths.filter(value=>value!==source))}>移除</button>
+        </li>)}
+      </ul> : <p>还没有保存本地来源。</p>}
+      <label>SKILL.md 或目录的绝对路径
+        <input autoComplete="off" value={path} onChange={event=>setPath(event.target.value)}
+          placeholder="/Users/you/skills/example/SKILL.md" disabled={busy}/>
+      </label>
+      <div className="form-actions">
+        {pick && <button type="button" disabled={busy} onClick={async()=>{
+          try {
+            const value=await pick();
+            if(value) setPath(value);
+          } catch(error) {
+            setError(error.message);
+          }
+        }}>{commands.chooseSkillPath ? "选择本地技能…" : "选择技能目录…"}</button>}
+        <button className="primary" disabled={!configured || busy || !path.trim() && JSON.stringify(paths)===savedKey}>
+          {busy ? "正在核对…" : "保存本地技能来源"}
+        </button>
+      </div>
+    </form>
+    {error && <p className="error-text" role="alert">{error}</p>}
+    {resolved && <p role="status" className="success-text">本地技能来源已保存。</p>}
+    {resolved?.length>0 && <ul className={styles.skillResults}>
+      {resolved.map(skill=><li key={skill.name}>
+        <strong>{skill.name}</strong> · {skillSourceLabels[skill.sourceKind] ?? "已启用来源"}
+        {skill.explicitOnly && " · 仅手动使用"}<p>{skill.description}</p>
+      </li>)}
+    </ul>}
+  </section>;
+}
+
 function SkillSettings({boot,session,commands,onSave}) {
   const saved=boot.builtinSkills?.disabled??[],[disabled,setDisabled]=useState(saved),[capabilities,setCapabilities]=useState(null),[failure,setFailure]=useState('');
-  const savedKey=JSON.stringify(saved);
+  const savedKey=JSON.stringify(saved),[skillRevision,setSkillRevision]=useState(0);
   useEffect(()=>{setDisabled(saved);},[savedKey]);
   useEffect(()=>{setCapabilities(null);},[session?.id,boot.active?.taskId]);
   useEffect(()=>{let current=true;setFailure('');
-    if(session?.id)commands.getCapabilities(session.id).then(value=>{if(current)setCapabilities(value);}).catch(error=>{if(current){setFailure(error.message);setCapabilities(null);}});
+    if(session?.id && commands.getCapabilities)commands.getCapabilities(session.id).then(value=>{if(current)setCapabilities(value);}).catch(error=>{if(current){setFailure(error.message);setCapabilities(null);}});
     return ()=>{current=false;};
-  },[session?.id,savedKey,boot.active]);
+  },[session?.id,savedKey,boot.active,skillRevision]);
   return <section aria-label="技能与实际能力">
     <p>内置技能按需读取。修改只影响新任务，已有任务继续使用冻结版本。技能指导不增加文件或脚本权限。</p>
     <form onSubmit={e=>{e.preventDefault();onSave({builtinSkills:{disabled}});}}>
-      {(boot.builtinSkills?.names??[]).map(name=><label className="checkbox" key={name}><input type="checkbox" checked={!disabled.includes(name)} onChange={e=>setDisabled(old=>e.target.checked?old.filter(n=>n!==name):[...old,name])}/>{name}</label>)}
+      {(boot.builtinSkills?.names??[]).map(name=><label className="checkbox" key={name}><input type="checkbox" checked={!disabled.includes(name)} onChange={e=>setDisabled(old=>e.target.checked?old.filter(n=>n!==name):[...old,name])}/>{name}{builtinSkillUse[name] && <span className={styles.skillUse}>{builtinSkillUse[name]}</span>}</label>)}
       <p className="field-note">使用外部同名技能前，先禁用内置项，再配置外部来源；两个启用来源同名时会拒绝新任务。</p>
       <button className="primary" disabled={!boot.configured}>保存技能选择</button>
     </form>
+    {commands.saveLocalSkills && <LocalSkillSettings paths={boot.localSkillPaths ?? []} configured={boot.configured}
+      commands={commands} onSaved={()=>setSkillRevision(revision=>revision+1)} />}
     <h4>{capabilities?.scope==='coordinator'?'协调器与所属执行者的能力':capabilities?.phase==='next-turn'?'下一条对话的能力':'当前角色的能力'}</h4>
     {!session?.id&&<p>打开一条对话后查看其实际能力。</p>}
     {failure&&<p role="alert" className="error-text">{failure}</p>}
@@ -544,12 +763,13 @@ export function Settings({
                 任务进行中，等待结束或停止后再修改认证和执行设置。
               </p>
             )}
-            {tab === "providers" && <><ProviderSettings boot={boot} onSave={args=>act(commands.saveProvider,args,"认证已保存；远端权限尚未验证。")} />
+            {tab === "providers" && <><ProviderSettings boot={boot} commands={commands} onSave={args=>act(commands.saveProvider,args,"认证已保存；远端权限尚未验证。")} />
               <p className="field-note">模型阵容由对话顶部统一管理。</p>
               <button type="button" onClick={onOpenTeam}>打开阵容</button></>}{" "}
             {tab === "work" && (
               <WorkSettings
                 boot={boot}
+                inspect={commands.inspectExecution}
                 onSave={args=>act(commands.saveWorkSettings,args)}
               />
             )}

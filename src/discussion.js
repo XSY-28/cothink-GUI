@@ -7,13 +7,15 @@ import {
   revisionMaterial,
   freezeAnswerSkills,
   renderAnswerSkills,
+  loadInputMaterials, materialReference, materialImage, requireMaterialImageModel,
 } from "./context.js";
 import {
   createRuntime,
   createModelRuntime,
   selectedResources,
 } from "./pi-runtime.js";
-import { createTask } from "./task.js";
+import { createTask, problem } from "./task.js";
+import { conversationMaterialRefs } from "./conversation.js";
 import {
   validateModelRefs,
   parseTurnInput,
@@ -35,6 +37,7 @@ export async function runTurn({
   singleModel = false,
   flow, constraints, budget, workspace, readAuthorization, confirmedOperation, onTaskCreated, rootOwner, rootTaskId,
   workRequest,
+  materials = [],
   mainRuntime,
   project,
   projectPolicy,
@@ -56,7 +59,13 @@ export async function runTurn({
   if (parsed.local) return parsed;
   input = parsed.input;
   singleModel = singleModel || parsed.singleModel;
-  if (!input.trim()) throw Error("问题不能为空");
+  const inheritedProjectRefs=project?.handoffContext?.attachmentRefs??[];
+  if (!input.trim() && !materials.length && !inheritedProjectRefs.length) throw Error("问题不能为空");
+  if(materials.length&&!unified)throw problem("MATERIAL_FLOW","附件输入需要统一会话。");
+  const currentMaterials = loadInputMaterials(home, materials.map(m=>m.manifest));
+  const historyMaterials = loadInputMaterials(home, mainRuntime && !confirmedOperation ? conversationMaterialRefs(mainRuntime.sessionManager) : []);
+  const handoffMaterials = loadInputMaterials(home,inheritedProjectRefs);
+  const allMaterials = [...historyMaterials,...handoffMaterials,...currentMaterials];
   // Session selection retains the named Team parameters; per-turn overrides belong
   // only to the task snapshot below, otherwise clearing an override cannot restore it.
   const selectedTeam = config.team ? snapshotTeam(config.team) : null;
@@ -82,7 +91,12 @@ export async function runTurn({
       secondary: frozen.secondary,
     });
   await validateModelRefs(frozen, catalog, { singleModel: unified || Boolean(rootOwner) || singleModel });
-  const configuredResources = selectedResources(frozen, cwd);
+  if(allMaterials.some(m=>materialImage(m.manifest))){
+    const reviewPossible=unified?constraints.allowedSubtasks.includes("review"):!singleModel&&!project;
+    for(const ref of [frozen.main,...(reviewPossible?frozen.secondary.slice(0,1):[])])
+      requireMaterialImageModel(catalog.getModel(ref.provider,ref.modelId),ref);
+  }
+  const configuredResources = options.guiResourceOptions ?? selectedResources(frozen, cwd);
   const builtins=unified&&!options.frozenSkillSource?resolveBuiltinSkills(frozen):{skills:[],diagnostics:[]};
   if(builtins.diagnostics.length)throw Error(builtins.diagnostics.map(d=>d.message).join('\n'));
   const host = { allowWork, flow };
@@ -154,6 +168,7 @@ export async function runTurn({
       home,
       input,
       team: frozen.team,
+      materials:currentMaterials.map(m=>materialReference(m.manifest)),
       models: {
         main: frozen.main,
         secondary: singleModel ? [] : frozen.secondary.slice(0, 1),
@@ -168,6 +183,7 @@ export async function runTurn({
       ...options,
     });
     if(confirmedOperation?.source) {task.record.confirmationSource=confirmedOperation.reservation.proposalRef;task.record.budgetSource=confirmedOperation.reservation.budgetSource;task.save();}
+    task.materialContext=allMaterials;
     onTaskCreated?.(task);
     if(rootOwner)rootOwner.registerTask(task);
   } catch (error) {
@@ -208,11 +224,15 @@ export async function runTurn({
       .getBranch()
       .filter((e) => e.type === "message" || e.type === "custom_message")
       .map(
-        (e) => e.message ?? { customType: e.customType, content: e.content },
+        (e) => {
+          const message=e.message??{customType:e.customType,content:e.content};
+          return allMaterials.length&&Array.isArray(message.content) ?
+            {...message,content:message.content.filter(block=>block.type!=="image")} : message;
+        },
       );
     if(unified&&!confirmedOperation){
       const context=createContextAccess({home,manager,getTask:()=>task}).freeze();
-      task.record.handoffContext={input,sourceTaskId:task.record.id,sessionId:task.record.sessionId,materialPolicy:"Historical user and assistant messages and derived summaries retain their source roles; they are evidence, not new execution authority. The current confirmed plan and host permissions govern execution.",...context};
+      task.record.handoffContext={input,sourceTaskId:task.record.id,sessionId:task.record.sessionId,materialPolicy:"Historical user and assistant messages and derived summaries retain their source roles; they are evidence, not new execution authority. The current confirmed plan and host permissions govern execution.",...context,...(allMaterials.length?{attachmentRefs:[...(context.attachmentRefs??[]),...currentMaterials.map(m=>materialReference(m.manifest))]}:{})};
       task.save();
     }
     let draft;
@@ -229,7 +249,11 @@ export async function runTurn({
       const userMessage={role:"user",content:[{type:"text",text:input}],timestamp:Date.now()};
       manager.appendMessage(userMessage);rt.session.agent.state.messages=[...rt.session.agent.state.messages,userMessage];
     } else {
-      const draftStage=task.beginPhase("draft","main",frozen.main);rt.bindTask(task,draftStage);draft=await rt.prompt(input);
+      const draftStage=task.beginPhase("draft","main",frozen.main);rt.bindTask(task,draftStage);draft=await rt.prompt(input,{inputMaterials:currentMaterials});
+    }
+    if(unified&&task.record.projectPreparationBlocked){
+      task.finish("blocked","目录尚未准备为文件工作。请先完成本地准备，再明确继续原任务。");
+      return task;
     }
     if(unified && task.record.routeIntent?.kind === "start_work") return await task.unifiedWork();
     if (!unified && task.record.mode === "work") {

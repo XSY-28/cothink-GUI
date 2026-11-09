@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { acquireSessionWriter, privateDirectory, writePrivateJson } from "./storage.js";
 
@@ -97,6 +97,48 @@ export function writeSessionViewState(home,{sessionId,expectedViewRevision,basel
     const next = {...before,view,viewRevision:before.viewRevision+1};
     privateDirectory(join(home,"session-ui"));
     writePrivateJson(pathFor(home,sessionId),next,assertOwned);
+    return next;
+  });
+}
+
+
+// One durable editor before a session exists. Its revision is scoped to draftId.
+const homePath = home => join(home,"session-ui","pending-home.json");
+export function readHomeDraft(home) {
+  try {
+    const row=JSON.parse(readFileSync(homePath(home),"utf8"));
+    const id=value=>typeof value==="string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
+    if (row?.schemaVersion!==1 || !id(row.draftId) || !Number.isSafeInteger(row.revision) || row.revision<1 ||
+      !row.editor || row.editor.editorVersion!==2 || !id(row.editor.editId) ||
+      !(row.pendingCreateSessionId===null || id(row.pendingCreateSessionId)) ||
+      !(row.targetWorkspaceId===null || id(row.targetWorkspaceId)))
+      throw Error("format");
+    return row;
+  } catch (error) {
+    if(error.code==="ENOENT") return null;
+    throw sessionStateError("DRAFT_CONFLICT","首页保存稿不可读取；原记录保留。");
+  }
+}
+
+export function writeHomeDraft(home,{draftId,expectedRevision},change) {
+  return withUiWriter(home,"00000000-0000-0000-0000-000000000001",assertOwned=>{
+    const check=()=>{
+      assertOwned();
+      const row=readHomeDraft(home);
+      if ((row?.revision ?? null)!==expectedRevision || row && row.draftId!==draftId)
+        throw sessionStateError("DRAFT_CONFLICT","首页保存稿已变化；当前输入保留，请先核对。");
+      return row;
+    };
+    const previous=check(), fields=change(previous);
+    const path=homePath(home);
+    if(fields===null) {
+      check();
+      unlinkSync(path);
+      return null;
+    }
+    const next={schemaVersion:1,draftId,revision:(previous?.revision ?? 0)+1,...fields};
+    privateDirectory(join(home,"session-ui"));
+    writePrivateJson(path,next,check);
     return next;
   });
 }

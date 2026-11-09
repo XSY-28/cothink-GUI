@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {tmpdir} from "node:os";
 import { randomUUID } from "node:crypto";
 import { join,resolve } from "node:path";
 import {pathToFileURL,fileURLToPath} from "node:url";
@@ -856,7 +857,7 @@ test("GUI creation persists a stable empty identity and complete versioned edito
   const args={sessionId:id,expectedDraftRevision:s.draftRevision,branchAnchor:s.branchAnchor,editId,text:"未发送",workRequest:{kind:"html-svg"},selectionId};
   const saved=await c.action("session.draft",args);
   assert.equal(saved.sessionId,id);
-  assert.deepEqual(saved.editor,{text:"未发送",workRequest:{kind:"html-svg"},selectionId,editId});
+  assert.deepEqual(saved.editor,{editorVersion:2,text:"未发送",workRequest:{kind:"html-svg"},selectionId,editId,materials:[]});
   await assert.rejects(c.action("session.draft",{sessionId:id,text:"old request"}),{code:"DRAFT_CONFLICT"});
   await assert.rejects(c.action("session.draft",{...args,editId:randomUUID(),text:"stale"}),{code:"DRAFT_CONFLICT"});
   await assert.rejects(c.action("session.create",{sessionId:id,workspaceId:null}),{code:"SESSION_STATE_CONFLICT"});
@@ -914,14 +915,15 @@ test("UI schema 2 initialization and management preserve each other's revisions 
   writeFileSync(path,'{broken'); assert.throws(()=>ui.initializeSessionView(f.home,{sessionId:id,seenResults:{}}),{code:"SESSION_STATE_UNAVAILABLE"}); assert.equal(readFileSync(path,"utf8"),'{broken');
 });
 
-test("legacy project creation chooses a roster only for a genuinely new workspace",async t=>{
+test("legacy and modern creation inherit recent roster when a workspace default is unset",async t=>{
   const {repository}=await import("./helpers/git-fixture.js");
   const f=await fixture(t),c=await controller(t,f),project=repository(t).project;
   const first=await c.action("session.create",{project}); assert.equal(first.team.id,teamId);
   const w=(await c.bootstrap()).workspaces.find(w=>w.id===first.workspaceId);
   await c.action("workspace.update",{workspaceId:w.id,expectedRevision:w.revision,change:{defaultRosterId:null}});
-  const existing=await c.action("session.create",{project}); assert.equal(existing.team,null);
-  const modern=await c.action("session.create",{sessionId:randomUUID(),workspaceId:w.id}); assert.equal(modern.team,null);
+  const existing=await c.action("session.create",{project}); assert.equal(existing.team.id,teamId);
+  const modern=await c.action("session.create",{sessionId:randomUUID(),workspaceId:w.id}); assert.equal(modern.team.id,teamId);
+  assert.equal((await c.bootstrap()).workspaces.find(row=>row.id===w.id).defaultRosterId,null);
   assert.equal(f.calls.length,0);
 });
 
@@ -1118,4 +1120,331 @@ test('GUI disabled builtin and explicit-only external skill retain their selecti
  assert.doesNotMatch(JSON.stringify(f.calls[0].body.messages),/explicit-only|EXPLICIT_BODY/);
  const selected=await submit('/skill:explicit-only explain');assert.equal((await finished(c,selected.taskId)).status,'completed');
  assert.match(JSON.stringify(f.calls[1].body.messages),/explicit-only/);assert.equal(f.calls.length,2);
+});
+
+test("ordinary chat survives a vanished Team directory and inherits the recent roster when no default is set", async t => {
+  const f=await fixture(t,()=>({text:"reply without project"})), c=await controller(t,f);
+  const {renameSync}=await import("node:fs");
+  const repo=await repository(t);
+  const {project}=repo;
+  const workspaceId=randomUUID();
+  const workspace=await c.action("workspace.create",{workspaceId,name:"vanishing",project,defaultRosterId:null});
+  renameSync(project,project+"-moved");
+  const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId});
+  assert.equal(s.project,workspace.project);
+  assert.equal(s.team.id,teamId);
+  const accepted=await c.action("task.submit",{sessionId:s.id,input:"hello",protocolVersion:1,submissionId:randomUUID()});
+  assert.equal((await finished(c,accepted.taskId)).status,"completed");
+  assert.equal(f.calls.length,1);
+});
+
+test("home editor reserves and recovers the same creation across host restarts without sending", async t => {
+  const f=await fixture(t), c=await controller(t,f);
+  const draftId=randomUUID(), sessionId=randomUUID();
+  const editor={editorVersion:2,text:"retained home draft",editId:randomUUID(),workRequest:null,selectionId:null,turnOptions:null,materials:[]};
+  const saved=await c.action("home.draft",{draftId,expectedRevision:null,editor});
+  await assert.rejects(c.action("home.draft",{draftId,expectedRevision:null,editor}),{code:"DRAFT_CONFLICT"});
+  const pending=await c.action("home.reserve",{draftId,expectedRevision:saved.revision,sessionId,workspaceId:null});
+  assert.equal(pending.pendingCreateSessionId,sessionId);
+  await c.action("session.create",{sessionId,workspaceId:null,homeDraftId:draftId});
+  await c.close();
+  const restored=await controllerModule.createGuiController({home:f.home,cwd:f.cwd});
+  t.after(()=>restored.close());
+  const loaded=(await restored.bootstrap()).homeDraft;
+  assert.equal(loaded.pendingCreateSessionId,sessionId);
+  assert.equal(loaded.editor.text,editor.text);
+  const transferred=await restored.action("home.transfer",{draftId,expectedRevision:loaded.revision,sessionId});
+  assert.equal(transferred.editor.text,editor.text);
+  assert.equal(transferred.editor.editId,editor.editId);
+  assert.equal((await restored.bootstrap()).homeDraft,null);
+  assert.equal(f.calls.length,0);
+});
+
+test("failure freezing a skill before first progress confirms the original failed submission",async t=>{
+  const f=await fixture(t);
+  const {symlinkSync}=await import("node:fs");
+  const skill=join(f.home,"resource-freeze-probe");
+  mkdirSync(skill);
+  writeFileSync(join(skill,"SKILL.md"),"---\nname: resource-freeze-probe\ndescription: Test freeze rejection before any model call\n---\nProbe.\n");
+  symlinkSync(join(skill,"SKILL.md"),join(skill,"references"));
+  const c=await controller(t,f,{piResources:{skills:[join(skill,"SKILL.md")]}});
+  const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId:null}), submissionId=randomUUID();
+  let timer;
+  try {
+    const accepted=await Promise.race([
+      c.action("task.submit",{sessionId:s.id,submissionId,input:"no request should leave this process",protocolVersion:1}),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("submission never settled")),1500);})
+    ]);
+    const saved=await c.task(accepted.taskId);
+    assert.equal(saved.status,"failed");
+    assert.match(saved.error,/symbolic link/);
+    assert.equal((await c.session(s.id)).submissions[0].submissionId,submissionId);
+    assert.equal(f.calls.length,0);
+  } finally { clearTimeout(timer); }
+});
+
+test("new conversations prefer Team default, then the saved source roster, and require selection after drift",async t=>{
+  const f=await fixture(t), c=await controller(t,f);
+  const source=await c.action("session.create",{sessionId:randomUUID(),workspaceId:null});
+  const roster=await c.action("team.save",{name:"Alternative",main:f.models.secondary[0],secondary:[f.models.main]});
+  const pinned=await c.action("workspace.create",{workspaceId:randomUUID(),name:"With default",defaultRosterId:roster.id,project:null});
+  const plain=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Inherit",defaultRosterId:null,project:null});
+  const from={sourceSessionId:source.id,sourceLeafId:source.branchAnchor};
+  const pinnedChat=await c.action("session.create",{sessionId:randomUUID(),workspaceId:pinned.id,...from});
+  assert.equal(pinnedChat.team.id,roster.id);
+  const inherited=await c.action("session.create",{sessionId:randomUUID(),workspaceId:plain.id,...from});
+  assert.equal(inherited.team.id,source.team.id);
+  await c.action("session.name",{sessionId:source.id,title:"Leaf changed"});
+  const drift=await c.action("session.create",{sessionId:randomUUID(),workspaceId:plain.id,...from});
+  assert.equal(drift.team,null);
+  assert.match(drift.rosterRequired,/来源对话.*变化/);
+  assert.equal((await c.bootstrap()).workspaces.find(row=>row.id===plain.id).defaultRosterId,null);
+  assert.equal(f.calls.length,0);
+});
+
+test("setting a default with an unavailable later roster seat preserves the Team",async t=>{
+  const f=await fixture(t), c=await controller(t,f);
+  const config=createTeamConfig({formatVersion:2,...f.models},"Fixture",teamId);
+  const brokenId=randomUUID();
+  config.teams.push({id:brokenId,name:"Removed provider model",main:f.models.main,secondary:[f.models.secondary[0],{provider:"fixture",modelId:"removed-r2"}]});
+  saveConfig(f.home,config);
+  const group=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Working default",project:null,defaultRosterId:teamId});
+  await assert.rejects(c.action("workspace.update",{workspaceId:group.id,expectedRevision:group.revision,change:{defaultRosterId:brokenId}}),/默认阵容.*不可用/);
+  const saved=(await c.bootstrap()).workspaces.find(row=>row.id===group.id);
+  assert.equal(saved.defaultRosterId,teamId);
+  assert.equal(saved.revision,group.revision);
+  assert.equal(f.calls.length,0);
+});
+
+test("ordinary directory binding, preparation and explicit continuation reach formal work", async t => {
+  const checks=[{command:"node",args:["-e","if(require('fs').readFileSync('a.txt','utf8').trim()!=='prepared result')process.exit(1)"]}];
+  const f = await fixture(t, (_, n) => {
+    const tool=(name,args={})=>({toolCalls:[{name,args}]});
+    if (n<=2) return tool("start_work",{action:"start",reason:"edit",plan:checkedPlan("Edit prepared file",checks)});
+    if (n===3) return tool("read",{path:"a.txt"});
+    if (n===4) return tool("write",{path:"a.txt",content:"prepared result\n"});
+    if (n===5 || n===6) return tool("accept_change");
+    return {text:"delivered"};
+  });
+  const c = await controller(t,f);
+  const {execution}=await import("./helpers/agent-sync-fixture.js");
+  await c.action("settings.work",{work:{execution,checks}});
+  const ordinary = mkdtempSync(join(tmpdir(),"cothink-t2-ordinary-"));
+  t.after(()=>rmSync(ordinary,{recursive:true,force:true}));
+  writeFileSync(join(ordinary,"a.txt"),"initial\n");
+  const directory=await c.action("project.inspect",{path:ordinary,purpose:"directory"});
+  assert.equal(directory.directoryAvailable,true);
+  assert.equal((await c.action("project.inspect",{path:ordinary})).executionReady,false);
+  const workspace=await c.action("workspace.create",{workspaceId:randomUUID(),name:"普通目录",project:ordinary,defaultRosterId:teamId});
+  const s=await c.action("session.create",{workspaceId:workspace.id,sessionId:randomUUID()});
+  const first=await c.action("task.submit",{sessionId:s.id,input:"work with a.txt",protocolVersion:1,submissionId:randomUUID()});
+  const blocked=await finished(c,first.taskId);
+  assert.equal(blocked.status,"blocked");
+  assert.equal(blocked.projectPreparationBlocked?.code,"PROJECT_NOT_PREPARED");
+  assert.equal(blocked.proposalRef??null,null);
+  assert.equal(f.calls.length,1);
+  const operationId=randomUUID();
+  const prep=(action,rest={})=>c.action("project.prepare",{action,operationId,...rest});
+  assert.equal((await prep("preview",{path:ordinary})).status,"inventory");
+  const preview=await prep("preview",{path:ordinary,selectedPaths:["a.txt"]});
+  assert.equal(preview.status,"preview");
+  assert.equal((await prep("confirm")).status,"ready");
+  assert.equal((await prep("query")).commit,preview.expectedCommit);
+  assert.equal(f.calls.length,1);
+  const continued=await c.action("task.continuePrepared",{sessionId:s.id,sourceTaskId:first.taskId,submissionId:randomUUID(),protocolVersion:1});
+  assert.equal(readTask(f.home,continued.taskId).continuationSource.taskId,first.taskId);
+  assert.equal((await finished(c,first.taskId)).status,"blocked");
+  const delivery=await confirmProject(c,s.id,continued);
+  assert.ok(delivery.task.work.version);
+  assert.match((await c.diff(delivery.task.id)).text,/prepared result/);
+  assert.equal(readFileSync(join(ordinary,"a.txt"),"utf8"),"initial\n");
+});
+
+test("rebind preserves every legacy branch and blocks when a sibling is owned elsewhere", async t => {
+  const f=await fixture(t), c=await controller(t,f);
+  const old=join(f.cwd,"old"),other=join(f.cwd,"other"),next=join(f.cwd,"next");
+  for (const path of [old,other,next]) mkdirSync(path);
+  const oldTeam=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Old",project:old,defaultRosterId:teamId});
+  const otherTeam=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Other",project:other,defaultRosterId:teamId});
+  const m=SessionManager.create(f.cwd,join(f.home,"pi/sessions/main"));
+  m.appendMessage({role:"user",content:"legacy",timestamp:Date.now()});
+  const fork=m.getLeafId();
+  m.appendCustomEntry("cothink-project",{project:oldTeam.project});
+  m.branch(fork);
+  m.appendCustomEntry("cothink-project",{project:otherTeam.project});
+  const before=readFileSync(m.getSessionFile());
+  const {acquireSessionWriter}=await load("src/storage.js");
+  const writer=acquireSessionWriter(join(f.home,"pi"),m.getSessionId());
+  const nextPath=(await c.action("project.inspect",{path:next,purpose:"directory"})).canonicalPath;
+  const operationId=randomUUID(), args={workspaceId:oldTeam.id,expectedRevision:0,path:nextPath,operationId};
+  try { await assert.rejects(c.action("workspace.rebind",args),{code:"WORKSPACE_CONFLICT"}); }
+  finally { writer.release(); }
+  const changed=await c.action("workspace.rebind",args);
+  assert.equal(changed.project,nextPath);
+  assert.deepEqual(readFileSync(m.getSessionFile()),before);
+  const state=JSON.parse(readFileSync(join(f.home,"gui-workspaces.json")));
+  assert.equal(state.legacyMembership[m.getSessionId()][oldTeam.project],oldTeam.id);
+  assert.equal(state.legacyMembership[m.getSessionId()][otherTeam.project],otherTeam.id);
+  assert.equal((await c.action("workspace.rebind.query",{workspaceId:oldTeam.id,expectedRevision:0,operationId})).status,"confirmed");
+  const existing=await c.session(m.getSessionId());
+  assert.equal(existing.project,otherTeam.project);
+  assert.equal(existing.workspaceId,otherTeam.id);
+  const created=await c.action("session.create",{workspaceId:oldTeam.id,sessionId:randomUUID()});
+  assert.equal((await c.session(created.id)).project,nextPath);
+  const detached=await c.action("workspace.rebind",{workspaceId:oldTeam.id,expectedRevision:1,path:null,operationId:randomUUID()});
+  assert.equal(detached.project,null);
+  assert.equal((await c.session(created.id)).project,nextPath);
+  assert.equal((await c.session(created.id)).workspaceId,oldTeam.id);
+});
+
+test("browser folder chooser creates a directory without Git and preserves it when not attached", async t => {
+  const f=await fixture(t), c=await controller(t,f);
+  const listing=await c.action("project.browse",{path:f.cwd});
+  const name="学习资料-"+ "汉".repeat(30);
+  const {path}=await c.action("project.mkdir",{parent:listing.path,name});
+  const later=await c.action("project.browse",{path:listing.path});
+  assert.ok(later.folders.some(item=>item.path===path));
+  assert.equal((await c.action("project.inspect",{path,purpose:"directory"})).directoryAvailable,true);
+  assert.equal((await c.action("project.inspect",{path,purpose:"execution"})).executionReady,false);
+  await assert.rejects(c.action("project.mkdir",{parent:listing.path,name:"../escape"}),/名称/);
+  assert.equal(f.calls.length,0);
+});
+
+test("rebind cannot absorb an undiscovered legacy session at the destination", async t => {
+  const f=await fixture(t), c=await controller(t,f);
+  const from=join(f.cwd,"original"), into=join(f.cwd,"late-legacy");
+  mkdirSync(from); mkdirSync(into);
+  const team=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Original",project:from,defaultRosterId:teamId});
+  const {canonicalPath:destination}=await c.action("project.inspect",{path:into,purpose:"directory"});
+  const m=SessionManager.create(f.cwd,join(f.home,"pi/sessions/main"));
+  m.appendCustomEntry("cothink-project",{project:destination});
+  m.appendMessage({role:"user",content:"late legacy history",timestamp:Date.now()});
+  const priorBytes=readFileSync(m.getSessionFile());
+  const change={workspaceId:team.id,expectedRevision:team.revision,operationId:randomUUID(),path:destination};
+  await assert.rejects(c.action("workspace.rebind",change),{code:"WORKSPACE_CONFLICT"});
+  const legacy=await c.session(m.getSessionId());
+  assert.ok(legacy.workspaceId && legacy.workspaceId!==team.id);
+  const snapshot=await c.bootstrap();
+  assert.equal(snapshot.workspaces.find(item=>item.id===team.id).project,team.project);
+  assert.equal(snapshot.workspaces.find(item=>item.id===legacy.workspaceId).project,destination);
+  assert.deepEqual(readFileSync(m.getSessionFile()),priorBytes);
+  assert.equal(f.calls.length,0);
+});
+
+test("shutdown drains OAuth SDK completion and device identity flush", async t => {
+  const f = await fixture(t);
+  const entered = deferred(), aborted = deferred(), finishLogin = deferred(), flushing = deferred(), finishFlush = deferred();
+  const {SettingsManager} = await import(sdkUrl);
+  const flush = SettingsManager.prototype.flush;
+  t.mock.method(SettingsManager.prototype,"flush",async function(){
+    flushing.resolve();
+    await finishFlush.promise;
+    return flush.call(this);
+  });
+  const c = await controllerModule.createGuiController({
+    home:f.home,cwd:f.cwd,oauthRuntime:async()=>({
+      getProvider:()=>({auth:{oauth:{login:true}}}),
+      async login(_provider,_kind,io,options){
+        options.getDeviceId();
+        io.signal.addEventListener("abort",aborted.resolve,{once:true});
+        entered.resolve();
+        await finishLogin.promise;
+        io.signal.throwIfAborted();
+      },
+    }),
+  });
+  const started=await c.action("oauth.start",{providerId:"fixture"});
+  await entered.promise;
+  let closed=false;
+  const shutting=c.beginShutdown(),closing=c.close().then(()=>{closed=true;});
+  try{
+    await aborted.promise;
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(closed,false,"a cancellation signal is not a settled login");
+    assert.equal(c.shutdownState().settled,false);
+    assert.equal((await c.bootstrap()).oauthOperations.find(row=>row.operationId===started.operationId).status,"cancelling");
+    finishLogin.resolve();
+    await flushing.promise;
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(closed,false,"device identity flush belongs to OAuth completion");
+    assert.equal(c.shutdownState().settled,false);
+  }finally{
+    finishLogin.resolve();finishFlush.resolve();
+    await closing;
+  }
+  assert.equal((await shutting).settled,true);
+  assert.equal(closed,true);
+});
+
+function executionFixtureForShutdown(f,remove){
+  const image="sha256:"+"d".repeat(64),commands=[];
+  saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models,work:{execution:{
+    engine:"docker",network:"none",image,limits:{memoryBytes:33554432,cpus:1,pids:16},
+  }}},"Fixture",teamId));
+  return {
+    commands,
+    async inspect(home,options){
+      const {inspectGuiExecution}=await load("src/gui-settings.js");
+      return inspectGuiExecution(home,{...options,runDocker:async args=>{
+        commands.push(args);
+        if(args[0]==="context")return JSON.stringify("unix:///fixture/docker.sock");
+        switch(args[2]){
+          case "version":return "28.0.0";
+          case "image":return image;
+          case "container":return "exited 0";
+          case "rm":return remove(args);
+          default:return "";
+        }
+      }});
+    },
+  };
+}
+
+test("shutdown waits for the Docker probe container and volumes to be removed", async t=>{
+  const f=await fixture(t),removing=deferred(),allowRemoval=deferred();
+  const execution=executionFixtureForShutdown(f,async()=>{removing.resolve();await allowRemoval.promise;return "";});
+  const c=await controllerModule.createGuiController({home:f.home,cwd:f.cwd,executionInspector:execution.inspect});
+  const check=c.action("settings.inspectExecution",{probe:true});
+  await removing.promise;
+  let closed=false;
+  const shutting=c.beginShutdown(),closing=c.close().then(()=>{closed=true;});
+  try{
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(closed,false);
+    assert.equal(c.shutdownState().settled,false);
+  }finally{
+    allowRemoval.resolve();
+    await closing;
+  }
+  assert.equal((await check).probe.status,"passed");
+  assert.deepEqual(execution.commands.at(-1).slice(2,-1),["rm","--force","--volumes"]);
+  assert.equal((await shutting).settled,true);
+});
+
+test("unverified probe cleanup blocks shutdown until the same named probe is removed", async t=>{
+  const f=await fixture(t);
+  let recover=false;
+  const execution=executionFixtureForShutdown(f,async()=>{
+    if(!recover)throw Object.assign(Error("private Docker diagnostic"),{stderr:"connection unavailable"});
+    return "";
+  });
+  const c=await controllerModule.createGuiController({home:f.home,cwd:f.cwd,executionInspector:execution.inspect});
+  try{
+    const result=await c.action("settings.inspectExecution",{probe:true});
+    assert.equal(result.probe.code,"PROBE_CLEANUP");
+    await assert.rejects(c.close(),{code:"SHUTDOWN_UNSETTLED"});
+    const state=c.shutdownState();
+    assert.equal(state.settled,false);
+    assert.match(state.reason,/探针/);
+    assert.doesNotMatch(state.reason,/private Docker diagnostic/);
+    assert.equal(execution.commands.filter(args=>args[2]==="rm").length,2);
+  }finally{
+    recover=true;
+    await c.close();
+  }
+  const removals=execution.commands.filter(args=>args[2]==="rm");
+  assert.equal(removals.length,3);
+  assert.equal(new Set(removals.map(args=>args.at(-1))).size,1);
+  assert.deepEqual(removals[0].slice(0,-1),["--host","unix:///fixture/docker.sock","rm","--force","--volumes"]);
+  assert.equal(c.shutdownState().settled,true);
 });

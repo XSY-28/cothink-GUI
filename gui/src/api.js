@@ -59,6 +59,18 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
     );
   return {
     read,
+    uploadMaterial: (ownerId,uploadId,bytes,signal) => request("/api/materials?"+new URLSearchParams({ownerId,uploadId}),{
+      method:"POST",headers:{"Content-Type":"application/octet-stream","X-CoThink-GUI-Input":"2"},body:bytes,signal,
+    }),
+    async material(ref,{project=false}={}){
+      const path=(project?"/api/project-material?":"/api/materials?")+new URLSearchParams(ref);
+      const response=await fetcher(path,{headers});
+      if(!response.ok){
+        const failure=await response.json().catch(()=>null);
+        throw Object.assign(Error(failure?.error??"材料无法读取。"),{code:failure?.code,status:response.status});
+      }
+      return {blob:await response.blob(),sha256:response.headers.get("x-cothink-content-hash"),sourceToken:response.headers.get("x-cothink-material-source")};
+    },
     async file(ref, {purpose="source",signal}={}) {
       const response=await fetcher('/api/file?'+new URLSearchParams({...ref,purpose}),{headers,signal});
       if(!response.ok){let failure;try{failure=await response.json();}catch{} throw Object.assign(Error(failure?.error||'文件读取失败。'),{code:failure?.code,status:response.status});}
@@ -74,7 +86,7 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
     action: (action, args = {}) =>
       request("/api/action", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-CoThink-GUI-Input":"2" },
         body: JSON.stringify({ action, args }),
       }),
     async recover(pending) {
