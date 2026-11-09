@@ -5,12 +5,13 @@ import {Icon} from "../../Icon.js";
 import { Markdown } from "../../Markdown.js";
 import { statusLabel, phaseLabel } from "../../view.js";
 import { ReplyHeading } from "./ReplyHeading.jsx";
+import { ConversationHeading } from "./ConversationMenu.jsx";
 import { ReplyActions } from "./ReplyActions.jsx";
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
   onSettings, onPlugins, onToggleNavigation, onWorkspaceMenu, onPrepareProject, onConversations, onRoster, onAttention, onFork, onOpenFile, onOpenDetails, onNotes, onCopy, onLocalCommand, onConversationMenu, onChooseProjectFiles, onAssociateProject,
-  onChooseSkill, onPreviewMaterial, onRetryMaterial}) {
+  onChooseSkill, onPreviewMaterial, onRetryMaterial, onOpenTurnLimits, conversationMenuTrigger}) {
   const {bootstrap: boot, task, draft, ready, submitting, pending, pendingStatus} = state;
   const session = workspace?.archived && state.session ? {...state.session,workspaceArchived:true,readOnly:true} : state.session;
   const replyTeamId = session?.workspaceId && !session.workspaceError &&
@@ -119,12 +120,8 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
           >
             <Icon name="panel" />
           </button>
-          <h1 className={styles.workspaceHeading}>
-            <button onClick={onWorkspaceMenu} title={teamName}>{teamName}</button>
-            {session?.title&&<><span className={styles.headingSeparator} aria-hidden="true">/</span><span className={styles.currentTitle} title={`${teamName} / ${session.title}`}>
-              {onConversationMenu?<button onClick={onConversationMenu} aria-label={`对话操作：${session.title}`}>{session.title}</button>:session.title}
-            </span></>}
-          </h1>
+          <ConversationHeading teamName={teamName} sessionTitle={session?.title} homeReady={state.homeReady}
+            onWorkspaceMenu={onWorkspaceMenu} onConversationMenu={onConversationMenu} conversationMenuTrigger={conversationMenuTrigger} />
           <div className={styles.headerActions}>
             <button className="conversation-picker-trigger" onClick={onConversations}><Icon name="conversations" />对话</button>
             <button className={styles.teamButton} aria-label="阵容" onClick={onRoster} title={session?.team?.name || "查看阵容"}><Icon name="team" />{session?.team?.name || "阵容"}</button>
@@ -313,6 +310,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             onResolveDraft={choice=>safely(commands.resolveDraft(session?.id,choice))}
             onDraft={editDraft}
             turnOptions={state.turnOptions} onTurnOptions={change=>commands.setTurnOptions(session?.id,change)}
+            onOpenTurnLimits={onOpenTurnLimits}
             onSubmit={submit}
             busy={!!boot.active || !!boot.extensionUI?.command || !!boot.shutdown?.requested || state.connection === "reconnecting"}
             submitting={submitting}

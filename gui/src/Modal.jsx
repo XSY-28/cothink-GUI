@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-export function Modal({ title, onClose, children, wide = false, className = "" }) {
+export function Modal({ title, onClose, children, wide = false, className = "", returnFocusTo }) {
   const dialog = useRef(null),
     close = useRef(onClose);
   close.current = onClose;
@@ -73,8 +73,9 @@ export function Modal({ title, onClose, children, wide = false, className = "" }
       node.removeEventListener("keydown", key);
       document.removeEventListener("keydown", orphanedKey);
       const fallback = document.querySelector(".conversation-picker-trigger");
-      if (previous?.isConnected && previous.getClientRects().length && !previous.closest("[inert]"))
-        previous.focus();
+      const target = returnFocusTo?.() ?? previous;
+      if (target?.isConnected && target.getClientRects().length && !target.closest("[inert]"))
+        target.focus();
       else if (!fallback?.closest("[inert]")) fallback?.focus();
     };
   }, []);

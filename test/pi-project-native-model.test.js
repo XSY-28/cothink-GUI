@@ -51,6 +51,35 @@ test('native runtime archives remain distinct when two owners receive the same o
   assert.equal(readFileSync(join(task.record.tools[1].cwd,'a.txt'),'utf8'),'SECOND');
 });
 
+test('a forbidden native child leaves no pending helper to block its creator',async t=>{
+  const {createProjectNativeHost}=await import('../src/project-native-host.js');
+  const {createProjectPolicy}=await import('../src/project-policy.js');
+  const {assertHelpersHandled}=await import('../src/plugin-work.js');
+  const home=mkdtempSync(join(tmpdir(),'cothink-native-rejection-'));
+  t.after(()=>rmSync(home,{recursive:true,force:true}));
+  const taskId='task', sessionId='parent', actor='main', scope=['a.txt'];
+  const state={id:'p',status:'active',steps:[{id:'s',revision:1,status:'running',scope,attempts:[{taskId}]}]};
+  const projectPolicy=createProjectPolicy({host:{read:()=>state,assertOwned(){}},
+    binding:{projectId:'p',stepId:'s',revision:1,taskId,scope,plugins:['native'],constraints:{allowedSubtasks:['review']}}});
+  const modelRef={provider:'fixture',modelId:'main'};
+  const task={home,record:{id:taskId,status:'running',tools:[],work:{},models:{main:modelRef}},projectPolicy,save(){}};
+  const grant={actor,sessionId,selection:'native',changeId:'change',inputVersion:'v1',sourceDigest:'source',
+    registrationVersion:'schema',scope,readScope:scope,readOnly:false};
+  const entry={changeId:grant.changeId,capability:projectPolicy.issuePluginCapability(grant),readOnly:false,
+    snapshot:{inputVersion:'v1',scope,readScope:scope},runtime:{async captureSource(){}}};
+  const native=createProjectNativeHost({task,entry,state,actor,getSessionId:()=>sessionId,guard(){},grant:()=>grant,
+    scan:()=>({}),getRuntime:()=>({modelRuntime:{getModel:()=>({reasoning:false})}})});
+  const operationId='77777777-7777-7777-7777-777777777777';
+  const {nativeHandle}=await native.operation('native.admitOperation',{operationId,parentSessionId:sessionId,
+    cwd:'/workspace',nativeParams:{async:false}},{});
+  await assert.rejects(native.operation('native.admitChild',{hostOperationId:operationId,parentSessionId:sessionId,
+    model:'fixture/main'},{nativeHandle}),{code:'ROOT_SUBTASK'});
+  await native.operation('native.operationReturned',{operationId},{nativeHandle});
+  assert.doesNotThrow(()=>assertHelpersHandled(task,grant.changeId));
+  assert.doesNotThrow(()=>native.assertHandled());
+  assert.equal(native.hasActive(),false);
+});
+
 test('container model metadata excludes real endpoints and authentication fields',()=>{
   const value=projectModelMetadata({provider:'fixture',id:'main',api:'openai-completions',reasoning:true,baseUrl:'https://name:PRIVATE_CREDENTIAL@example.invalid/?key=PRIVATE_CREDENTIAL',headers:{authorization:'PRIVATE_CREDENTIAL'},apiKey:'PRIVATE_CREDENTIAL',thinkingLevelMap:{high:'high'}});
   assert.doesNotMatch(JSON.stringify(value),/PRIVATE_CREDENTIAL|example[.]invalid/);

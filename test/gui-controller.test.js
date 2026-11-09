@@ -3,10 +3,9 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import {tmpdir} from "node:os";
 import { randomUUID } from "node:crypto";
-import { join,resolve } from "node:path";
-import {pathToFileURL,fileURLToPath} from "node:url";
-const productRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL("..",import.meta.url)));
-const load=path=>import(pathToFileURL(join(productRoot,path)));
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { controller, controllerModule, finished, load, productRoot, teamId } from "./helpers/gui-controller-fixture.js";
 const sdkUrl=pathToFileURL(join(productRoot,"node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
 const {SessionManager}=await import(sdkUrl);
 import { fixture } from "./helpers/pi-fixture.js";
@@ -14,36 +13,6 @@ import { repository } from "./helpers/git-fixture.js";
 const {saveConfig}=await load("src/config.js");
 const {createTeamConfig}=await load("src/teams.js");
 const {readTask}=await load("src/task.js");
-const teamId = "7c8094cd-3476-4bfa-8f53-055d87972896";
-const controllerModule = await load("src/gui-controller.js").catch(
-  () => ({}),
-);
-async function controller(t, f, extra = {}) {
-  assert.equal(
-    typeof controllerModule.createGuiController,
-    "function",
-    "GUI controller must exist",
-  );
-  saveConfig(
-    f.home,
-    createTeamConfig({ formatVersion: 2, ...f.models, ...extra }, "Fixture", teamId),
-  );
-  const c = await controllerModule.createGuiController({
-    home: f.home,
-    cwd: f.cwd,
-  });
-  t.after(() => c.close());
-  return c;
-}
-async function finished(c, id) {
-  for (let n = 0; n < 500; n++) {
-    const task = await c.task(id);
-    if (task.status !== "running") return task;
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  throw Error("fixture task did not settle");
-}
-
 const checkedPlan=(goal='Observe project',checks=[{command:'node',args:['-e',"require('fs').accessSync('a.txt')"]}])=>({goal,scope:['a.txt'],readScope:['.'],deliverables:['a.txt'],checks});
 async function confirmProject(c,sessionId,submitted){
  const proposal=await finished(c,submitted.taskId);assert.equal(proposal.status,'blocked',proposal.error);

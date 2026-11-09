@@ -5,7 +5,7 @@ import { useGuiWorkspace } from "./useGuiWorkspace.js";
 import { initialView, workspaceViewReducer, readDisplayPreferences, saveDisplayPreferences } from "./workspace-view.js";
 import { Navigation, ConversationPicker } from "./features/navigation/Navigation.jsx";
 import { Conversation } from "./features/conversation/Conversation.jsx";
-import { ConversationMenu } from "./features/conversation/ConversationMenu.jsx";
+import { ConversationActionDialogs, useConversationActions } from "./features/conversation/ConversationMenu.jsx";
 import { Collaboration } from "./Collaboration.jsx";
 import { Settings } from "./Settings.jsx";
 import { ProjectDialog, ProjectPreparationDialog } from "./ProjectDialog.jsx";
@@ -105,8 +105,6 @@ export function App() {
   const overlayRef = useRef(overlay); overlayRef.current = overlay;
   const workspace = boot.workspaces?.find(row=>row.id === state.workspaceId);
   const targetWorkspace = boot.workspaces?.find(row=>row.id===overlay?.workspaceId&&!row.archived);
-  const canOrganize=!!(session?.team&&session.turns?.length&&!session.readOnly&&!session.selectionError&&!state.draftConflict&&
-    !state.pending&&!state.submitting&&!boot.active&&!boot.extensionUI?.command&&state.connection==="connected");
   const projects = boot.projects ?? [];
   const rosterId = [session?.team?.id,workspace?.defaultRosterId,boot.currentTeamId]
     .find(id=>boot.teams.some(roster=>roster.id === id));
@@ -125,6 +123,7 @@ export function App() {
     else setOverlay(null);
   };
   const openTeam = () => setOverlay({kind:"team"});
+  const conversationActions = useConversationActions(state, workspace, setOverlay);
   function openPicker(scope) {
     commands.searchSessions({scope,query:"",includeArchived:false});
     setOverlay({kind:"picker",scope});
@@ -325,7 +324,7 @@ export function App() {
       onToggleNavigation={() => dispatch({type:"navigation",change:{mobileOpen:!navOpen}})}
       onPlugins={session?.pluginCommands?.length&&!session.readOnly&&!boot.active ? ()=>showPlugins(session.id):undefined}
       onLocalCommand={openLocal}
-      onConversationMenu={session?()=>setOverlay({kind:"conversation-menu",sessionId:session.id}):undefined}
+      {...conversationActions.controls}
       onChooseProjectFiles={commands.listProjectMaterials&&session?.projectDirectoryAvailable!==false?()=>setOverlay({kind:"project-materials",sessionId:session?.id}):undefined}
       onAssociateProject={()=>setOverlay(workspace?.project?{kind:"use-project-directory",workspaceId:workspace.id}:{kind:workspace?"bind-team":"create-team"})}
       onChooseSkill={boot.protocol?.capabilities===1&&commands.listSkills?showSkills:undefined}
@@ -381,16 +380,9 @@ export function App() {
         {overlay.error&&<p className="error-text" role="alert">{overlay.error}</p>}
       </div>
     </Modal>}
-    {overlay?.kind==="conversation-menu"&&<ConversationMenu session={session?.id===overlay.sessionId ? session : null}
-      onRename={navigationCommands.requestRename} onClose={closeOverlay} onPrepareProject={prepareProject}
-      onOrganize={canOrganize ? ()=>setOverlay({kind:"organize-context",sessionId:session.id}) : undefined} />}
-    {overlay?.kind==="organize-context"&&<Modal title="整理上下文" onClose={closeOverlay}>
-      <div className="dialog-body">
-        <p>手动整理通常需要 1 次模型请求；分段整理最多 2 次，按实际使用计费。原文可追溯，当前草稿保留。</p>
-        <p>{state.turnOptions?.maxCalls?`本次请求上限：${state.turnOptions.maxCalls} 次。`:"本次未设更低的请求上限。"}</p>
-        <button className="primary" disabled={!canOrganize||session?.id!==overlay.sessionId} onClick={()=>{closeOverlay();void safely(commands.organizeContext());}}>确认整理并调用模型</button>
-      </div>
-    </Modal>}
+    <ConversationActionDialogs state={state} overlay={overlay} actions={conversationActions} setOverlay={setOverlay}
+      onRename={navigationCommands.requestRename} onPrepareProject={prepareProject} onClose={closeOverlay}
+      onChangeTurnLimits={change=>commands.setTurnOptions(session?.id,change)} onOrganize={()=>void safely(commands.organizeContext())} />
     {overlay?.kind==="use-project-directory"&&<Modal title="使用 Team 目录" onClose={closeOverlay}>
       <div className="dialog-body">
         {targetWorkspace?<><p>当前对话没有关联目录。新对话可以使用 {targetWorkspace.name} 的默认目录；本对话与草稿保留。</p>
@@ -418,7 +410,7 @@ export function App() {
     </Modal>}
     {overlay?.kind==="help"&&<Modal title="CoThink 帮助" onClose={closeOverlay}>
       <div className="dialog-body">
-        <p>Enter 发送，Shift+Enter 换行；可从“+”添加材料或选择技能。“本次选项”只影响下一条。</p>
+        <p>Enter 发送，Shift+Enter 换行；可从“+”添加材料或选择技能。在“对话操作”中可设置下一条消息的限制。</p>
         <p><code>/settings</code> 打开设置，<code>/team</code> 或 <code>/models</code> 打开阵容，<code>/help</code> 打开本页。</p>
         <div className="form-actions"><button onClick={()=>openLocal("settings")}>打开设置</button><button onClick={openTeam}>打开阵容</button></div>
       </div>

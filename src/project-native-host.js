@@ -86,9 +86,9 @@ export function createProjectNativeHost({task,entry,state,actor,getSessionId,get
       const h={helperId:launchId,parentActorId:creator.actor,...(creator.helper?{parentHelperId:creator.helper.helperId}:{}),depth:creator.depth+1,name:input.childAgentName??input.runtime?.agent,
         nativeHandle:randomUUID(),model:structuredClone(modelRef),changeId:entry.changeId,inputVersion:snapshot.inputVersion,snapshot,scope:snapshot.scope,readScope:snapshot.readScope,readOnly:entry.readOnly,
         cwd:captured.directory,status:'queued',usage:null,usageSource:'Host request journal only; plugin usage is observational',createdAt:stamp(),native:{projectManaged:true,thinking:effectiveThinking,agent:input.childAgentName??input.runtime?.agent,runId:input.runId??input.runtime?.runId,operationId:input.hostOperationId,containerSource:'/native-work/'+launchId+'/source',model:selected}};
-      (task.record.work.helpers??=[]).push(h);children.set(launchId,h);
       const spec={task,...grant(entry),pluginCapability:entry.capability,launchId,creatorRole:actor,creatorSessionId:getSessionId(),parentHelperId:h.parentHelperId??null,...(h.parentHelperId?{parentCapability:children.get(h.parentHelperId).capability}:{}),modelRef:h.model};
-      delete spec.sessionId;h.capability=policy.issueNativeHelper(spec);task.save();
+      delete spec.sessionId;h.capability=policy.issueNativeHelper(spec);
+      (task.record.work.helpers??=[]).push(h);children.set(launchId,h);task.save();
       return {launchId,nativeHandle:h.nativeHandle,cwd:h.native.containerSource,files:captured.files,model:selected,thinking:effectiveThinking,modelMetadata:cleanModel(model),scope:h.scope,readOnly:h.readOnly,
         hostAgentDir:'/native-work/'+launchId+'/pi',sessionDir:'/native-work/'+launchId+'/sessions',hostSettings:{retry:{enabled:false,provider:{maxRetries:0,timeoutMs:0}},compaction:{enabled:false},cacheWarming:'off',httpIdleTimeoutMs:0},
         projectTrusted:false,inheritGlobalContext:false,inheritProjectContext:false,inheritSkills:false,

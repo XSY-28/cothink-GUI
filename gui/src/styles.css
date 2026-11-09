@@ -440,12 +440,9 @@ details {
 .material-label small { color:var(--muted); }
 .material-error { color:var(--error); overflow-wrap:anywhere; }
 .composer-chips button, .composer-materials button { flex:none; padding:2px 5px; min-height:24px; }
-.composer-add-menu .turn-choice { flex-direction:row; align-items:center; gap:8px; margin:0 0 8px; font-weight:400; }
-.composer-add-menu .turn-choice input { flex:none; margin:0; }
+.composer-chip > .chip-edit { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border-color:transparent; background:transparent; }
 .composer-add-menu > button { display:block; width:100%; text-align:left; border:0; background:none; font-size:13px; }
 .composer-add-menu > button:hover { background:var(--accent-soft); }
-.composer-policy { padding:0 10px; max-height:230px; overflow:auto; overflow-wrap:anywhere; color:var(--muted); font-size:12px; line-height:1.6; }
-.composer-policy summary { padding:8px 0; cursor:pointer; font-size:13px; }
 .detail-wrapper {
   min-width:0; min-height:0; display:flex; flex-direction:column;
   border-radius:20px; overflow:hidden;

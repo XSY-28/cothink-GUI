@@ -84,6 +84,7 @@ async function modalEnvironment(run) {
     "HTMLElement",
     "Event",
     "KeyboardEvent",
+    "CompositionEvent",
     "DOMParser",
   ]) {
     prior[key] = Object.getOwnPropertyDescriptor(globalThis, key);
@@ -285,50 +286,28 @@ test("Modal skips invisible ancestor controls and uses a collapsed summary as a 
 });
 
 test("composer blocks IME confirmation, keeps drafts editable during a run and leaves roster to the header", async () => {
-  const win = new Window({ url: "http://localhost/" }),
-    prior = {};
-  for (const key of [
-    "window",
-    "document",
-    "navigator",
-    "HTMLElement",
-    "Event",
-    "KeyboardEvent",
-    "CompositionEvent",
-  ]) {
-    prior[key] = Object.getOwnPropertyDescriptor(globalThis, key);
-    Object.defineProperty(globalThis, key, {
-      configurable: true,
-      value: win[key],
-    });
-  }
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const { createRoot } = await import("react-dom/client");
-  const container = win.document.createElement("div");
-  win.document.body.append(container);
-  const root = createRoot(container),
-    sent = [];
-  const team = {
-    id: "t",
-    name: "Fixture",
-    main: { provider: "p", modelId: "main" },
-    secondary: [],
-  };
-  const base = {
-    session: { id: "s", mode: "cothink", team },
-    boot: {protocol:{unified:1},
-      teams: [team],
-      models: [
-        { provider: "p", modelId: "main", thinkingLevels: ["low", "high"] },
-      ],
-    },
-    draft: "中文草稿",
-    onDraft: () => {},
-    onSubmit: () => sent.push("sent"),
-    onChange: () => {},
-    onSettings: () => {},
-  };
-  try {
+  await modalEnvironment(async ({ win, container, root }) => {
+    const sent = [];
+    const team = {
+      id: "t",
+      name: "Fixture",
+      main: { provider: "p", modelId: "main" },
+      secondary: [],
+    };
+    const base = {
+      session: { id: "s", mode: "cothink", team },
+      boot: {protocol:{unified:1},
+        teams: [team],
+        models: [
+          { provider: "p", modelId: "main", thinkingLevels: ["low", "high"] },
+        ],
+      },
+      draft: "中文草稿",
+      onDraft: () => {},
+      onSubmit: () => sent.push("sent"),
+      onChange: () => {},
+      onSettings: () => {},
+    };
     await act(() => root.render(React.createElement(Composer, base)));
     const textarea = container.querySelector("textarea");
     await act(() =>
@@ -375,11 +354,6 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
     assert.equal(sent.length, 1);
     assert.equal(container.querySelector('[aria-label="team"]'), null);
     assert.equal(container.querySelectorAll('[type="submit"]').length, 1);
-    await act(()=>root.render(React.createElement(Composer,{...base,boot:{protocol:{unified:1},...base.boot,models:[]}})));
-    await act(()=>container.querySelector('[data-composer-trigger="options"]').click());
-    assert.match(container.textContent,/模型目录不可用，输出额度要求未知/);
-    assert.doesNotMatch(container.textContent,/未设本地输出上限/);
-    await act(()=>container.querySelector('[data-composer-trigger="options"]').click());
 
     await act(() =>
       root.render(React.createElement(Composer, { ...base, busy: true })),
@@ -397,15 +371,17 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
       ),
     );
     assert.equal(sent.length, 1);
-  } finally {
-    await act(() => root.unmount());
-    win.happyDOM.abort();
-    for (const [key, descriptor] of Object.entries(prior)) {
-      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-      else delete globalThis[key];
-    }
-    delete globalThis.IS_REACT_ACT_ENVIRONMENT;
-  }
+  });
+});
+
+test("turn limit details report unknown output policy when the model catalog is unavailable",async()=>{
+  await modalEnvironment(async({root,container,TurnLimits})=>{
+    const team={main:{provider:"p",modelId:"main"},secondary:[]};
+    await act(()=>root.render(React.createElement(TurnLimits,{available:true,team,models:[],onClose(){}})));
+    await act(()=>container.querySelector("summary").click());
+    assert.match(container.querySelector("details").textContent,/模型目录不可用，输出额度要求未知/);
+    assert.doesNotMatch(container.querySelector("details").textContent,/未设本地输出上限/);
+  });
 });
 
 test("invalid work-check arguments show a form error and do not send a settings action", async () => {

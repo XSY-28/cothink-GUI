@@ -3,22 +3,21 @@ import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import {Icon} from "./Icon.js";
 import {shouldSubmit} from "./view.js";
 const h=React.createElement;
-export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,homeReady=false,creating=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onAssociateProject,onChooseSkill,selectedSkill,onRemoveSkill}) {
-  const composing=useRef(false), input=useRef(null), fileInput=useRef(null), toolbar=useRef(null), menuPanel=useRef(null), importing=useRef(new Map());
-  const [openMenu,setOpenMenu]=useState(null), [importError,setImportError]=useState(null), [,showImportState]=useState(0), team=session?.team;
+export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,onOpenTurnLimits,homeReady=false,creating=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onAssociateProject,onChooseSkill,selectedSkill,onRemoveSkill}) {
+  const composing=useRef(false), input=useRef(null), fileInput=useRef(null), addTrigger=useRef(null), menuPanel=useRef(null), importing=useRef(new Map());
+  const [addingFor,setAddingFor]=useState(), [importError,setImportError]=useState(null), [,showImportState]=useState(0), team=session?.team;
   const scope=editorKey??session?.id??null, importScope=session?.id??null;
-  const menu=openMenu?.scope===scope?openMenu.kind:null;
+  const adding=addingFor===scope;
   useEffect(()=>{
-    if(!menu)return;
+    if(!adding)return;
     const closeOutside=event=>{
-      const trigger=toolbar.current?.querySelector(`[data-composer-trigger="${menu}"]`);
-      if(!menuPanel.current?.contains(event.target)&&!trigger?.contains(event.target))setOpenMenu(null);
+      if(!menuPanel.current?.contains(event.target)&&!addTrigger.current?.contains(event.target))setAddingFor(undefined);
     };
     document.addEventListener("pointerdown",closeOutside,true);
     document.addEventListener("focusin",closeOutside,true);
     return()=>{document.removeEventListener("pointerdown",closeOutside,true);document.removeEventListener("focusin",closeOutside,true);};
-  },[menu]);
-  useEffect(()=>{setOpenMenu(null);setImportError(null);},[scope]);
+  },[adding]);
+  useEffect(()=>{setAddingFor(undefined);setImportError(null);},[scope]);
   const grow=()=>{
     const node=input.current;
     if(!node)return;
@@ -39,17 +38,12 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
   const options=turnOptions??defaultTurnOptions();
   const {readPaths,readOnly,delegate,review,maxCalls}=options;
   const readAllowed=options.readAllowed&&options.readProject===session?.project&&options.readWorkspaceId===(session?.workspaceId??null);
-  const setReadOnly=value=>onTurnOptions?.({readOnly:value}),setDelegate=value=>onTurnOptions?.({delegate:value}),setReview=value=>onTurnOptions?.({review:value}),setMaxCalls=value=>onTurnOptions?.({maxCalls:value});
   const disabled=(!session && !homeReady) || session?.navigation?.archived || !!session?.navigationError || !!session?.readOnly || !!session?.selectionError;
   const localCommand=/^\/(?:team|models|settings|help)$/.test(draft.trim());
   const localTeam=/^\/(?:team|models)$/.test(draft.trim());
   const incomplete=!!importing.current.get(importScope)||materials.some(item=>item.status!=="ready");
   const blocks=boot.protocol?.unified!==1 || disabled || draftConflict || (!draft.trim()&&!materials.length) ||
     (creating || !localCommand && (busy || submitting || pending || incomplete || !team && !homeReady));
-  const refs=team ? [team.main,...team.secondary] : [];
-  const models=boot.models || [];
-  const unavailable=refs.filter(ref=>!models.some(m=>m.provider===ref.provider && m.modelId===ref.modelId));
-  const missing=refs.filter(ref=>models.find(m=>m.provider===ref.provider && m.modelId===ref.modelId)?.api==="anthropic-messages" && ref.maxOutputTokens==null);
   const send=async()=>{if(!blocks&&(localCommand||!importing.current.get(importScope)))await onSubmit();};
   const optionDisabled=disabled||submitting||pending||creating||session?.contextOrganizing;
   const importFiles=async files=>{
@@ -65,9 +59,8 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
       showImportState(value=>value+1);
     }
   };
-  const doAction=action=>{setOpenMenu(null);input.current?.focus();action();};
+  const doAction=action=>{setAddingFor(undefined);input.current?.focus();action();};
   const openFiles=()=>fileInput.current?.click();
-  const toggleMenu=kind=>setOpenMenu(menu===kind?null:{kind,scope});
   const projectAction=session?.project?onChooseProjectFiles:onAssociateProject;
   const addActions=[
     onImportMaterials&&["添加文件或图片",openFiles],
@@ -76,19 +69,19 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     onPlugins&&["插件命令",onPlugins]
   ].filter(Boolean);
   const chips=[
-    readOnly&&["只分析",()=>setReadOnly(false)],
-    !delegate&&["不委派",()=>setDelegate(true)],
-    review&&["独立评审",()=>setReview(false)],
-    maxCalls!==""&&[`最多 ${maxCalls} 次请求`,()=>setMaxCalls("")],
-    options.readAllowed&&[readAllowed?`读取已保存版本：${readPaths||"未选范围"}`:"项目读取范围需重新确认",()=>onTurnOptions?.({readAllowed:false,readPaths:""})],
-    selectedSkill&&[`技能：${typeof selectedSkill==="string"?selectedSkill:selectedSkill.name}`,onRemoveSkill],
-    workRequest&&["制作网页 · 仅本次",()=>onWorkRequest?.(null)],
+    readOnly&&["read-only","只分析",()=>onTurnOptions?.({readOnly:false}),onOpenTurnLimits],
+    delegate!==true&&["dispatch",delegate===false&&!review?"禁止派工及按需评审（旧限制）":"禁止派工",()=>onTurnOptions?.({delegate:true}),onOpenTurnLimits],
+    review&&["review","独立评审",()=>onTurnOptions?.({review:false}),onOpenTurnLimits],
+    maxCalls!==""&&["max-calls",`最多 ${maxCalls} 次请求`,()=>onTurnOptions?.({maxCalls:""}),onOpenTurnLimits],
+    options.readAllowed&&["read-scope",readAllowed?`读取已保存版本：${readPaths||"未选范围"}`:"项目读取范围需重新确认",()=>onTurnOptions?.({readAllowed:false,readPaths:""})],
+    selectedSkill&&["skill",`技能：${typeof selectedSkill==="string"?selectedSkill:selectedSkill.name}`,onRemoveSkill],
+    workRequest&&["work","制作网页 · 仅本次",()=>onWorkRequest?.(null)],
   ].filter(Boolean);
 
   return h("form",{className:"composer",onSubmit:e=>{e.preventDefault();send();},onKeyDown:e=>{
-    if(e.key==="Escape"&&menu&&!composing.current&&!e.nativeEvent?.isComposing&&e.keyCode!==229){
-      e.preventDefault();e.stopPropagation();setOpenMenu(null);
-      toolbar.current?.querySelector(`[data-composer-trigger="${menu}"]`)?.focus();
+    if(e.key==="Escape"&&adding&&!composing.current&&!e.nativeEvent?.isComposing&&e.keyCode!==229){
+      e.preventDefault();e.stopPropagation();setAddingFor(undefined);
+      addTrigger.current?.focus();
     }
   },onDragOver:e=>{
     if(onImportMaterials&&Array.from(e.dataTransfer?.types??[]).includes("Files")){
@@ -127,10 +120,11 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
       onRetryMaterial&&item.uploadId&&["failed","unknown","pending"].includes(item.status)&&!item.uploading&&h("button",{type:"button",disabled:optionDisabled,onClick:()=>{setImportError(null);onRetryMaterial(item);}},item.status==="unknown"?"查询":"重新选择文件"),
       onRemoveMaterial&&h("button",{type:"button",disabled:optionDisabled,onClick:()=>{setImportError(null);onRemoveMaterial(item);},"aria-label":`移除 ${item.name}`},"×"));
   })),
-  chips.length>0 && h("div",{className:"composer-chips","aria-label":"本次选择"},...chips.map(([label,remove])=>
-    h("span",{key:label,className:"composer-chip"},
-      h("span",{title:label},label),
-      remove&&h("button",{type:"button",disabled:optionDisabled,onClick:remove,"aria-label":`移除${label}标记`},"×")))),
+  chips.length>0 && h("div",{className:"composer-chips","aria-label":"本次选择"},...chips.map(([key,label,remove,edit])=>
+    h("span",{key,className:"composer-chip"},
+      edit ? h("button",{type:"button",className:"chip-edit",title:label,disabled:optionDisabled,onClick:event=>edit(event.currentTarget),"aria-label":`修改${label}`,"aria-haspopup":"dialog"},label)
+        : h("span",{title:label},label),
+      remove&&h("button",{type:"button",disabled:optionDisabled,onClick:()=>{remove();input.current?.focus();},"aria-label":`移除${label}标记`},"×")))),
   onImportMaterials && h("input",{type:"file",hidden:true,multiple:true,ref:fileInput,accept:materialCapabilities?.mediaTypes?.join(","),
     onChange:e=>{const files=Array.from(e.target.files??[]);e.target.value="";importFiles(files);input.current?.focus();},
     onCancel:()=>input.current?.focus()}),
@@ -144,19 +138,10 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     onChange:e=>onDraft(e.target.value),onCompositionStart:()=>{composing.current=true;},onCompositionEnd:()=>{composing.current=false;},
     onKeyDown:e=>{if(shouldSubmit({...e,keyCode:e.keyCode,isComposing:composing.current || e.nativeEvent?.isComposing})){e.preventDefault();send();}}
   }),
-  h("div",{className:"composer-options",ref:toolbar},
-    addActions.length>0 && h("button",{type:"button",disabled:optionDisabled,"aria-label":"添加本次操作","data-composer-trigger":"add","aria-expanded":menu==="add",onClick:()=>toggleMenu("add")},h(Icon,{name:"plus"})),
-    menu==="add" && h("div",{className:"composer-add-menu composer-add-actions",ref:menuPanel},
+  h("div",{className:"composer-options"},
+    addActions.length>0 && h("button",{type:"button",ref:addTrigger,disabled:optionDisabled,"aria-label":"添加本次操作","aria-expanded":adding,onClick:()=>setAddingFor(adding?undefined:scope)},h(Icon,{name:"plus"})),
+    adding && h("div",{className:"composer-add-menu composer-add-actions",ref:menuPanel},
       ...addActions.map(([label,action])=>h("button",{key:label,type:"button",disabled:optionDisabled,onClick:()=>doAction(action)},label))),
-    h("button",{type:"button",disabled:optionDisabled,"data-composer-trigger":"options","aria-expanded":menu==="options",onClick:()=>toggleMenu("options")},"本次选项"),
-    menu==="options" && h("div",{className:"composer-add-menu",ref:menuPanel},
-      h("label",{className:"turn-choice"},h("input",{disabled:optionDisabled,type:"checkbox",checked:readOnly,onChange:e=>setReadOnly(e.target.checked)}),"只分析，不修改"),
-      h("label",{className:"turn-choice"},h("input",{disabled:optionDisabled,type:"checkbox",checked:delegate,onChange:e=>setDelegate(e.target.checked)}),"允许工作委派"),
-      h("label",{className:"turn-choice"},h("input",{disabled:optionDisabled,type:"checkbox",checked:review,onChange:e=>setReview(e.target.checked)}),"必须由不同型号独立评审"),
-      h("label",null,"本轮最多模型请求（留空不设上限）",h("input",{disabled:optionDisabled,type:"number",min:0,step:1,value:maxCalls,onChange:e=>setMaxCalls(e.target.value)})),
-      h("details",{className:"composer-policy"},h("summary",null,"调用与输出额度详情"),
-    ...refs.map((ref,index)=>h("p",{key:`${ref.provider}/${ref.modelId}`},`${index===0 ? "主模型" : "副模型 "+index} ${ref.provider}/${ref.modelId}：${ref.maxOutputTokens==null ? (unavailable.includes(ref) ? "模型目录不可用，输出额度要求未知" : "未设本地输出上限") : ref.maxOutputTokens+" tokens"}${missing.includes(ref) ? "（协议必填，请在阵容中设置）" : ""}`)),
-    h("p",null,"简单答复通常一次请求，读取材料后的续答、评审和正式工作按实际请求计账。默认不设调用上限；确认工作沿用提议剩余额度。没有默认模型超时；自动重试、压缩、预热关闭。未知用量与费用保持未知，目录估价不等于账单。"))),
     h("button",{type:"submit",className:"primary send",disabled:blocks,"aria-label":localTeam ? "打开阵容" : localCommand ? "打开本地命令" : submitting ? "确认提交" : pending ? "待确认" : busy ? "草稿保留" : "发送",title:localTeam ? "打开阵容" : "发送"},h(Icon,{name:submitting ? "more" : "send"}))
   ),
 

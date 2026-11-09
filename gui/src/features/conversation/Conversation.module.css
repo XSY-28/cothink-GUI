@@ -67,3 +67,8 @@
 .sentMaterials:not(:first-child) { margin-top:7px; }
 .errorDetails { max-width:100%; min-width:0; }
 .errorDetails pre { max-height:170px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+.turnChoice { flex-direction:row; align-items:center; gap:8px; margin:0 0 8px; font-weight:400; }
+.turnChoice input { flex:none; margin:0; }
+.turnLimitPolicy { padding:0 10px; max-height:230px; overflow:auto; overflow-wrap:anywhere; color:var(--muted); font-size:12px; line-height:1.6; }
+.turnLimitPolicy summary { padding:8px 0; cursor:pointer; font-size:13px; }
