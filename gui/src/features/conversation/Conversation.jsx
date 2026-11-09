@@ -3,7 +3,8 @@ import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import { Composer } from "../../Composer.js";
 import {Icon} from "../../Icon.js";
 import { Markdown } from "../../Markdown.js";
-import { statusLabel, phaseLabel, elapsedLabel } from "../../view.js";
+import { statusLabel, phaseLabel } from "../../view.js";
+import { ReplyHeading } from "./ReplyHeading.jsx";
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
@@ -11,6 +12,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   onChooseSkill, onPreviewMaterial, onRetryMaterial}) {
   const {bootstrap: boot, task, draft, ready, submitting, pending, pendingStatus} = state;
   const session = workspace?.archived && state.session ? {...state.session,workspaceArchived:true,readOnly:true} : state.session;
+  const replyTeamId = session?.workspaceId && !session.workspaceError &&
+    session.id === state.selectedSessionId && workspace?.id === session.workspaceId
+    ? session.workspaceId : null;
   const [now,setNow]=useState(Date.now());
   const timing = session?.turns.some(turn=>["running","preparing","cancelling"].includes(turn.status));
   useEffect(()=>{if(!timing)return;setNow(Date.now());const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[timing,session?.id]);
@@ -236,8 +240,6 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
               </section>
             ) : (
               session.turns.map((turn) => {
-                const elapsed = elapsedLabel(turn,now);
-                const timing = ["running","preparing","cancelling"].includes(turn.status);
                 return (
                 <section
                   className={styles.turn}
@@ -254,14 +256,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     </div>
                   </div>
                   <article className={styles.answer} data-task-id={turn.taskId} data-reading-part="result" data-result-revision={turn.resultRevision || undefined} tabIndex={-1}>
-                    <header className={styles.answerHeading}>
-                      <span className={styles.elapsed}>
-                        {elapsed.startsWith("用时") ? elapsed : `${timing ? "已用时" : "用时"} ${elapsed}`}
-                      </span>
-                      <span className={styles.turnStatus}>
-                        {statusLabel(turn.status)}
-                      </span>
-                    </header>
+                    <ReplyHeading turn={turn} now={now} teamId={replyTeamId} />
                     {turn.status === "running" && boot.active?.status !== "preparing" && boot.active?.taskId === turn.taskId && <div className={styles.runState} role="status"><span>{phaseLabel(state.tasksById[turn.taskId]?.phase)} · {typeof state.tasksById[turn.taskId]?.usage?.calls === "number" ? `已发 ${state.tasksById[turn.taskId].usage.calls} 次调用` : "调用数尚未汇总"}</span><button className="stop-button" disabled={!!state.stopping} onClick={cancelTask}>{stopLabel}</button></div>}
                     {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。请核对已保存的执行记录。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。" : turn.status === "cancelled" ? "已停止。已完成的内容保留，停止不等于回滚；可查看此条执行记录后继续说明下一步。" : "本次未完整完成。请核对已有内容和执行记录；若有成果，文件入口会列在下方。"}</p>}
                     {turn.finalText ? (

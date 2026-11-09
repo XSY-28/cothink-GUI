@@ -1,0 +1,48 @@
+.sidebar,
+.chat {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  background: #fff;
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.sidebar {
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  overflow: visible;
+}
+
+.chat {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  overflow: hidden;
+}
+
+.art {
+  position: absolute;
+  inset: -50% auto auto -50%;
+  width: 200%;
+  height: 200%;
+  max-width: none;
+  pointer-events: none;
+}
+
+.image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.placeholder {
+  width: 40%;
+  height: 40%;
+  border-radius: 50%;
+  background: #d8dad3;
+}

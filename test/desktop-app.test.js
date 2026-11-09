@@ -1,4 +1,4 @@
-// Actual packaged Electron lifecycle tests. Run explicitly after building:
+// Actual packaged Electron interaction and lifecycle tests. Run explicitly after building:
 // COTHINK_DESKTOP_APP=/absolute/CoThink.app npm run test:desktop-app
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -6,17 +6,30 @@ import {mkdtempSync,readdirSync,readFileSync,renameSync,mkdirSync,rmdirSync,rmSy
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {_electron as electron} from 'playwright';
+import {verifyPackagedTeamPortraits} from './helpers/desktop-team-portrait.js';
 const appPath=process.env.COTHINK_DESKTOP_APP;
 assert.ok(appPath,'COTHINK_DESKTOP_APP must name the actual isolated packaged App');
-async function fixture(t) {
+async function launchCandidate(t, seed) {
  const home=mkdtempSync(join(tmpdir(),'cothink-app-lifecycle-'));
- const app=await electron.launch({executablePath:join(appPath,'Contents/MacOS/CoThink'),args:[`--user-data-dir=${join(home,'chromium')}`],env:{...process.env,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',NODE_OPTIONS:'',NODE_PATH:'',COTHINK_HOME:home,PI_OFFLINE:'1'},timeout:30000});
+ let app;
+ try {
+  await seed?.(home);
+  app=await electron.launch({executablePath:join(appPath,'Contents/MacOS/CoThink'),args:[`--user-data-dir=${join(home,'chromium')}`],env:{...process.env,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',NODE_OPTIONS:'',NODE_PATH:'',COTHINK_HOME:home,PI_OFFLINE:'1'},timeout:30000});
+ } catch (error) {
+  rmSync(home,{recursive:true,force:true});
+  throw error;
+ }
  const appProcess=app.process();
  t.after(async()=>{if(appProcess.exitCode===null && appProcess.signalCode===null){
    // Failure-fixture cleanup only: a forced kill is never counted as shutdown success.
    const exited=new Promise(resolve=>appProcess.once('exit',resolve));appProcess.kill('SIGKILL');await exited;
   }rmSync(home,{recursive:true,force:true});});
  const page=await app.firstWindow();await page.waitForURL('http://127.0.0.1:*/**');
+ return {home,app,page,appProcess};
+}
+async function fixture(t) {
+ const {home,app,page,appProcess}=await launchCandidate(t);
+ await page.getByRole('navigation',{name:'工作导航'}).getByRole('button',{name:'新建',exact:true}).click();
  await page.getByRole('button',{name:'新建 Team',exact:true}).click();
  const creating=page.getByRole('dialog',{name:'新建 Team',exact:true});
  await creating.getByLabel('名称',{exact:true}).fill('Lifecycle');
@@ -64,13 +77,38 @@ async function pendingQuit(f) {
  for(let n=0;n<100;n++){if(await f.app.evaluate(()=>desktopTest.held.length))return;await new Promise(r=>setTimeout(r,10));}
  throw Error('phase-one receipt not observed');
 }
+test('packaged Team portraits reveal the name only after hover dwell',async t=>{
+ await verifyPackagedTeamPortraits(t,{appPath,launchCandidate});
+});
 test('actual App keeps native window buttons clear of the compact UI at both widths',async t=>{
  const f=await fixture(t);
+ const rail=f.page.getByRole('navigation',{name:'工作导航'});
+ const assertRail=async()=>{
+  const railBox=await rail.boundingBox();
+  assert.ok(railBox && Math.abs(railBox.x)<=2 && railBox.width<=96,'Team rail is narrow and aligned to the left edge');
+  const boxes=[];
+  for(const name of ['新建','搜索','设置']){
+   const button=rail.getByRole('button',{name,exact:true});
+   assert.equal(await button.count(),1);
+   assert.equal((await button.innerText()).trim(),'','the navigation action is icon-only');
+   const box=await button.boundingBox();
+   const icon=await button.locator('svg').boundingBox();
+   assert.ok(box && icon && icon.width>=20 && icon.height>=20,'the navigation action has a larger visible icon');
+   boxes.push(box);
+  }
+  const column=boxes[0].x+boxes[0].width/2;
+  assert.ok(boxes.every(box=>Math.abs(box.x+box.width/2-column)<=2),'navigation actions share one column');
+  assert.ok(boxes.every((box,index)=>!index || box.y>=boxes[index-1].y+boxes[index-1].height),'navigation actions are stacked vertically');
+  const bottomGap=railBox.y+railBox.height-boxes[2].y-boxes[2].height;
+  assert.ok(bottomGap>=0 && bottomGap<=36,'navigation actions sit at the bottom of the rail');
+  const avatar=await rail.getByRole('button',{name:'Lifecycle',exact:true}).locator('[data-team-avatar-trigger]').boundingBox();
+  assert.ok(avatar && avatar.width>=40 && avatar.height>=40,'Team avatars are larger in the narrow rail');
+ };
  const position=await f.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].getWindowButtonPosition());
  assert.deepEqual(position,{x:18,y:21});
  const controls=await f.page.locator('.topbar button').evaluateAll(nodes=>nodes.map(node=>({drag:getComputedStyle(node).webkitAppRegion,left:node.getBoundingClientRect().left})));
  assert.ok(controls.every(control=>control.drag==='no-drag'));
- assert.equal(await f.page.getByRole('button',{name:'设置',exact:true}).count(),1);
+ await assertRail();
  assert.equal(await f.page.getByRole('button',{name:'阵容',exact:true}).count(),1);
  if(process.env.COTHINK_UI_SCREENSHOTS)await f.page.screenshot({path:join(process.env.COTHINK_UI_SCREENSHOTS,'desktop-app.png')});
  await f.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].setSize(800,600));
@@ -79,7 +117,7 @@ test('actual App keeps native window buttons clear of the compact UI at both wid
  assert.ok((await navigation.boundingBox()).x>=98,'collapsed toolbar clears native traffic lights');
  await navigation.click();
  await f.page.getByRole('button',{name:'搜索',exact:true}).waitFor();
- assert.equal(await f.page.getByRole('button',{name:'设置',exact:true}).count(),1);
+ await assertRail();
  if(process.env.COTHINK_UI_SCREENSHOTS)await f.page.screenshot({path:join(process.env.COTHINK_UI_SCREENSHOTS,'desktop-app-small.png')});
  await f.page.getByRole('button',{name:'关闭导航',exact:true}).click({position:{x:750,y:300}});
  await f.app.evaluate(()=>desktopTest.deliver());

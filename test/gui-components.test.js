@@ -685,8 +685,9 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     await settle();
     assert.equal(container.querySelector("textarea").value, "saved a");
     assert.equal(container.querySelector('[role="dialog"]'),null,"unread release notes never interrupt startup");
-    assert.match(container.querySelector('[aria-label="工作导航"]').textContent,/更新记录未读/);
-    assert.doesNotMatch(container.querySelector('[aria-label="工作导航"]').textContent,/有新版本/);
+    const settingsButton=container.querySelector('nav button[aria-label="设置"]');
+    assert.equal(settingsButton.getAttribute("aria-description"),"更新记录未读");
+    assert.equal(settingsButton.textContent.trim(),"");
     await act(()=>container.querySelector('[aria-label="暂时收起本地更新提示"]').click());
     assert.equal(actions.some(a=>a.action==="releaseNotes.ack"),false,"dismissing a notice is not acknowledgement");
     await act(()=>[...container.querySelectorAll('button')].find(b=>b.textContent.includes('查看本次更新')).click());
@@ -784,7 +785,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     assertUngrouped();
     assert.equal(actions.some(a=>a.action==="session.create"),false,"archiving the last visible row never creates an empty history");
     await act(()=>container.querySelector('[role="dialog"][aria-label="对话"] button[aria-label^="关闭"]').click());
-    await act(()=>[...container.querySelectorAll("nav button")].find(b=>b.textContent.includes("设置")).click());
+    await act(()=>settingsButton.click());
     await act(()=>[...container.querySelectorAll("button")].find(b=>b.textContent==="已归档").click());
     await settle();
     const archivedRow=container.querySelector('[title="History chat"]').parentElement;
@@ -806,7 +807,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     assert.equal(actions.filter(a=>a.action==="task.submit").length,1);
     await act(()=>container.querySelector('[role="dialog"][aria-label="对话"] button[aria-label^="关闭"]').click());
     // A delayed archive read must not dismiss a newer roster editor.
-    await act(()=>[...container.querySelectorAll("nav button")].find(b=>b.textContent.includes("设置")).click());
+    await act(()=>settingsButton.click());
     await act(()=>[...container.querySelectorAll("button")].find(b=>b.textContent==="已归档").click());
     await settle();
     delaySessionA=true;
@@ -1943,11 +1944,13 @@ test("Team navigation keeps project identity and distinguishes empty, archived a
   const rows=[{id:"a",name:"CoThink 开发"},{id:"b",name:"LLM 学习",attention:{kind:"unread"}},{id:"c",name:"课程笔记"}];
   const props={workspaces:rows,workspaceId:"b",ready:true,connection:"connected"};
   await act(()=>root.render(React.createElement(Navigation,{...props,sessions:[{id:"s",workspaceId:"b",title:"Only in picker",navigation:{}}]})));
-  assert.equal(container.querySelector('[aria-label="新建 Team"]')?.textContent,"新建 Team");
-  assert.equal(container.querySelector('[aria-label="最近对话"]'),null);
-  assert.equal(container.querySelector('[title="Only in picker"]'),null);
-  assert.equal(container.querySelector('[aria-label*="中新建对话"]'),null);
-  assert.match(container.querySelector('[aria-current="page"]').textContent,/LLM 学习.*有新结果/);
+  assert.equal(container.querySelector('[aria-label="新建"]').textContent,"");
+  assert.equal(container.querySelector('[aria-label="最近对话"],[title="Only in picker"],[aria-label*="中新建对话"]'),null);
+  const selectedTeam=container.querySelector('[aria-current="page"]');
+  assert.equal(selectedTeam.getAttribute("aria-label"),"LLM 学习");
+  assert.equal(selectedTeam.title,"");
+  assert.match(selectedTeam.getAttribute("aria-description"),/有新结果/);
+  assert.doesNotMatch(selectedTeam.textContent,/LLM 学习/);
   await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:[]})));
   assert.match(container.textContent,/创建第一个 Team，开始持续的工作。/);
   await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:rows.map(row=>({...row,archived:true}))})));

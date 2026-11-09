@@ -23,3 +23,6 @@ auth.json
 
 # Rebuilt static browser assets (included explicitly by release packaging)
 /gui/dist/
+
+# Locally supplied Team artwork
+/gui/src/assets/team-avatars/assets/

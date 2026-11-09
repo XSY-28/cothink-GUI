@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
 import { repository } from "./helpers/git-fixture.js";
+import { chooseRailCreation } from "./helpers/gui-rail.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
 const packageRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL("..",import.meta.url)));
 const load=path=>import(pathToFileURL(join(packageRoot,path)));
@@ -13,194 +14,6 @@ const {createTeamConfig}=await load("src/teams.js");
 const {startGuiServer}=await load("src/gui-server.js");
 import { execution } from "./helpers/agent-sync-fixture.js";
 const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
-test('compact sidebar keeps three Teams and project conversations separate without model calls', async t => {
-  const f = await fixture(t);
-  saveConfig(f.home, createTeamConfig({formatVersion:2,...f.models}, 'UI fixture', '7c8094cd-3476-4bfa-8f53-055d87972896'));
-  const {createGuiController} = await load('src/gui-controller.js');
-  const controller = await createGuiController({home:f.home,suggestedProject:null});
-  const h = await startGuiServer({controller,open:false}); t.after(()=>h.close());
-  const browser = await chromium.launch({headless:true}); t.after(()=>browser.close());
-  const page = await browser.newPage({viewport:{width:1280,height:880}}), errors=[];
-  page.on('pageerror', error=>errors.push(error.message));
-  page.on('console', message=>{if(message.type()==='error')errors.push(message.text());});
-  const screenshots = resolve(process.env.COTHINK_UI_SCREENSHOTS || 'work/gui/compact-ui');
-  mkdirSync(screenshots,{recursive:true});
-  await page.goto(h.url);
-  const nav=page.locator('nav');
-  await page.getByRole('button',{name:'搜索',exact:true}).waitFor();
-  assert.equal(await nav.getByRole('button',{name:'新建 Team',exact:true}).count(),1);
-  assert.equal(await nav.getByRole('button',{name:'设置',exact:true}).count(),1);
-  const picker=page.getByRole('dialog',{name:'对话',exact:true});
-  const createConversation=async()=>{
-    await page.getByRole('button',{name:'对话',exact:true}).click();
-    await picker.getByRole('button',{name:'新建对话',exact:true}).click();
-    await picker.waitFor({state:'hidden'});
-    assert.equal(await page.getByLabel('输入问题',{exact:true}).inputValue(),'');
-  };
-  const fillDraft=async text=>{
-    const saved=page.waitForResponse(response=>{
-      if (!response.url().endsWith('/api/action')) return false;
-      const body=response.request().postDataJSON();
-      return body?.action==='session.draft' && body.args.text===text && response.ok();
-    });
-    await page.getByLabel('输入问题',{exact:true}).fill(text);
-    await saved;
-  };
-  const names=['CoThink 开发','LLM 学习与多头注意力代码的长期讨论项目','课程笔记'];
-  for (const name of names) {
-    await nav.getByRole('button',{name:'新建 Team',exact:true}).click();
-    const dialog=page.getByRole('dialog',{name:'新建 Team',exact:true});
-    await dialog.getByLabel('名称',{exact:true}).fill(name);
-    await dialog.getByRole('button',{name:'创建',exact:true}).click();
-    await dialog.waitFor({state:'hidden'});
-    await fillDraft(name+' 第一份草稿');
-    await createConversation();
-    await fillDraft(name+' 第二份草稿');
-  }
-  const boot=await controller.bootstrap();
-  const [a,b,c]=names.map(name=>boot.workspaces.find(w=>w.name===name));
-  for (const workspace of [a,b,c]) {
-    const {items}=await controller.sessions({workspaceId:workspace.id});
-    assert.equal(items.length,2);
-    const drafts=await Promise.all(items.map(async row=>(await controller.session(row.id)).draft));
-    assert.deepEqual(drafts.sort(),[workspace.name+' 第一份草稿',workspace.name+' 第二份草稿'].sort());
-  }
-  const assertTeamOnly=async()=>{
-    assert.equal(await nav.locator('[aria-label="最近对话"]').count(),0);
-    assert.equal(await nav.locator('[aria-label*="中新建对话"]').count(),0);
-    for (const name of names) assert.equal(await nav.getByRole('button',{name,exact:true}).count(),1);
-  };
-  await assertTeamOnly();
-  const first=nav.getByRole('button',{name:a.name,exact:true});
-  await first.click();
-  const aSessions=(await controller.sessions({workspaceId:a.id})).items;
-  const original=(await Promise.all(aSessions.map(row=>controller.session(row.id)))).find(row=>row.draft.endsWith('第一份草稿'));
-  await controller.action('session.name',{sessionId:original.id,title:'保留的开发讨论'});
-  await page.getByRole('button',{name:'对话',exact:true}).click();
-  await picker.getByRole('button',{name:'保留的开发讨论',exact:true}).click();
-  await picker.waitFor({state:'hidden'});
-  await page.waitForFunction(expected=>document.querySelector('textarea')?.value===expected,a.name+' 第一份草稿');
-  assert.equal(await page.getByLabel('输入问题',{exact:true}).inputValue(),a.name+' 第一份草稿');
-  await nav.getByRole('button',{name:b.name,exact:true}).click();
-  await page.waitForFunction(expected=>document.querySelector('textarea')?.value===expected,b.name+' 第二份草稿');
-  await first.click();
-  await page.waitForFunction(expected=>document.querySelector('textarea')?.value===expected,a.name+' 第一份草稿');
-  assert.equal(await page.getByLabel('输入问题',{exact:true}).inputValue(),a.name+' 第一份草稿','Team restores the most recently viewed conversation');
-  await createConversation();
-  assert.equal((await controller.sessions({workspaceId:a.id})).items.length,3);
-  await assertTeamOnly();
-  // Global pagination, filters and cancelled searches must not leak into the project picker.
-  for (let i=0;i<50;i++) {
-    const other=await controller.action('session.create',{sessionId:crypto.randomUUID(),workspaceId:b.id});
-    await controller.action('session.name',{sessionId:other.id,title:'其他项目讨论 '+i});
-    await controller.action('session.pin',{sessionId:other.id,expectedRevision:other.navigation.revision,pinned:true});
-  }
-  // Persist a deterministic historical answer through the existing task/Pi APIs.
-  // No provider is called: this is display/search fixture content, not a generated answer.
-  const {SessionManager}=await load('node_modules/@earendil-works/pi-coding-agent/dist/index.js');
-  const {createTask}=await load('src/task.js');
-  const manager=SessionManager.create(f.cwd,join(f.home,'pi/sessions/main'));
-  manager.appendCustomEntry('cothink-project',{project:null});
-  manager.appendCustomEntry('cothink-gui-workspace',{workspaceId:b.id});
-  manager.appendCustomEntry('cothink-title',{title:'注意力阅读记录'});
-  const historical=createTask({home:f.home,input:'历史检索标记：为什么每个注意力头使用不同的投影？',models:f.models,sessionId:manager.getSessionId(),singleModel:true});
-  const request={id:crypto.randomUUID(),taskId:historical.record.id,status:'completed',sent:false,events:[],text:Array.from({length:12},(_,i)=>`第 ${i+1} 段阅读记录：同一个词会通过不同投影形成不同表示。每个头在自己的表示空间内计算相关性，再将结果合并。这里是用于检验长中文正文、滚动和历史定位的固定夹具。`).join('\n\n')};
-  historical.register(request);historical.writeRequest(request);historical.record.finalCallId=request.id;historical.finish('completed');
-  manager.appendCustomEntry('cothink-task',{taskId:historical.record.id});
-  manager.appendMessage({role:'user',content:historical.record.input,timestamp:Date.now()});
-  manager.appendMessage({role:'assistant',content:[{type:'text',text:request.text}],api:'openai-completions',provider:'fixture',model:'main',usage:{input:0,output:0,totalTokens:0,cost:{input:0,output:0,total:0}},stopReason:'stop',timestamp:Date.now()});
-  const seeded=await controller.session(manager.getSessionId());
-  assert.equal(seeded.selectionError,null);
-  assert.equal(seeded.workspaceId,b.id);
-  assert.equal(seeded.readOnly,false);
-  assert.equal((await controller.sessions({query:'历史检索标记'})).items.length,1);
-  await page.getByRole('button',{name:'搜索',exact:true}).click();
-  const search=page.getByRole('dialog',{name:'搜索',exact:true});
-  await search.getByRole('button',{name:'加载更多',exact:true}).click();
-  await search.getByLabel('包含归档',{exact:true}).check();
-  await search.getByPlaceholder('搜索名称、对话或文件…').fill('不存在的讨论');
-  await search.getByText('没有匹配结果。',{exact:true}).waitFor();
-  const projectQuery=response=>{
-    const url=new URL(response.url());
-    return url.pathname==='/api/sessions' && url.searchParams.get('workspaceId')===a.id && url.searchParams.get('query')==='' && url.searchParams.get('archived')==='active';
-  };
-  const resetQuery=page.waitForResponse(projectQuery);
-  await page.keyboard.press('Escape');
-  await search.waitFor({state:'hidden'});
-  await resetQuery;
-  const refreshedQuery=page.waitForResponse(projectQuery);
-  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
-  await refreshedQuery;
-  await page.getByRole('button',{name:'对话',exact:true}).click();
-  await picker.getByRole('button',{name:'保留的开发讨论',exact:true}).waitFor();
-  assert.equal(await picker.getByPlaceholder('搜索此处的对话…').inputValue(),'');
-  assert.equal(await picker.getByLabel('包含归档',{exact:true}).isChecked(),false);
-  assert.equal(await picker.getByRole('button',{name:/其他项目讨论/}).count(),0);
-  await page.keyboard.press('Escape');
-  await picker.waitFor({state:'hidden'});
-  await page.getByRole('button',{name:'阵容',exact:true}).click();
-  await page.getByRole('dialog',{name:'阵容',exact:true}).waitFor();
-  await page.keyboard.press('Escape');
-  await page.getByRole('dialog',{name:'阵容',exact:true}).waitFor({state:'hidden'});
-  await page.getByRole('button',{name:'搜索',exact:true}).click();
-  await search.getByPlaceholder('搜索名称、对话或文件…').fill('历史检索标记');
-  await search.getByRole('button',{name:'注意力阅读记录',exact:true}).click();
-  await page.locator('h1').filter({hasText:b.name}).waitFor();
-  await page.getByText('正在查看历史对话 · 注意力阅读记录',{exact:true}).waitFor();
-  await page.locator('article').getByText(/第 1 段阅读记录/).waitFor();
-  const scroller=page.locator('[class*="conversationScroll"]');
-  const savedAnchor=page.waitForResponse(response=>{
-    if (!response.url().endsWith('/api/action')) return false;
-    const body=response.request().postDataJSON();
-    return body?.action==='session.view' && body.args.sessionId===manager.getSessionId() && body.args.anchor?.offsetPx>0 && response.ok();
-  });
-  await scroller.evaluate(node=>{node.scrollTop=340;});
-  await savedAnchor;
-  const anchor=(await controller.session(manager.getSessionId())).view.anchor;
-  assert.equal(anchor.taskId,historical.record.id);
-  assert.ok(anchor.offsetPx>0);
-  // A cursor includes view metadata: finish the explicit reading update before paging.
-  const firstPage=page.waitForResponse(response=>{
-    const url=new URL(response.url());
-    return url.pathname==='/api/sessions' && url.searchParams.get('workspaceId')===b.id && !url.searchParams.has('cursor') && url.searchParams.get('query')==='';
-  });
-  await page.getByRole('button',{name:'对话',exact:true}).click();
-  const listed=await (await firstPage).json();
-  assert.equal(listed.items.length,50);
-  assert.ok(listed.nextCursor);
-  await page.waitForFunction(()=>document.querySelector('[role="dialog"][aria-label="对话"]')?.querySelectorAll('[title^="其他项目讨论"]').length===50);
-  const secondPage=page.waitForResponse(response=>{
-    const url=new URL(response.url());
-    return url.pathname==='/api/sessions' && url.searchParams.get('workspaceId')===b.id && url.searchParams.get('cursor')===listed.nextCursor;
-  });
-  await picker.getByRole('button',{name:'加载更多',exact:true}).click();
-  const remainder=await (await secondPage).json();
-  assert.equal(remainder.nextCursor,null,JSON.stringify(remainder));
-  assert.ok(remainder.items.some(row=>row.id===manager.getSessionId()));
-  await picker.getByRole('button',{name:'注意力阅读记录',exact:true}).waitFor();
-  assert.equal(await picker.getByRole('button',{name:'保留的开发讨论',exact:true}).count(),0);
-  await page.keyboard.press('Escape');
-  await picker.waitFor({state:'hidden'});
-  await first.click();
-  await page.locator('h1').filter({hasText:a.name}).waitFor();
-  await nav.getByRole('button',{name:b.name,exact:true}).click();
-  await page.locator('article').getByText(/第 1 段阅读记录/).waitFor();
-  await page.waitForFunction(()=>document.querySelector('[class*="conversationScroll"]')?.scrollTop>100);
-  assert.deepEqual((await controller.session(manager.getSessionId())).view.anchor,anchor);
-  await page.screenshot({path:join(screenshots,'compact-desktop.png')});
-  await page.setViewportSize({width:800,height:600});
-  await page.getByRole('button',{name:'切换导航',exact:true}).click();
-  await page.getByRole('button',{name:'搜索',exact:true}).waitFor();
-  await assertTeamOnly();
-  await page.screenshot({path:join(screenshots,'compact-navigation-small.png')});
-  await page.keyboard.press('Escape');
-  await page.waitForFunction(()=>document.querySelector('[aria-label="切换导航"]')===document.activeElement);
-  assert.equal(await page.getByRole('button',{name:'切换导航',exact:true}).evaluate(node=>node===document.activeElement),true);
-  await page.screenshot({path:join(screenshots,'compact-small.png')});
-  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth > innerWidth),false);
-  assert.equal(f.calls.length,0);
-  assert.deepEqual(errors,[]);
-});
 
 test(
   "actual unified GUI preserves unbound draft, confirms formal HTML and shows authenticated final screenshots at three widths",
@@ -299,7 +112,7 @@ test(
       "Keep my draft",
     );
     assert.equal(f.calls.length, 0);
-    await page.getByRole("button", {name:"新建 Team",exact:true}).click();
+    await chooseRailCreation(page, "新建 Team");
     const create = page.getByRole("dialog", {name:"新建 Team",exact:true});
     await create.getByLabel("名称",{exact:true}).fill("Visual project");
     await create.getByText("手动输入路径",{exact:true}).click();
@@ -378,7 +191,7 @@ test(
     await page.setViewportSize({width:1280,height:880});
     await page.keyboard.press('Escape');
     await page.getByRole('region',{name:'成果文件阅读'}).waitFor({state:'hidden'});
-    await page.getByRole('button',{name:'新建 Team',exact:true}).click();
+    await chooseRailCreation(page, "新建 Team");
     const otherTeam = page.getByRole('dialog',{name:'新建 Team',exact:true});
     await otherTeam.getByLabel('名称',{exact:true}).fill('搜索起点 Team');
     await otherTeam.getByRole('button',{name:'创建',exact:true}).click();
@@ -686,7 +499,7 @@ test("compact browser chooses current project bytes and a pinned saved range; na
   const {page,errors}=await usabilityPage(t,host,800,600);
   const button=name=>page.getByRole("button",{name,exact:true}),editor=page.getByLabel("输入问题");
   await button("切换导航").click();
-  await button("新建 Team").click();
+  await chooseRailCreation(page, "新建 Team");
   const create=page.getByRole("dialog",{name:"新建 Team",exact:true});
   const team="固定材料的中文长团队名字——需要在紧凑窗口仍可操作";
   await create.getByLabel("名称",{exact:true}).fill(team);
@@ -728,7 +541,7 @@ test("compact browser chooses current project bytes and a pinned saved range; na
   assert.ok(Number.isFinite(Date.parse(dateTime)));
   await page.keyboard.press("Escape");
   await button("切换导航").click();
-  await button("新对话").click();
+  await chooseRailCreation(page, "新对话");
   const newChat=page.getByRole("dialog",{name:"新对话",exact:true});
   await newChat.getByText(`将在 ${team} 中新建对话。`,{exact:true}).waitFor();
   await newChat.getByRole("button",{name:"新建未分组对话",exact:true}).click();

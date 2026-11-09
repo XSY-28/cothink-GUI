@@ -1,5 +1,6 @@
-import React, {useState,useRef} from "react";
+import React, {useCallback,useEffect,useId,useState,useRef} from "react";
 import {Icon} from "../../Icon.js";
+import {SidebarTeamAvatar,teamAvatarFor} from "../avatars/TeamAvatar.jsx";
 import styles from "./Navigation.module.css";
 
 export function SessionRow({session, selected, onOpen, commands, onChanged, active}) {
@@ -53,41 +54,194 @@ export function SessionRow({session, selected, onOpen, commands, onChanged, acti
 }
 
 const attentionLabels = {needs_attention:"需处理",unread:"有新结果",running:"运行中"};
+const teamNameDelay = 2000;
+
+function workspaceDirectoryHint(row, rows) {
+  const sameName = rows.filter(other => other.id !== row.id && other.name === row.name);
+  if (!sameName.length) return null;
+  if (!row.project) return "未关联目录";
+  const pathParts = path => path.split(/[\\/]/).filter(Boolean);
+  const own = pathParts(row.project);
+  const others = sameName.filter(other => other.project).map(other => pathParts(other.project));
+  for (let count = Math.min(2,own.length); count <= own.length; count++) {
+    const suffix = own.slice(-count).join("/");
+    if (others.every(parts => parts.slice(-count).join("/") !== suffix)) return suffix;
+  }
+  return row.project;
+}
 
 export function Navigation({workspaces, workspaceId, ready, mobileOpen, onOpenWorkspace, onSearch, onCreate, onNewConversation,
   onSettings, connection, updateLabel, inert}) {
   const active = workspaces?.filter(item=>!item.archived) ?? [];
   const currentTeam=active.find(row=>row.id===workspaceId);
   const newScope=currentTeam?.name||"未分组";
+  const canCreateConversation = ready && !!onNewConversation;
+  const canCreateTeam = ready && workspaces !== null && !!onCreate;
+  const createId = useId();
+  const createArea = useRef(null), createButton = useRef(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const hover = useRef(null);
+  const [hovered, setHovered] = useState(null);
+  const labeledTeam = hovered?.labelTop != null && !inert
+    ? active.find(row=>row.id===hovered.id) : null;
+  const labelHint = labeledTeam && workspaceDirectoryHint(labeledTeam,active);
+  const labelAttention = labeledTeam && attentionLabels[labeledTeam.attention?.kind];
+
+  useEffect(() => {
+    if (!createOpen) return;
+    if (inert || (!canCreateConversation && !canCreateTeam)) {
+      setCreateOpen(false);
+      return;
+    }
+    const area = createArea.current;
+    const doc = area.ownerDocument;
+    area.querySelector('[role="group"] button:not(:disabled)')?.focus();
+    const outside = event => {
+      if (!area.contains(event.target)) setCreateOpen(false);
+    };
+    doc.addEventListener("pointerdown",outside,true);
+    return () => doc.removeEventListener("pointerdown",outside,true);
+  }, [createOpen,inert,canCreateConversation,canCreateTeam]);
+
+  function chooseCreate(action) {
+    createButton.current?.focus();
+    setCreateOpen(false);
+    action();
+  }
+
+  const stopHover = useCallback(() => {
+    const current = hover.current;
+    if (!current) return;
+    hover.current = null;
+    current.dispose();
+    setHovered(null);
+  }, []);
+  useEffect(() => () => hover.current?.dispose(), []);
+  useEffect(() => {
+    if (inert || (hover.current && !hover.current.target.isConnected)) stopHover();
+  }, [inert, workspaces, stopHover]);
+
+  function startHover(event, id) {
+    const target = event.currentTarget;
+    const doc = target.ownerDocument;
+    const win = doc.defaultView;
+    if (event.pointerType !== "mouse" || doc.hidden || target.closest("[inert]")) return;
+    stopHover();
+    const listeners = new win.AbortController();
+    const options = {signal:listeners.signal};
+    const current = {target, x:event.clientX, y:event.clientY};
+    function placeLabel() {
+      const rect = target.getBoundingClientRect();
+      const rail = target.closest("nav").getBoundingClientRect();
+      setHovered({id,labelTop:rect.top - rail.top + rect.height / 2});
+    }
+    function checkHover() {
+      if (hover.current !== current) return false;
+      if (!target.isConnected || doc.hidden || target.closest("[inert]") ||
+          !target.contains(doc.elementFromPoint(current.x,current.y))) {
+        stopHover();
+        return false;
+      }
+      if (current.labelVisible) placeLabel();
+      return true;
+    }
+    const timer = win.setTimeout(() => {
+      if (!checkHover()) return;
+      current.labelVisible = true;
+      placeLabel();
+    }, teamNameDelay);
+    const observer = new win.MutationObserver(checkHover);
+    // Desktop close/save can make the body inert without changing Navigation props.
+    for (let ancestor = target; ancestor; ancestor = ancestor.parentElement) {
+      observer.observe(ancestor,{attributes:true,attributeFilter:["inert"]});
+    }
+    current.dispose = () => {
+      win.clearTimeout(timer);
+      listeners.abort();
+      observer.disconnect();
+    };
+    hover.current = current;
+    setHovered({id});
+    doc.addEventListener("scroll",checkHover,{...options,capture:true,passive:true});
+    doc.addEventListener("visibilitychange",stopHover,options);
+    win.addEventListener("blur",stopHover,options);
+    win.addEventListener("resize",checkHover,options);
+  }
+
+  function moveOverAvatar(event) {
+    if (event.pointerType !== "mouse" || hover.current?.target !== event.currentTarget) return;
+    hover.current.x = event.clientX;
+    hover.current.y = event.clientY;
+  }
+
+  function leaveAvatar(event) {
+    if (hover.current?.target === event.currentTarget) stopHover();
+  }
+
   return <nav className={`sidebar ${styles.sidebar} ${mobileOpen ? "mobile-open" : ""}`}
     aria-label="工作导航" inert={inert}>
     <div className={styles.windowSpace} aria-hidden="true" />
-    <div className={styles.actions}>
-      {onNewConversation && <button type="button" className={styles.createTeam} disabled={!ready} onClick={()=>onNewConversation(currentTeam?.id??null)} aria-label="新对话" aria-description={newScope} title={`新对话 · ${newScope}`}><Icon name="plus" /><span>新对话</span></button>}
-      <button onClick={onSearch} aria-label="搜索" title="搜索"><Icon name="search" /></button>
-      <button className={styles.createTeam} disabled={!ready || workspaces === null} onClick={onCreate} aria-label="新建 Team"><Icon name="plus" /><span>新建 Team</span></button>
-    </div>
     <div className={styles.historyScroll}>
-      {workspaces === null ? <p className={styles.empty} role="alert">工作列表暂不可用，已有对话仍可读取。</p>
-        : !ready ? <p className={styles.empty}>正在读取…</p>
-        : !active.length && connection === "connected" ? <p className={styles.empty}>{workspaces?.length ? "暂无活动 Team。已归档 Team 可在搜索或设置中恢复。" : "创建第一个 Team，开始持续的工作。"}</p> : null}
+      {workspaces === null ? <p className={styles.railStatus} role="alert">
+        <span aria-hidden="true">列表不可用</span><span className="sr-only">工作列表暂不可用，已有对话仍可读取。</span>
+      </p> : !ready ? <p className={styles.railStatus}>正在读取…</p>
+        : !active.length && connection === "connected" ? <p className={styles.railStatus}>
+          <span aria-hidden="true">暂无 Team</span><span className="sr-only">{workspaces?.length ? "暂无活动 Team。已归档 Team 可在搜索或设置中恢复。" : "创建第一个 Team，开始持续的工作。"}</span>
+        </p> : null}
       {active.map(row=>{
-        const duplicate = row.project && active.some(other=>other.id !== row.id && other.name === row.name);
-        const hint = row.project?.split(/[\\/]/).filter(Boolean).slice(-2).join("/");
+        const hint = workspaceDirectoryHint(row,active);
+        const attention = attentionLabels[row.attention?.kind];
+        const animated = !inert && hovered?.id === row.id;
         return <div key={row.id} className={`${styles.workspaceEntry} ${workspaceId === row.id ? styles.selected : ""}`}>
-          <button className={styles.workspaceRow}
-          title={duplicate ? row.project : row.name} aria-current={workspaceId === row.id ? "page" : undefined}
-          onClick={()=>onOpenWorkspace(row)}>
-          <span>{row.name}</span>
-          {row.attention && <small>{attentionLabels[row.attention.kind]}</small>}
-          {duplicate && <small className={styles.pathHint}>{hint}</small>}
+          <button className={styles.teamRow} aria-label={row.name}
+            aria-description={[attention,hint && (row.project ?? hint)].filter(Boolean).join(" · ") || undefined}
+            aria-current={workspaceId === row.id ? "page" : undefined}
+            onClick={()=>{stopHover();onOpenWorkspace(row);}}>
+            <span className={styles.avatarTrigger} aria-hidden="true" data-team-avatar-trigger=""
+              onPointerEnter={event=>startHover(event,row.id)} onPointerMove={moveOverAvatar}
+              onPointerLeave={leaveAvatar} onPointerCancel={leaveAvatar}>
+              <SidebarTeamAvatar avatar={teamAvatarFor(row.id)} animated={animated} />
+            </span>
+            {attention && <span className={styles.indicator} data-attention={row.attention.kind} aria-hidden="true" />}
           </button>
         </div>;
       })}
     </div>
-    <div className={styles.bottom}><button onClick={onSettings} aria-label="设置" aria-description={updateLabel || undefined}><Icon name="settings" /><span>设置</span>{updateLabel && <small className={styles.updateBadge}>{updateLabel}</small>}</button></div>
-    {connection !== "connected" && <p className={styles.connection} role="status">
-      {connection === "connecting" ? "正在连接本机" : "连接中断 · 正在重连"}</p>}
+    {labeledTeam && <div className={styles.teamLabel} style={{top:hovered.labelTop}} role="tooltip" aria-hidden="true">
+      <span>{labeledTeam.name}</span>
+      {labelHint && <small>{labelHint}</small>}
+      {labelAttention && <small>{labelAttention}</small>}
+    </div>}
+    <div className={styles.railActions}>
+      {connection !== "connected" && <p className={styles.railStatus} role="status">
+        {connection === "connecting" ? "连接中…" : "重连中…"}</p>}
+      <div className={styles.createArea} ref={createArea}
+        onBlur={event=>{if (!event.currentTarget.contains(event.relatedTarget)) setCreateOpen(false);}}
+        onKeyDownCapture={event=>{
+          if (!createOpen || event.key !== "Escape") return;
+          event.preventDefault();
+          event.stopPropagation();
+          createButton.current?.focus();
+          setCreateOpen(false);
+        }}>
+        <button type="button" ref={createButton} className={styles.railAction}
+          aria-label="新建" title="新建" aria-expanded={createOpen} aria-controls={createOpen ? createId : undefined}
+          disabled={!canCreateConversation && !canCreateTeam} onClick={()=>{stopHover();setCreateOpen(!createOpen);}}>
+          <Icon name="plus" />
+        </button>
+        {createOpen && !inert && <div className={styles.createChoices} id={createId} role="group" aria-label="新建选项">
+          {onNewConversation && <button type="button" disabled={!canCreateConversation} aria-description={newScope}
+            onClick={()=>chooseCreate(()=>onNewConversation(currentTeam?.id??null))}>新对话</button>}
+          <button type="button" disabled={!canCreateTeam} onClick={()=>chooseCreate(onCreate)}>新建 Team</button>
+        </div>}
+      </div>
+      <button type="button" className={styles.railAction} onClick={onSearch} aria-label="搜索" title="搜索"><Icon name="search" /></button>
+      <button type="button" className={styles.railAction} onClick={onSettings} aria-label="设置"
+        aria-description={updateLabel || undefined} title={updateLabel ? `设置 · ${updateLabel}` : "设置"}>
+        <Icon name="settings" />
+        {updateLabel && <span className={styles.indicator} aria-hidden="true" />}
+      </button>
+    </div>
   </nav>;
 }
 
@@ -112,9 +266,14 @@ export function ConversationPicker({state, commands, scope, workspace, busy, onO
     <label className={styles.archiveFilter}><input type="checkbox" checked={loaded && navigationQuery.includeArchived}
       onChange={event=>commands.searchSessions({includeArchived:event.target.checked,scope})}/>包含归档</label>
     <div className={styles.pickerRows}>
-      {matches.map(row=><button key={row.id} className={styles.workspaceRow} onClick={()=>onOpenWorkspace(row)}>
-        <span>{row.name}</span>{row.archived && <small>已归档</small>}
-      </button>)}
+      {matches.map(row=>{
+        const hint = workspaceDirectoryHint(row,matches);
+        return <button key={row.id} className={styles.workspaceRow} onClick={()=>onOpenWorkspace(row)}
+          aria-label={row.name} aria-description={[hint && (row.project ?? hint),row.archived && "已归档"].filter(Boolean).join(" · ") || undefined}>
+          <span>{row.name}</span>{row.archived && <small>已归档</small>}
+          {hint && <small className={styles.searchPathHint}>{hint}</small>}
+        </button>;
+      })}
       {rows.map(row=><div key={row.id}>
         {global && <div className={styles.matchOwner}>{names.find(item=>item.id === row.workspaceId)?.name || (row.workspaceId === null ? "未分组" : "归属待核对")}</div>}
         <SessionRow session={row} selected={row.id === selectedSessionId} onOpen={onOpenSession} commands={global ? undefined : commands} active={state.bootstrap.active} />

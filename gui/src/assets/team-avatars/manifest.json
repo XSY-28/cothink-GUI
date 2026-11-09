@@ -1,0 +1,441 @@
+[
+  {
+    "id": "barbapapa",
+    "name": "巴巴爸爸",
+    "chat": "assets/barbapapa/chat-static.png",
+    "chatCrop": [
+      4,
+      4,
+      75,
+      75
+    ],
+    "durations": [
+      100,
+      100,
+      100,
+      100
+    ],
+    "hoverKind": "animation",
+    "foreground": "assets/barbapapa/sidebar-foreground.png",
+    "motionAtlas": "assets/barbapapa/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": 2.920758807588058,
+      "y": 3.121951219512198,
+      "size": 251.83739837398375,
+      "motionOutlets": [
+        [
+          [
+            162.9090909090909,
+            135.8780487804878,
+            93.0909090909091,
+            56.1219512195122
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            144.7317073170732,
+            93.0909090909091,
+            47.26829268292681
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            144.7317073170732,
+            93.0909090909091,
+            47.26829268292681
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            139.8130081300813,
+            93.0909090909091,
+            52.1869918699187
+          ]
+        ]
+      ]
+    }
+  },
+  {
+    "id": "barbamama",
+    "name": "巴巴妈妈",
+    "chat": "assets/barbamama/chat-static.png",
+    "chatCrop": [
+      4,
+      4,
+      75,
+      75
+    ],
+    "durations": [
+      100,
+      100,
+      100,
+      100
+    ],
+    "hoverKind": "animation",
+    "foreground": "assets/barbamama/sidebar-foreground.png",
+    "motionAtlas": "assets/barbamama/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": 9.655794871794868,
+      "y": 8.638461538461542,
+      "size": 238.27692307692308,
+      "motionOutlets": [
+        [
+          [
+            162.9090909090909,
+            127.56923076923078,
+            93.0909090909091,
+            49.746153846153845,
+            196.94810256410256
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            133.15384615384616,
+            93.0909090909091,
+            49.746153846153845,
+            196.94810256410256
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            134.0846153846154,
+            93.0909090909091,
+            47.88461538461539,
+            196.94810256410256
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            127.56923076923078,
+            93.0909090909091,
+            49.746153846153845,
+            196.94810256410256
+          ]
+        ]
+      ]
+    }
+  },
+  {
+    "id": "barbabelle",
+    "name": "巴巴贝尔",
+    "chat": "assets/barbabelle/chat-static.png",
+    "chatCrop": [
+      4,
+      4,
+      75,
+      75
+    ],
+    "durations": [
+      200,
+      200,
+      200,
+      200
+    ],
+    "hoverKind": "animation",
+    "foreground": "assets/barbabelle/sidebar-foreground.png",
+    "motionAtlas": "assets/barbabelle/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": 13.188457711442766,
+      "y": 16.820895522388042,
+      "size": 231.16417910447763,
+      "motionOutlets": [
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  {
+    "id": "barbalala",
+    "name": "巴巴拉拉",
+    "chat": "assets/barbalala/chat-static.png",
+    "chatCrop": [
+      4,
+      4,
+      75,
+      75
+    ],
+    "durations": [
+      100,
+      100,
+      100,
+      100
+    ],
+    "hoverKind": "animation",
+    "foreground": "assets/barbalala/sidebar-foreground.png",
+    "motionAtlas": "assets/barbalala/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": 5.898835978835962,
+      "y": 7.61904761904762,
+      "size": 245.84126984126985,
+      "motionOutlets": [
+        [
+          [
+            162.9090909090909,
+            129.46031746031747,
+            93.0909090909091,
+            36.730158730158735,
+            197.1210582010582
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            129.46031746031747,
+            93.0909090909091,
+            54.97619047619048,
+            199.0416931216931
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            132.34126984126985,
+            93.0909090909091,
+            56.89682539682539,
+            197.1210582010582
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            130.42063492063494,
+            93.0909090909091,
+            37.690476190476176,
+            197.1210582010582
+          ]
+        ]
+      ]
+    }
+  },
+  {
+    "id": "barbibul",
+    "name": "巴巴布莱特",
+    "chat": "assets/barbibul/chat-static.png",
+    "chatCrop": [
+      33,
+      4,
+      75,
+      75
+    ],
+    "durations": [
+      100,
+      100,
+      100,
+      100
+    ],
+    "hoverKind": "animation",
+    "foreground": "assets/barbibul/sidebar-foreground.png",
+    "motionAtlas": "assets/barbibul/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": -0.2062222222222374,
+      "y": -1.5999999999999943,
+      "size": 258.1333333333333,
+      "motionOutlets": [
+        [
+          [
+            0,
+            122.45,
+            93.0909090909091,
+            69.55
+          ]
+        ],
+        [
+          [
+            0,
+            127.49166666666667,
+            93.0909090909091,
+            64.50833333333333
+          ]
+        ],
+        [
+          [
+            0,
+            131.525,
+            93.0909090909091,
+            60.474999999999994
+          ]
+        ],
+        [
+          [
+            0,
+            122.45,
+            93.0909090909091,
+            69.55
+          ]
+        ]
+      ]
+    }
+  },
+  {
+    "id": "barbidou",
+    "name": "巴巴祖",
+    "chat": "assets/barbidou/chat-static.png",
+    "chatCrop": [
+      24,
+      4,
+      75,
+      75
+    ],
+    "durations": [
+      100,
+      100,
+      100,
+      100
+    ],
+    "hoverKind": "animation",
+    "foreground": "assets/barbidou/sidebar-foreground.png",
+    "motionAtlas": "assets/barbidou/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": -0.2062222222222374,
+      "y": -1.5999999999999943,
+      "size": 258.1333333333333,
+      "motionOutlets": [
+        [
+          [
+            0,
+            110.35000000000001,
+            93.0909090909091,
+            69.52499999999999,
+            56.28544444444443
+          ]
+        ],
+        [
+          [
+            0,
+            115.39166666666667,
+            93.0909090909091,
+            66.50000000000001,
+            56.28544444444443
+          ]
+        ],
+        [
+          [
+            0,
+            119.425,
+            93.0909090909091,
+            62.46666666666668,
+            56.28544444444443
+          ]
+        ],
+        [
+          [
+            0,
+            112.36666666666667,
+            93.0909090909091,
+            65.49166666666665,
+            54.268777777777764
+          ]
+        ]
+      ]
+    }
+  },
+  {
+    "id": "barbidur",
+    "name": "巴巴布拉伯",
+    "chat": "assets/barbidur/chat-static.png",
+    "chatCrop": [
+      15,
+      4,
+      75,
+      75
+    ],
+    "durations": [
+      100,
+      100,
+      100
+    ],
+    "hoverKind": "animation",
+    "foreground": "assets/barbidur/sidebar-foreground.png",
+    "motionAtlas": "assets/barbidur/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": 8,
+      "y": 16,
+      "size": 234.66666666666666,
+      "motionOutlets": [
+        [
+          [
+            0,
+            90.91666666666666,
+            93.0909090909091,
+            85.75
+          ]
+        ],
+        [
+          [
+            0,
+            83.58333333333333,
+            93.0909090909091,
+            81.16666666666667
+          ]
+        ],
+        [
+          [
+            0,
+            68,
+            93.0909090909091,
+            93.08333333333331
+          ]
+        ]
+      ]
+    }
+  },
+  {
+    "id": "barbouille",
+    "name": "巴巴伯",
+    "chat": "assets/barbouille/chat-static.png",
+    "chatCrop": [
+      4,
+      4,
+      75,
+      75
+    ],
+    "durations": [
+      100,
+      100
+    ],
+    "hoverKind": "animation",
+    "foreground": "assets/barbouille/sidebar-foreground.png",
+    "motionAtlas": "assets/barbouille/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": 4.920000000000002,
+      "y": 4.207999999999998,
+      "size": 247.808,
+      "motionOutlets": [
+        [
+          [
+            162.9090909090909,
+            79.616,
+            93.0909090909091,
+            15.679999999999993,
+            195.712
+          ]
+        ],
+        [
+          [
+            162.9090909090909,
+            83.488,
+            93.0909090909091,
+            89.24799999999999,
+            199.584
+          ]
+        ]
+      ]
+    }
+  }
+]

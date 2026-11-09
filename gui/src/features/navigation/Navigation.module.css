@@ -1,18 +1,34 @@
-.sidebar { display:flex; flex-direction:column; min-height:0; overflow:hidden; padding:0 12px 12px; background:var(--panel); border-right:1px solid var(--line); }
-.windowSpace { height:60px; flex:none; }
-.actions { display:flex; justify-content:flex-end; gap:3px; margin:2px 1px 15px; }
-.actions button { display:grid; place-items:center; width:32px; height:32px; padding:0; border:0; border-radius:7px; background:transparent; color:var(--muted); }
-.actions .createTeam { display:flex; width:auto; padding:0 7px; gap:5px; color:var(--ink); font-size:13px; white-space:nowrap; }
-.historyScroll { flex:1; min-height:0; overflow:auto; scrollbar-width:thin; }
+.sidebar { position:relative; z-index:4; display:flex; flex-direction:column; min-height:0; padding-bottom:12px; background:var(--panel); border-right:1px solid var(--line); }
+.windowSpace { height:48px; flex:none; }
+:global(.app-shell[data-desktop-platform="darwin"]) .windowSpace { -webkit-app-region:drag; app-region:drag; }
+.historyScroll { flex:1; min-height:0; overflow:auto; scrollbar-width:none; padding-block:4px; }
 .matchOwner { color:var(--muted); font-size:12px; margin:0; padding:7px 10px; }
-.workspaceEntry { display:flex; align-items:center; min-width:0; margin:2px 0; border-radius:7px; }
+.workspaceEntry { width:56px; margin:0 auto 6px; border-radius:13px; }
 .workspaceEntry:hover { background:var(--accent-soft); }
-.workspaceEntry .workspaceRow { flex:1; }
-.workspaceEntry .workspaceRow:hover { background:transparent; border-color:transparent; }
+.teamRow { position:relative; display:grid; place-items:center; width:56px; height:56px; padding:0; border-color:transparent; border-radius:inherit; background:transparent; }
+.teamRow:hover { background:transparent; border-color:transparent; }
+.teamRow[aria-current="page"] { border-color:transparent; box-shadow:none; }
+.avatarTrigger { position:relative; display:block; width:44px; height:44px; }
+.indicator { position:absolute; top:4px; right:4px; width:9px; height:9px; border:2px solid var(--panel); border-radius:50%; background:var(--accent); pointer-events:none; }
+.indicator[data-attention="running"] { background:var(--muted); }
+.indicator[data-attention="needs_attention"] { background:var(--error); }
+.teamLabel, .createChoices { position:absolute; z-index:2; background:var(--raised); border:1px solid var(--control-line); border-radius:10px; box-shadow:var(--shadow); }
+.teamLabel { display:grid; gap:2px; left:calc(100% + 8px); width:max-content; max-width:min(240px,calc(100vw - var(--sidebar-width,88px) - 20px)); padding:7px 11px; transform:translateY(-50%); pointer-events:none; font-size:13px; }
+.teamLabel > * { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.teamLabel small { color:var(--muted); font-size:12px; }
+.railActions { flex:none; display:grid; justify-items:center; gap:3px; padding-top:6px; }
+.railAction { position:relative; display:grid; place-items:center; width:44px; height:44px; padding:0; border:0; border-radius:11px; background:transparent; color:var(--muted); }
+.railAction:hover, .railAction[aria-expanded="true"] { color:var(--ink); background:var(--accent-soft); }
+.railAction svg { width:24px; height:24px; }
+.railStatus { margin:4px; color:var(--muted); font-size:12px; line-height:1.4; text-align:center; }
+.createArea { position:relative; }
+.createChoices { display:grid; gap:2px; bottom:0; left:calc(100% + 28px); width:min(154px,calc(100vw - var(--sidebar-width,88px) - 20px)); padding:5px; }
+.createChoices button { width:100%; min-height:34px; padding:6px 9px; border:0; border-radius:6px; background:transparent; text-align:left; }
+.createChoices button:hover, .createChoices button:focus-visible { background:var(--accent-soft); }
 .workspaceRow { display:flex; flex-wrap:wrap; align-items:center; gap:4px 6px; width:100%; min-width:0; min-height:36px; padding:8px 10px; border-color:transparent; background:transparent; text-align:left; border-radius:7px; font-size:13px; }
 .workspaceRow > span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .workspaceRow small, .historyItem small { font-size:12px; color:var(--muted); }
-.workspaceRow .pathHint { width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.workspaceRow .searchPathHint { width:100%; overflow-wrap:anywhere; }
 .row { display:flex; align-items:flex-start; min-width:0; }
 .historyItem { flex:1; min-width:0; display:grid; gap:3px; text-align:left; border-color:transparent; background:transparent; font-size:13px; }
 .historyItem > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -22,9 +38,6 @@
 .selected { background:var(--selected); color:var(--ink); font-weight:500; }
 .historyItem.selected { border-color:transparent; }
 .empty { color:var(--muted); padding:8px 10px; font-size:13px; line-height:1.65; margin:0; }
-.bottom { padding-top:9px; margin-top:8px; }
-.bottom button { display:flex; align-items:center; gap:8px; width:100%; border:0; background:none; text-align:left; font-size:13px; color:var(--muted); }
-.connection { color:var(--muted); font-size:12px; padding:8px; margin:0; }
 .rowWrap { min-width:0; }
 .menu { position:relative; flex:none; }
 .menu summary { cursor:pointer; padding:8px; list-style:none; }
@@ -33,11 +46,11 @@
 .rowError { color:var(--error); font-size:12px; padding:4px 10px; }
 .snippet { display:block; width:100%; text-align:left; font-size:12px; color:var(--muted); border:0; background:none; overflow-wrap:anywhere; padding:0 10px 8px; }
 .menuNote { font-size:12px; color:var(--muted); margin:5px; width:130px; }
-.updateBadge { float:right; font-size:12px; color:var(--accent); }
 .picker { display:grid; gap:8px; }
 .picker > button { justify-self:start; }
 .search input { width:100%; }
 .archiveFilter { display:flex; flex-direction:row; align-items:center; gap:7px; margin:0; font-size:13px; }
 .pickerRows { display:grid; gap:3px; min-width:0; }
 
-@media (pointer:coarse) { .actions button, .workspaceRow { min-width:44px; min-height:44px; } }
+@media (pointer:coarse) { .workspaceRow { min-width:44px; min-height:44px; } }
+@media (forced-colors:active) { .teamRow[aria-current="page"] { border:1px solid ButtonText; } }
