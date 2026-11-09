@@ -28,14 +28,22 @@
 .elapsed { font-size:12px; font-variant-numeric:tabular-nums; color:var(--muted); }
 .turnStatus { font-size:12px; color:var(--muted); }
 .turnStatus::before { content:"·"; padding-right:8px; color:var(--muted); }
-.answerActions { display:flex; flex-wrap:wrap; gap:5px 16px; align-items:center; margin-top:16px; }
+.answerActions { display:flex; flex-wrap:wrap; gap:5px; align-items:center; margin-top:12px; }
 .answerActions button { border-color:transparent; background:transparent; font-size:13px; color:var(--muted); padding:5px 6px; }
-.answerActions button:hover { background:var(--accent-soft); color:var(--ink); }
-.answerActions button:first-child { color:var(--accent); }
+.answerActions button:not(:disabled):hover { background:var(--accent-soft); color:var(--ink); }
+.replyAction { position:relative; display:inline-flex; }
+.replyAction > button { display:grid; place-items:center; width:32px; height:32px; padding:0; }
+.replyAction > button:disabled { pointer-events:none; }
+.replyTooltip {
+  visibility:hidden; pointer-events:none; position:absolute; z-index:2;
+  inset-inline-start:0; bottom:calc(100% + 5px); white-space:nowrap;
+  background:var(--ink); color:var(--bg); border-radius:6px; padding:5px 8px; font-size:12px;
+}
+.replyAction:hover .replyTooltip, .replyAction:has(button:focus-visible) .replyTooltip { visibility:visible; }
+@media (pointer:coarse) { .replyAction > button { width:44px; height:44px; } }
 .incompleteAnswer { font-size:14px; color:var(--muted); line-height:1.75; padding:7px 0; }
 .composerArea { flex:none; width:100%; padding-top:10px; padding-bottom:26px; }
 .composerGreeting { font-size:24px; font-weight:500; line-height:1.45; margin:0 0 25px; letter-spacing:-.02em; }
-.unreadNotes { margin-top:7px; padding:3px 6px; font-size:12px; color:var(--muted); border-color:transparent; background:none; }
 .contextNote, .forkContext { color:var(--muted); font-size:12px; margin:0; padding:4px 20px 8px; }
 .forkContext { display:flex; align-items:center; gap:8px; }
 .forkContext button { font-size:12px; padding:4px 6px; }

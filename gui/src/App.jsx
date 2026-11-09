@@ -5,6 +5,7 @@ import { useGuiWorkspace } from "./useGuiWorkspace.js";
 import { initialView, workspaceViewReducer, readDisplayPreferences, saveDisplayPreferences } from "./workspace-view.js";
 import { Navigation, ConversationPicker } from "./features/navigation/Navigation.jsx";
 import { Conversation } from "./features/conversation/Conversation.jsx";
+import { ConversationMenu } from "./features/conversation/ConversationMenu.jsx";
 import { Collaboration } from "./Collaboration.jsx";
 import { Settings } from "./Settings.jsx";
 import { ProjectDialog, ProjectPreparationDialog } from "./ProjectDialog.jsx";
@@ -198,6 +199,7 @@ export function App() {
     }catch(error){if(overlayRef.current===saving)setOverlay({...saving,busy:false,error:error.message});}
   }
   const navigationCommands = {...commands, requestRename:row=>{setTitle(row.title);setOverlay({kind:"rename",sessionId:row.id});}};
+  const prepareProject = (path,preparation) => setOverlay({kind:"prepare-project",path,preparation});
   const closeNavigation = () => dispatch({type: "navigation", change: {mobileOpen: false}});
   function dismissNavigation() {
     closeNavigation();
@@ -318,7 +320,7 @@ export function App() {
     <Conversation state={state} workspace={workspace} commands={{...commands, openSession}} inert={modalOpen || navOpen || (compact && detailOpen)}
       showNotes={showNotes} onHideNotes={()=>setNotesHidden(true)}
       onSettings={section => section === "teams" ? openTeam() : setOverlay({kind:"settings", section})}
-      onWorkspaceMenu={()=>setOverlay({kind:"workspace"})} onPrepareProject={(path,preparation)=>setOverlay({kind:"prepare-project",path,preparation})} onConversations={()=>openPicker("project")} onRoster={openTeam}
+      onWorkspaceMenu={()=>setOverlay({kind:"workspace"})} onPrepareProject={prepareProject} onConversations={()=>openPicker("project")} onRoster={openTeam}
       onAttention={()=>workspace && safely(commands.openWorkspaceAttention(workspace.id))}
       onToggleNavigation={() => dispatch({type:"navigation",change:{mobileOpen:!navOpen}})}
       onPlugins={session?.pluginCommands?.length&&!session.readOnly&&!boot.active ? ()=>showPlugins(session.id):undefined}
@@ -379,15 +381,9 @@ export function App() {
         {overlay.error&&<p className="error-text" role="alert">{overlay.error}</p>}
       </div>
     </Modal>}
-    {overlay?.kind==="conversation-menu"&&<Modal title="对话操作" onClose={closeOverlay}>
-      <div className="dialog-body">
-        {session?.id===overlay.sessionId?<><p className="workspace-directory">{session.title}</p>
-          <div className="form-actions">
-            <button disabled={session.readOnly} onClick={()=>navigationCommands.requestRename(session)}>重命名对话</button>
-            {canOrganize&&<button onClick={()=>setOverlay({kind:"organize-context",sessionId:session.id})}>整理上下文…</button>}
-          </div></>:<p role="status">原对话当前不可用。</p>}
-      </div>
-    </Modal>}
+    {overlay?.kind==="conversation-menu"&&<ConversationMenu session={session?.id===overlay.sessionId ? session : null}
+      onRename={navigationCommands.requestRename} onClose={closeOverlay} onPrepareProject={prepareProject}
+      onOrganize={canOrganize ? ()=>setOverlay({kind:"organize-context",sessionId:session.id}) : undefined} />}
     {overlay?.kind==="organize-context"&&<Modal title="整理上下文" onClose={closeOverlay}>
       <div className="dialog-body">
         <p>手动整理通常需要 1 次模型请求；分段整理最多 2 次，按实际使用计费。原文可追溯，当前草稿保留。</p>
@@ -456,7 +452,7 @@ export function App() {
         <div className="form-actions">
           {!workspace.archived && <button onClick={()=>{setTitle(workspace.name);setOverlay({kind:"rename-team"});}}>重命名</button>}
           {!workspace.archived && <button onClick={()=>setOverlay({kind:"bind-team"})}>{workspace.project?"更换或解除目录":"关联目录"}</button>}
-          {workspace.project && workspace.projectAvailable!==false && !workspace.archived && <button onClick={()=>setOverlay({kind:"prepare-project",path:workspace.project})}>准备文件工作</button>}
+          {workspace.project && workspace.projectAvailable!==false && !workspace.archived && <button onClick={()=>prepareProject(workspace.project)}>准备文件工作</button>}
           <button disabled={overlay.busy} onClick={()=>updateWorkspace({archived:!workspace.archived})}>{workspace.archived ? "恢复" : "归档"}</button>
         </div>
         {overlay.error && <p className="error-text" role="alert">{overlay.error}</p>}

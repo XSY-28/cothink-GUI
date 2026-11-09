@@ -13,6 +13,6 @@ export function ReplyHeading({turn, now, teamId}) {
     <span className={styles.elapsed}>
       {elapsed.startsWith("用时") ? elapsed : `${running ? "已用时" : "用时"} ${elapsed}`}
     </span>
-    <span className={styles.turnStatus}>{statusLabel(turn.status)}</span>
+    {turn.status !== "completed" && <span className={styles.turnStatus}>{statusLabel(turn.status)}</span>}
   </header>;
 }

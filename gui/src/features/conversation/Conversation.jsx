@@ -5,6 +5,7 @@ import {Icon} from "../../Icon.js";
 import { Markdown } from "../../Markdown.js";
 import { statusLabel, phaseLabel } from "../../view.js";
 import { ReplyHeading } from "./ReplyHeading.jsx";
+import { ReplyActions } from "./ReplyActions.jsx";
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
@@ -34,7 +35,6 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
     }
     return result;
   };
-  const copy = onCopy;
   const scroll = useRef(null);
   const reading = useRef({position:null,following:true,seen:new Set()});
   const anchorTimer = useRef(null), writeView = useRef(commands.recordView);
@@ -140,9 +140,6 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             <button onClick={onAttention}>{workspace.attention.kind === "unread" ? "查看新结果" : "查看待处理"}</button>
           </div>}
         {session?.projectDirectoryAvailable===false && <p className={styles.contextNote}>保存的目录不可用。可以继续聊天；本次项目资源和文件读取不可用。</p>}
-        {session?.project && session.projectDirectoryAvailable!==false && session.projectStatus?.executionReady===false && <p className={styles.contextNote}>
-          文件工作需要准备。 <button onClick={()=>onPrepareProject(session.project,session.projectStatus?.preparation)}>准备文件工作</button>
-        </p>}
         {session && workspace?.project && !session.project && <p className={styles.contextNote}>当前对话未关联目录。需要使用项目目录时，请新建对话。</p>}
         {session?.forkOf && <div className={styles.forkContext}><span>分支对话</span><button onClick={()=>safely(commands.openSession(session.forkOf.sessionId,session.forkOf.taskId))}>返回来源对话</button></div>}
         {showNotes && <div className={styles.releaseNotice} role="status"><span>CoThink {boot.version} 已安装，有新的本地更新记录。</span><button onClick={onNotes}>查看</button><button aria-label="暂时收起本地更新提示" onClick={onHideNotes}>×</button></div>}
@@ -283,27 +280,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     </div>}
                     {turn.proposalRef && !turn.confirmationIntent?.consumedByTaskId && <button disabled={!!boot.active||!!pending||session.readOnly} onClick={()=>safely(commands.confirmWork(turn))}>确认上述计划并执行</button>}
                     {turn.hasWork && <OutcomeFiles taskId={turn.taskId} status={turn.status} commands={commands} onOpen={onOpenFile}/>}
-                    <footer className={styles.answerActions}>
-                      <button
-                        onClick={e => onOpenDetails(turn.taskId, "collaboration", e)}
-                      >
-                        查看过程{" "}
-                        <span aria-hidden="true">↗</span>
-                      </button>
-                      {turn.finalText && (
-                        <button onClick={() => copy(turn.finalText)}>
-                          复制原文
-                        </button>
-                      )}
-                      <button disabled={!!boot.active || !!pending || session.readOnly || !!session.selectionError || !turn.canFork}
-                        title="保留截至此条回复的上下文，在新对话中继续"
-                        onClick={() => safely(onFork(turn.taskId))}>从这里分支</button>
-                      {(turn.hasWork || task?.id === turn.taskId && task.work) && (
-                        <button onClick={(e) => onOpenDetails(turn.taskId, "changes", e)}>
-                          变更与检查
-                        </button>
-                      )}
-                    </footer>
+                    <ReplyActions turn={turn} forkDisabled={!!boot.active || !!pending || session.readOnly || !!session.selectionError || !turn.canFork}
+                      showChanges={turn.hasWork || task?.id === turn.taskId && task.work}
+                      onDetails={onOpenDetails} onCopy={onCopy} onFork={taskId=>safely(onFork(taskId))} />
                   </article>
                 </section>
               );})
@@ -355,15 +334,6 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             onSettings={() => onSettings("teams")}
             workRequest={state.workRequest} onWorkRequest={value=>commands.setWorkRequest(session?.id,value)}
           />
-          {boot.releaseNotes?.unread && (
-            <button
-              hidden={showNotes}
-              className={styles.unreadNotes}
-              onClick={onNotes}
-            >
-              查看本次更新
-            </button>
-          )}
         </div>
       </main>
   );

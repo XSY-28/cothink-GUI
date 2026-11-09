@@ -21,6 +21,9 @@ const shapes = {
   conversations: [["path",{d:"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"}]],
   team: [["path",{d:"M18 21a8 8 0 0 0-16 0"}],["circle",{cx:10,cy:8,r:5}],["path",{d:"M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"}]],
   settings: [["path",{d:"M20 7h-9M7 7H4M20 17h-3M13 17H4"}],["circle",{cx:9,cy:7,r:2}],["circle",{cx:15,cy:17,r:2}]],
+  process: [["path",{d:"M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"}]],
+  copy: [["rect",{x:8,y:8,width:12,height:12,rx:2}],["path",{d:"M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"}]],
+  fork: [["circle",{cx:6,cy:6,r:2}],["circle",{cx:18,cy:6,r:2}],["circle",{cx:6,cy:18,r:2}],["path",{d:"M6 8v8M18 8a6 6 0 0 1-6 6H6"}]],
   more: [["circle",{cx:5,cy:12,r:1}],["circle",{cx:12,cy:12,r:1}],["circle",{cx:19,cy:12,r:1}]],
 };
 

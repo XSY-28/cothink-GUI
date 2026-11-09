@@ -690,8 +690,10 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     assert.equal(settingsButton.textContent.trim(),"");
     await act(()=>container.querySelector('[aria-label="暂时收起本地更新提示"]').click());
     assert.equal(actions.some(a=>a.action==="releaseNotes.ack"),false,"dismissing a notice is not acknowledgement");
-    await act(()=>[...container.querySelectorAll('button')].find(b=>b.textContent.includes('查看本次更新')).click());
-    assert.deepEqual([...container.querySelectorAll('.settings-nav button')].map(n=>n.textContent),['已归档','模型与认证','项目执行','技能与能力','偏好与更新']);
+    assert.doesNotMatch(container.textContent,/查看本次更新/);
+    await act(()=>settingsButton.click());
+    await act(()=>[...container.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='偏好与更新').click());
+    await act(()=>container.querySelector('.local-release summary').click());
     assert.equal(actions.some(a=>a.action==="releaseNotes.ack"),false,"opening notes is not acknowledgement");
     await act(()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='我已看过此版本更新').click());
     await settle();
@@ -749,7 +751,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     // Opening and unmounting the reader keeps A's draft and sends nothing.
     await openHistory("Active chat");
     assert.equal(container.querySelector(".detail-wrapper"), null);
-    await act(() => [...container.querySelectorAll("button")].find(b=>b.textContent.includes("查看过程")).click());
+    await act(()=>container.querySelector('[aria-label="查看过程"]').click());
     await settle();
     assert.ok(container.querySelector(".detail-wrapper"));
     await act(() => [...container.querySelectorAll("button")].find(n => n.textContent === "← 返回对话").click());
@@ -1370,15 +1372,16 @@ test("Team creation form needs only a name even without a directory or roster",a
 test("reply branch action targets its own completed reply and compact composer omits permanent hints",async()=>{
  await modalEnvironment(async({root,container,win,Conversation})=>{
   const forks=[],team={id:"t",name:"T",main:{provider:"p",modelId:"m"},secondary:[{provider:"p",modelId:"r"}]};
-  const state={bootstrap:{protocol:{unified:1},teams:[team],models:[],sessions:[],active:null},session:{id:"a",title:"Title",project:null,team,turns:[{taskId:"first",input:"question",finalText:"answer",status:"completed",canFork:true}]},task:null,draft:"draft",ready:true,errors:[]};
+  const state={bootstrap:{protocol:{unified:1},teams:[team],models:[],sessions:[],active:null},session:{id:"a",title:"Title",project:"/repo",projectStatus:{executionReady:false},team,turns:[{taskId:"first",input:"question",finalText:"answer",status:"completed",canFork:true}]},task:null,draft:"draft",ready:true,errors:[]};
   const props={state,commands:{setDraft(){},setError(){},openSession(){},refresh(){},abandonSubmission(){}},onFork:id=>{forks.push(id);},onSettings(){},onToggleNavigation(){},onCopy(){}};
   await act(()=>root.render(React.createElement(Conversation,props)));
   assert.equal(container.querySelector('[aria-label="重命名对话"]'),null);
-  assert.doesNotMatch(container.textContent,/Enter 发送 · Shift\+Enter|问答 3 次 \/ 工作不限/);
-  await act(async()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='从这里分支').click());
+  assert.doesNotMatch(container.textContent,/Enter 发送 · Shift\+Enter|问答 3 次 \/ 工作不限|文件工作需要准备/);
+  const fork=()=>container.querySelector('[aria-label="从这里分支"]');
+  await act(()=>fork().click());
   assert.deepEqual(forks,['first']);
   await act(()=>root.render(React.createElement(Conversation,{...props,state:{...state,session:{...state.session,turns:[{...state.session.turns[0],canFork:false,status:'running'}]}}})));
-  assert.equal([...container.querySelectorAll('button')].find(b=>b.textContent==='从这里分支').disabled,true);
+  assert.equal(fork().disabled,true);
  });
 });
 
@@ -1390,7 +1393,7 @@ test("reply headers use their own persisted elapsed time without opening task de
   const props={state,commands:{setDraft(){},setError(){},openSession(){},refresh(){},abandonSubmission(){}}};
   await act(()=>root.render(React.createElement(Conversation,props)));
   const headers=[...container.querySelectorAll("article > header")].map(node=>node.textContent);
-  assert.deepEqual(headers,["用时 18秒已完成","用时 18秒失败","用时 25秒已停止","用时未确认停止未确认","用时未知已完成"]);
+  assert.deepEqual(headers,["用时 18秒","用时 18秒失败","用时 25秒已停止","用时未确认停止未确认","用时未知"]);
   assert.ok(headers.every(text=>!text.includes("CoThink")&&!text.includes("多模型")&&!text.includes("◌")));
   await act(()=>root.render(React.createElement(Conversation,{...props,state:{...state,session:{...state.session,turns:[{...base,taskId:"running",status:"cancelling",createdAt:new Date(Date.now()-12000).toISOString()}]}}})));
   assert.match(container.querySelector("article > header").textContent,/已用时 1[2-3]秒正在停止/);

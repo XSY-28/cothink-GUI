@@ -91,7 +91,7 @@ test(
     await dismissNotes.waitFor();
     assert.equal(await page.getByRole("dialog").count(),0,"local release notes do not interrupt startup");
     await dismissNotes.click();
-    await page.getByRole("button", {name:"查看本次更新",exact:true}).waitFor();
+    assert.equal(await page.getByText("查看本次更新").count(),0);
     assert.equal(f.calls.length,0,"dismissing the notice does not generate");
     await page.getByRole("button", {name:"对话",exact:true}).click();
     const conversationPicker=page.getByRole("dialog",{name:"对话",exact:true});

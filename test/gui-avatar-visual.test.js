@@ -29,7 +29,13 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
     {id:"7c8094cd-3476-4bfa-8f53-000000000001",name:"花园讨论",reply:"这份答复来自花园讨论 Team。"},
     {id:"7c8094cd-3476-4bfa-8f53-000000000002",name:"蓝色工具箱",reply:"这份答复来自蓝色工具箱 Team。"}
   ];
-  for(const item of teams) await controller.action("workspace.create",{workspaceId:item.id,name:item.name,project:null,defaultRosterId:rosterId});
+  const ordinary=join(f.cwd,"unprepared");
+  mkdirSync(ordinary);
+  for(const item of teams){
+    const workspace=await controller.action("workspace.create",{workspaceId:item.id,name:item.name,
+      project:item===teams[0]?ordinary:null,defaultRosterId:rosterId});
+    item.project=workspace.project;
+  }
   const h=await startGuiServer({controller,open:false});t.after(()=>h.close());
   const browser=await chromium.launch({headless:true});t.after(()=>browser.close());
   const page=await browser.newPage({viewport:{width:1280,height:800}});
@@ -43,7 +49,7 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
   assert.equal(await nav.getByText(teams[0].name,{exact:true}).isVisible(),false,"the Team name must be hidden before hover");
   for(const item of [...teams,{id:null,name:"未分组记录",reply:"这份答复不属于项目 Team。"}]){
     const manager=SessionManager.create(f.cwd,join(f.home,"pi/sessions/main"));
-    manager.appendCustomEntry("cothink-project",{project:null});
+    manager.appendCustomEntry("cothink-project",{project:item.project??null});
     manager.appendCustomEntry("cothink-gui-workspace",{workspaceId:item.id});
     manager.appendCustomEntry("cothink-title",{title:item.name+" · 已保存答复"});
     const task=createTask({home:f.home,input:"头像历史标记 "+item.name,models:f.models,sessionId:manager.getSessionId(),singleModel:true});
@@ -52,7 +58,9 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
     manager.appendCustomEntry("cothink-task",{taskId:task.record.id});
     manager.appendMessage({role:"user",content:task.record.input,timestamp:Date.now()});
     manager.appendMessage({role:"assistant",content:[{type:"text",text:request.text}],api:"openai-completions",provider:"fixture",model:"main",usage:{input:0,output:0,totalTokens:0,cost:{input:0,output:0,total:0}},stopReason:"stop",timestamp:Date.now()});
-    assert.equal((await controller.session(manager.getSessionId())).workspaceId,item.id);
+    const saved=await controller.session(manager.getSessionId());
+    assert.equal(saved.workspaceId,item.id);
+    if(item===teams[0]) assert.equal(saved.projectStatus?.executionReady,false);
   }
   const open=async name=>{
     await nav.getByRole("button",{name:"搜索",exact:true}).click();
@@ -62,6 +70,30 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
     await search.waitFor({state:"hidden"});
   };
   await open(teams[0].name);
+  await page.getByText(teams[0].reply,{exact:true}).waitFor();
+  assert.equal(await page.getByText(/文件工作需要准备/).count(),0);
+  await page.getByRole("button",{name:"对话操作："+teams[0].name+" · 已保存答复",exact:true}).click();
+  await page.getByRole("dialog",{name:"对话操作"}).getByRole("button",{name:"准备文件工作"}).click();
+  const preparation=page.getByRole("dialog",{name:"准备文件工作"});
+  await preparation.getByText(teams[0].project,{exact:true}).waitFor();
+  await page.keyboard.press("Escape");
+  await preparation.waitFor({state:"hidden"});
+  const footer=page.locator("article > footer");
+  const action=name=>footer.getByRole("button",{name,exact:true});
+  const hint=name=>footer.locator('[role="tooltip"]').filter({hasText:name});
+  for(const name of ["查看过程","复制原文","从这里分支"]){
+    const button=action(name), tooltip=hint(name);
+    await button.locator("svg").waitFor();
+    assert.equal(await button.textContent(),"");
+    await tooltip.waitFor({state:"hidden"});
+    await button.locator("..").hover();
+    await tooltip.waitFor();
+    await page.mouse.move(450,5);
+    await tooltip.waitFor({state:"hidden"});
+  }
+  await action("查看过程").focus();
+  await page.keyboard.press("Tab");
+  await hint("复制原文").waitFor();
   const chat=page.locator("article > header [data-team-avatar]");
   async function checkPlaceholder(portrait) {
     await portrait.locator(":scope > span").waitFor();
