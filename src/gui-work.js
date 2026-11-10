@@ -4,9 +4,11 @@ import { realpathSync, readFileSync, lstatSync, statSync, accessSync, constants 
 import { resolve, join, relative, isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { homedir } from "node:os";
 import { createVersioning } from "./versioning.js";
 import { taskOutputRefs } from "./gui-projection.js";
 import { inspectGuiPreparation, inspectGuiGitChanges } from "./gui-project-preparation.js";
+import { workspaceError, workspaceForProject } from "./gui-workspace-state.js";
 const exec = promisify(execFile);
 export function inspectGuiDirectory(path) {
   let canonicalPath=null;
@@ -22,6 +24,39 @@ export function inspectGuiDirectory(path) {
     return {directoryAvailable:false,canonicalPath,reason};
   }
 }
+
+export function savedDirectoryAvailable(path, directory = inspectGuiDirectory(path)) {
+  return directory.directoryAvailable &&
+    !!workspaceForProject({ workspaces: [{ project: path }] }, directory.canonicalPath);
+}
+
+export async function fileWorkStatus(home, path) {
+  if (!savedDirectoryAvailable(path))
+    return { executionReady: false, reason: "保存的目录已不可用或指向其他位置。" };
+  try {
+    const repo = await inspectGuiPreparation(path, home);
+    const executionReady = !!repo.head && !repo.preparation;
+    return {
+      executionReady, root: repo.root, relativePath: repo.relativePath, directoryIdentity: repo.pathIdentity,
+      ...(path === homedir() ? { homeDirectory: true } : {}),
+      preparation: repo.preparation ?? null,
+      reason: executionReady ? null : "此目录需要先准备文件工作。",
+    };
+  } catch (error) {
+    return { executionReady: false, reason: error.message };
+  }
+}
+
+export async function requireFileWork(home, path, expectedIdentity) {
+  const inspected = await fileWorkStatus(home, path);
+  if (expectedIdentity !== undefined && inspected.executionReady &&
+      JSON.stringify(inspected.directoryIdentity) !== JSON.stringify(expectedIdentity))
+    throw workspaceError("WORKSPACE_UNAVAILABLE", "工作请求发出后目录身份已改变，请重新核对。");
+  if (!inspected.executionReady)
+    throw Object.assign(Error(inspected.reason), { code: "PROJECT_NOT_PREPARED", path });
+  return inspected;
+}
+
 export async function inspectGuiProject(home, path, work = {}, { includeChanges = true } = {}) {
   const directory = inspectGuiDirectory(path);
   const unavailable = (reason, extra = {}) => ({

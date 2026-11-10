@@ -18,19 +18,26 @@
 .emptyState button { border-color:var(--line); }
 .emptyState > p { font-size:14px; color:var(--muted); line-height:1.75; }
 .turn { padding-top:26px; }
-.turnInput { display:flex; justify-content:flex-end; padding-bottom:24px; }
+.turnInput { display:flex; justify-content:flex-end; padding-bottom:8px; }
+.userMessage { max-width:88%; min-width:0; }
 .userText {
-  max-width:88%; white-space:pre-wrap; font-size:15px; line-height:1.7; overflow-wrap:anywhere;
+  white-space:pre-wrap; font-size:15px; line-height:1.7; overflow-wrap:anywhere;
   border:1px solid transparent; padding:10px 14px; border-radius:16px 16px 5px 16px;
 }
 .userText, .composerArea :global(.send:not(:disabled)) { background:#242424; color:#fff; border-color:#242424; }
 .answerHeading { display:flex; align-items:center; gap:8px; margin-bottom:13px; }
+.answerHeading :global(.stop-button) { margin-inline-start:auto; }
 .elapsed { font-size:12px; font-variant-numeric:tabular-nums; color:var(--muted); }
 .turnStatus { font-size:12px; color:var(--muted); }
 .turnStatus::before { content:"·"; padding-right:8px; color:var(--muted); }
 .answerActions { display:flex; flex-wrap:wrap; gap:5px; align-items:center; margin-top:12px; }
-.answerActions button { border-color:transparent; background:transparent; font-size:13px; color:var(--muted); padding:5px 6px; }
-.answerActions button:not(:disabled):hover { background:var(--accent-soft); color:var(--ink); }
+.messageActions { display:flex; justify-content:flex-end; margin-top:2px; }
+.answerActions button, .messageActions button { border-color:transparent; background:transparent; font-size:13px; color:var(--muted); padding:5px 6px; }
+.answerActions button:not(:disabled):hover, .messageActions button:hover { background:var(--accent-soft); color:var(--ink); }
+@media (hover:hover) and (pointer:fine) {
+  .messageActions { opacity:0; }
+  .userMessage:hover .messageActions, .userMessage:focus-within .messageActions { opacity:1; }
+}
 .replyAction { position:relative; display:inline-flex; }
 .replyAction > button { display:grid; place-items:center; width:32px; height:32px; padding:0; }
 .replyAction > button:disabled { pointer-events:none; }
@@ -43,16 +50,20 @@
 @media (pointer:coarse) { .replyAction > button { width:44px; height:44px; } }
 .incompleteAnswer { font-size:14px; color:var(--muted); line-height:1.75; padding:7px 0; }
 .composerArea { flex:none; width:100%; padding-top:10px; padding-bottom:26px; }
+.composerArea :global(.composer-file-status) { display:grid; gap:6px; margin-top:8px; padding:8px 10px; border-radius:10px; background:var(--selected); font-size:12px; }
+.composerArea :global(.composer-file-path), .composerArea :global(.composer-file-actions) { display:flex; align-items:center; flex-wrap:wrap; gap:4px 10px; min-width:0; }
+.composerArea :global(.composer-file-path) span:first-child { font-weight:600; }
+.composerArea :global(.composer-file-path) span:last-child { overflow-wrap:anywhere; }
+.composerArea :global(.composer-file-path .file-not-ready) { color:var(--error); }
+.composerArea :global(.composer-file-actions) button { min-height:26px; padding:2px 8px; font-size:inherit; }
 .composerGreeting { font-size:24px; font-weight:500; line-height:1.45; margin:0 0 25px; letter-spacing:-.02em; }
 .contextNote, .forkContext { color:var(--muted); font-size:12px; margin:0; padding:4px 20px 8px; }
 .forkContext { display:flex; align-items:center; gap:8px; }
 .forkContext button { font-size:12px; padding:4px 6px; }
-.releaseNotice, .runState { display:flex; align-items:center; flex-wrap:wrap; gap:8px 10px; font-size:13px; color:var(--muted); }
-.releaseNotice { padding:4px 20px 8px; }
-.releaseNotice span, .runState span { flex:1; }
+.releaseNotice { display:flex; align-items:center; flex-wrap:wrap; gap:8px 10px; font-size:13px; color:var(--muted); padding:4px 20px 8px; }
+.releaseNotice span { flex:1; }
 .releaseNotice button { border-color:transparent; background:transparent; font-size:12px; padding:5px 8px; }
 .releaseNotice button:hover { background:var(--accent-soft); }
-.runState { margin:8px 0; }
 .pluginFeedback { max-height:6rem; overflow:auto; color:var(--muted); font-size:.875rem; }
 .pluginFeedback:empty { display:none; }
 .pluginFeedback p { white-space:pre-wrap; overflow-wrap:anywhere; margin:.25rem 0; }

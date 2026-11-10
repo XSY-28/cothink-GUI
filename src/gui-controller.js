@@ -1,5 +1,5 @@
 import {contextToolNames,contextDigest,contextSnapshot,contextState,readContextDisk,compactContext,contextOperationView} from './context-management.js';
-import {validateEditorTurnOptions,editorTurnInput} from "./gui-turn-options.js";
+import {validateEditorTurnOptions,editorTurnInput,isGuiFileTask} from "./gui-turn-options.js";
 import {resolveBuiltinSkills,validateBuiltinSkills,builtinSkillNames,capabilitySnapshot} from './builtin-skills.js';
 import {freezeAnswerSkills} from './context.js';
 import {createGuiMaterialStore,GUI_MATERIAL_CAPABILITIES,listGuiProjectMaterials,readGuiProjectMaterial} from './gui-materials.js';
@@ -16,7 +16,7 @@ import {createUpdateService, formatUpdateStatus, updateInstructions} from "./upd
 import { readFileSync, readdirSync, statSync, existsSync, mkdirSync } from "node:fs";
 import { join, basename, dirname, relative, isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import { inspectGuiPreparation, prepareGuiProject } from "./gui-project-preparation.js";
+import { prepareGuiProject } from "./gui-project-preparation.js";
 import { randomUUID, createHash } from "node:crypto";
 import { SessionManager, CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.js";
@@ -74,6 +74,7 @@ import {
 import {
   inspectGuiProject,
   inspectGuiDirectory,
+  savedDirectoryAvailable, fileWorkStatus, requireFileWork,
   guiDiff,
   guiOutput,
   guiArtifact,
@@ -432,9 +433,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (latest.workspaceArchived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。");
     return membership;
   }
-  function savedDirectoryAvailable(path,directory=inspectGuiDirectory(path)) {
-    return directory.directoryAvailable && !!workspaceForProject({workspaces:[{project:path}]},directory.canonicalPath);
-  }
   async function savedProjectAvailable(path,work) {
     const project = await inspectGuiProject(home,path,work,{includeChanges:false});
     return project.executionReady && savedDirectoryAvailable(path,project);
@@ -547,7 +545,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   async function runtime(id, holder, effective) {
     const manager = holder.sessionManager, resources=chatResources(manager,effective);
     const project=readSessionProject(manager);
-    const workReady=resources.projectAvailable&&project!==null&&(await fileWorkStatus(project)).executionReady;
+    const workReady=resources.projectAvailable&&project!==null&&(await fileWorkStatus(home,project)).executionReady;
     if (holder.runtime?.packageSnapshot.project===resources.resourceCwd && holder.runtimeWorkReady===workReady) return holder.runtime;
     if (holder.opening) return holder.opening;
     holder.opening = (async () => {
@@ -704,7 +702,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           ? {taskId:last.taskId,part:last.resultRevision ? "result" : "input",offsetPx:0} : null};
         reading.viewError = "原阅读位置已不可用，已定位到最近保存的消息。";
       }
-      const projectStatus=association.project ? await fileWorkStatus(association.project) : null;
+      const projectStatus=association.project ? await fileWorkStatus(home,association.project) : null;
       return safe({
         ...navigation, persisted: !!info,
         id,
@@ -1189,7 +1187,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             if (readSessionProject(manager)!==continuation.source.workspace.project ||
                 (membership.workspaceId??null)!==(continuation.source.workspace.id??null))
               throw Error("原工作任务的目录或 Team 已变化。");
-            await requireFileWork(readSessionProject(manager),continuation.source.workspace.directoryIdentity??undefined);
+            await requireFileWork(home,readSessionProject(manager),continuation.source.workspace.directoryIdentity??undefined);
           }
           if (holder.runtime?.selectionError || holder.selectionError)
             throw Error(
@@ -1229,6 +1227,19 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           snapshot.guiResourceOptions=resources.options;
           snapshot.projectDirectoryAvailable=resources.projectAvailable;
           snapshot.workspace.directoryIdentity=resources.projectAvailable?directoryIdentity(snapshot.workspace.project):null;
+          if (!confirmation && !continuation && isGuiFileTask(input, {
+            readOnly: constraints.readOnly,
+            fileWork: args.editorEditId !== undefined && (editor.turnOptions?.fileWork || !!editor.workRequest),
+          })) {
+            const {project,directoryIdentity:identity}=snapshot.workspace;
+            if (!project) throw workspaceError("PROJECT_NOT_PREPARED", "此对话尚未关联项目目录；文件任务未发送。");
+            try {
+              await requireFileWork(home,project,identity);
+            } catch (error) {
+              if (error.code !== "PROJECT_NOT_PREPARED") throw error;
+              throw workspaceError(error.code, `文件任务未发送。当前目录 ${project}：${error.message}`);
+            }
+          }
           const thinking = readConversationMetadata(manager).thinking;
           if (!confirmation && thinking !== undefined)
             snapshot.config.main.thinkingLevel = thinking;
@@ -1258,7 +1269,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           ...(confirmation?{frozenSkillSource:confirmation.source,frozenPackageSnapshot:confirmation.source.packageSnapshot,confirmedOperation:{...confirmation,execute:task=>executeConfirmed(task,confirmation.source,confirmation.reservation)}}:{}),
           mainRuntime: rt,
           guiResourceOptions:snapshot.guiResourceOptions,
-          beforeWork:()=>requireFileWork(snapshot.workspace.project,snapshot.workspace.directoryIdentity),
+          beforeWork:()=>requireFileWork(home,snapshot.workspace.project,snapshot.workspace.directoryIdentity),
           materials:snapshot.materials,
           ...(continuation?{continuationSource:{taskId:continuation.source.id}}:{}),
           taskId: state.taskId,
@@ -1301,7 +1312,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       if(!conversationTaskIds(holder.sessionManager).includes(id))throw Error("提议不属于当前可见分支。");
       const sourceTask=live.get(id),source=sourceTask?.record??readTask(home,id);
       if (source.workspace?.directoryIdentity!==undefined)
-        await requireFileWork(source.workspace.project,source.workspace.directoryIdentity);
+        await requireFileWork(home,source.workspace.project,source.workspace.directoryIdentity);
       const save=()=>{holder.assertOwned();if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",id+".json"),source,holder.assertOwned);taskCache.delete(id);};
       const reservation=await reserveConfirmation({home,source,proposalRef:args.proposalRef,sessionId:args.sessionId,workspaceId:membership.workspaceId??null,submissionId:args.submissionId,save});
       const found=await confirmationState({home,source,reservation});
@@ -1318,23 +1329,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   function directoryIdentity(path) {
     try {const s=statSync(path,{bigint:true});return [String(s.dev),String(s.ino)];}
     catch {return null;}
-  }
-  async function fileWorkStatus(path) {
-    if (!savedDirectoryAvailable(path)) return {executionReady:false,reason:"保存的目录已不可用或指向其他位置。"};
-    try {
-      const repo=await inspectGuiPreparation(path,home);
-      return {executionReady:!!repo.head&&!repo.preparation,root:repo.root,relativePath:repo.relativePath,directoryIdentity:repo.pathIdentity,
-        preparation:repo.preparation??null,reason:!repo.head||repo.preparation?"此目录需要先准备文件工作。":null};
-    } catch(error) { return {executionReady:false,reason:error.message}; }
-  }
-  async function requireFileWork(path, expectedIdentity) {
-    const inspected = await fileWorkStatus(path);
-    if (expectedIdentity!==undefined && inspected.executionReady &&
-        JSON.stringify(inspected.directoryIdentity)!==JSON.stringify(expectedIdentity))
-      throw workspaceError("WORKSPACE_UNAVAILABLE","工作请求发出后目录身份已改变，请重新核对。");
-    if (!inspected.executionReady)
-      throw Object.assign(Error(inspected.reason),{code:"PROJECT_NOT_PREPARED",path});
-    return inspected;
   }
   async function continuePrepared(args) {
     if (!args || Object.keys(args).length!==4 || !isWorkspaceId(args.sessionId) || !isWorkspaceId(args.sourceTaskId) ||
