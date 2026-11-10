@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
@@ -26,6 +26,20 @@ async function usabilityPage(t,host,width,height) {
   return {page,errors};
 }
 
+async function saveTeam(page, name, path) {
+  const create=page.getByRole("dialog",{name:"新建 Team",exact:true});
+  await create.getByLabel("名称",{exact:true}).fill(name);
+  await create.getByText("手动输入路径",{exact:true}).click();
+  await create.getByLabel("项目绝对路径").fill(path);
+  await create.getByRole("button",{name:"只读检查目录",exact:true}).click();
+  await create.getByText("可以使用这个文件夹。",{exact:true}).waitFor();
+  const child=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==="/api/action"&&response.request().method()==="POST"&&
+    response.request().postDataJSON()?.action==="session.create");
+  await create.getByRole("button",{name:"创建",exact:true}).click();
+  await create.waitFor({state:"hidden"});
+  return (await child).json();
+}
+
 test("desktop browser imports, previews and sends materials while keeping menus and local commands separate",async t=>{
   let imageId;
   const f=await fixture(t,(_,n)=>n>1?{text:"已使用选择的技能"}:{text:`材料夹具完成。 ![会话内图片](material:${imageId}) ![外部图片](https://images.example.test/sample.png)\n\n\`\`\`txt\ncopy sample\n\`\`\``});
@@ -37,6 +51,7 @@ test("desktop browser imports, previews and sends materials while keeping menus 
   const {page,errors}=await usabilityPage(t,host,1280,880);
   const button=name=>page.getByRole("button",{name,exact:true}),editor=page.getByLabel("输入问题");
   const send=button("发送"),add=button("添加本次操作");
+  const importSettled=()=>page.waitForFunction(()=>document.querySelector('.composer button[aria-label="发送"]')?.disabled===false);
   const limits=page.getByRole("dialog",{name:"下一条消息的限制",exact:true});
   assert.equal(await button("本次选项").count(),0,"the input area has no permanent limits button");
   const homeMenu=button("对话操作：首页草稿");
@@ -80,6 +95,18 @@ test("desktop browser imports, previews and sends materials while keeping menus 
   assert.equal(await add.getAttribute("aria-expanded"),"false");
   assert.equal(await page.evaluate(()=>document.activeElement.getAttribute("aria-label")),"添加本次操作");
 
+  const team="材料验证 Team",draft="这段首页草稿进入 Team 后仍可编辑";
+  await editor.fill(draft);
+  await send.click();
+  const session=await saveTeam(page,team,repository(t).project);
+  assert.equal(await editor.inputValue(),draft);
+  assert.equal(f.calls.length,0,"creating the Team only carries the draft, never sends it");
+  await editor.fill("");
+  await page.getByRole("button",{name:/^对话操作：/}).click();
+  await button("下一条消息的限制").click();
+  await limits.getByLabel("只分析，不修改").check();
+  await page.keyboard.press("Escape");
+
   const releaseUpload=Promise.withResolvers();
   let held=false;
   await page.route("**/api/materials?**",async route=>{
@@ -117,12 +144,14 @@ test("desktop browser imports, previews and sends materials while keeping menus 
     node.dispatchEvent(new ClipboardEvent("paste",{clipboardData,bubbles:true,cancelable:true}));
   },[...materialPng]);
   await rows.getByRole("button",{name:"预览 pasted.png",exact:true}).waitFor();
+  await importSettled();
   await editor.evaluate(node=>{
     const dataTransfer=new DataTransfer();
     dataTransfer.items.add(new File(['{"fixture":"dropped text"}'],"drop.json",{type:"application/json"}));
     node.dispatchEvent(new DragEvent("drop",{dataTransfer,bubbles:true,cancelable:true}));
   });
   await rows.getByRole("button",{name:"预览 drop.json",exact:true}).waitFor();
+  await importSettled();
 
   await page.unroute("**/api/materials?**");
   let lostUploads=0;
@@ -144,6 +173,7 @@ test("desktop browser imports, previews and sends materials while keeping menus 
   host=await startGuiServer({home:f.home,cwd:f.cwd,open:false});
   assert.notEqual(host.origin,previousOrigin);
   await page.goto(host.url);
+  await button(team).click();
   await unknown.getByRole("button",{name:"查询",exact:true}).waitFor();
   assert.equal(await send.isDisabled(),true);
   await unknown.getByRole("button",{name:"查询",exact:true}).click();
@@ -170,13 +200,13 @@ test("desktop browser imports, previews and sends materials while keeping menus 
   await button("移除技能：doc-maintenance标记").waitFor();
   await button("移除技能：doc-maintenance标记").click();
 
-  // The fixture reply references the actual immutable image ID from the confirmed home draft.
-  const response=await fetch(host.origin+"/api/bootstrap",{headers:{Authorization:"Bearer "+host.token}});
-  const boot=await response.json();
-  assert.equal(boot.homeDraft.editor.materials.length,3);
-  const listed=boot.homeDraft.materials??boot.homeMaterials;
-  if(listed)imageId=listed.find(item=>item.name==="pasted.png")?.id;
-  imageId??=boot.homeDraft.editor.materials[1].id;
+  // The fixture reply references the actual immutable image ID from this conversation's draft.
+  const response=await fetch(host.origin+"/api/session?id="+session.id,{headers:{Authorization:"Bearer "+host.token}});
+  assert.equal(response.status,200);
+  const saved=await response.json();
+  assert.equal(saved.editor.materials.length,3);
+  imageId=saved.materials.find(item=>item.name==="pasted.png")?.id;
+  assert.ok(imageId);
   assert.equal(await editor.inputValue(),"");
   await page.screenshot({path:resolve("work/gui-usability-repair/T3-desktop-materials.png")});
   let network=0;
@@ -185,9 +215,10 @@ test("desktop browser imports, previews and sends materials while keeping menus 
     assert.equal(route.request().headers().referer,undefined);
     await route.fulfill({status:200,contentType:"image/png",body:materialPng});
   });
-  const homeSubmission=page.waitForRequest(request=>request.method()==="POST"&&new URL(request.url()).pathname==="/api/action"&&request.postDataJSON()?.action==="task.submit");
+  const submission=page.waitForRequest(request=>request.method()==="POST"&&new URL(request.url()).pathname==="/api/action"&&request.postDataJSON()?.action==="task.submit");
   await send.click();
-  const {args: submitted}= (await homeSubmission).postDataJSON();
+  const {args: submitted}= (await submission).postDataJSON();
+  assert.equal(submitted.sessionId,session.id);
   assert.equal(submitted.constraints.readOnly,true);
   assert.equal(submitted.budget.maxCalls,null);
   try {await page.getByText(/材料夹具完成/).waitFor();}
@@ -241,27 +272,23 @@ test("desktop browser imports, previews and sends materials while keeping menus 
 test("compact browser chooses current project bytes and a pinned saved range; navigation shows true history",async t=>{
   const fixedName="guide,notes.txt";
   const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:"read_project_context",args:{operation:"read",paths:[fixedName]}}]}:{text:"已按实际材料完成"}),repo=repository(t);
-  writeFileSync(join(repo.project,fixedName),"base comma fixture\n");
-  git(repo.project,"status","--porcelain");
-  git(repo.project,"add","--",fixedName);
-  git(repo.project,"commit","-m","saved file with literal comma");
-  const fixedVersion=git(repo.project,"rev-parse","HEAD");
-  writeFileSync(join(repo.project,"a.txt"),"uncommitted A fixture\n");
   saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},"文件阵容","7c8094cd-3476-4bfa-8f53-055d87972896"));
   const host=await startGuiServer({home:f.home,cwd:f.cwd,open:false});t.after(()=>host.close());
   const {page,errors}=await usabilityPage(t,host,800,600);
   const button=name=>page.getByRole("button",{name,exact:true}),editor=page.getByLabel("输入问题");
   await button("切换导航").click();
   await chooseRailCreation(page, "新建 Team");
-  const create=page.getByRole("dialog",{name:"新建 Team",exact:true});
   const team="固定材料的中文长团队名字——需要在紧凑窗口仍可操作";
-  await create.getByLabel("名称",{exact:true}).fill(team);
-  await create.getByText("手动输入路径",{exact:true}).click();
-  await create.getByLabel("项目绝对路径").fill(repo.project);
-  await create.getByRole("button",{name:"只读检查目录",exact:true}).click();
-  await create.getByText(/目录可以关联/).waitFor();
-  await create.getByRole("button",{name:"创建",exact:true}).click();
-  await create.waitFor({state:"hidden"});
+  const session=await saveTeam(page,team,repo.project);
+  const child=session.project;
+  assert.equal(child,join(realpathSync(repo.project),"对话-"+session.id));
+  git(child,"init","-b","main");
+  writeFileSync(join(child,fixedName),"base comma fixture\n");
+  git(child,"status","--porcelain");
+  git(child,"add","--",fixedName);
+  git(child,"commit","-m","saved file with literal comma");
+  const fixedVersion=git(child,"rev-parse","HEAD");
+  writeFileSync(join(child,"a.txt"),"uncommitted A fixture\n");
   await editor.fill("第一段用户摘要，足以区别相同标题");
   await button("添加本次操作").click();
   await button("选择项目文件").click();
@@ -294,11 +321,15 @@ test("compact browser chooses current project bytes and a pinned saved range; na
   assert.ok(Number.isFinite(Date.parse(dateTime)));
   await page.keyboard.press("Escape");
   await button("切换导航").click();
+  const directCreation=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==="/api/action"&&response.request().method()==="POST"&&
+    response.request().postDataJSON()?.action==="session.create");
   await chooseRailCreation(page, "新对话");
-  const newChat=page.getByRole("dialog",{name:"新对话",exact:true});
-  await newChat.getByText(`将在 ${team} 中新建对话。`,{exact:true}).waitFor();
-  await newChat.getByRole("button",{name:"新建未分组对话",exact:true}).click();
-  await newChat.waitFor({state:"hidden"});
-  await page.getByRole("heading",{level:1}).getByText("未分组对话",{exact:true}).waitFor();
+  const next=await (await directCreation).json();
+  assert.equal(next.workspaceId,session.workspaceId);
+  assert.equal(next.project,join(realpathSync(repo.project),"对话-"+next.id));
+  assert.notEqual(next.project,child);
+  await page.getByText("这次想完成什么？",{exact:true}).waitFor();
+  assert.equal(await page.getByRole("dialog",{name:"新对话",exact:true}).count(),0);
+  assert.equal(f.calls.length,2,"new conversation makes no model call");
   assert.deepEqual(errors,[]);
 });

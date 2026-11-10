@@ -292,7 +292,7 @@ test("GUI reply fork refuses an active source without cancelling it",async t=>{
 });
 
 
-test("reply fork preserves a bound project and requires an unarchived source with no external writer",async t=>{
+test("fork gets its own folder and respects archive and writer guards",async t=>{
   const f=await setup(t), project=realpathSync(repository(t).project);
   const manager=SessionManager.create(project,join(f.home,"pi/sessions/main"));
   manager.appendCustomEntry("cothink-project",{project});
@@ -314,7 +314,7 @@ test("reply fork preserves a bound project and requires an unarchived source wit
   await h.action("session.archive",{sessionId:id,archived:false,expectedRevision:1});
   const fork=await h.action("session.fork",{sessionId:id,taskId:first.id});
   assert.equal(fork.navigation.archived,false);
-  assert.equal(fork.project,project);
+  assert.equal(fork.project,join(project,"对话-"+fork.id));
   assert.equal(fork.turns[0].flow,"unified");
   assert.deepEqual(readFileSync(source),before);
   assert.equal(f.calls.length,1);

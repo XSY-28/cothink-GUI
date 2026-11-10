@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { chooseRailCreation, railButton } from "./helpers/gui-rail.js";
 const packageRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL("..",import.meta.url)));
 const load=path=>import(pathToFileURL(join(packageRoot,path)));
@@ -116,10 +117,11 @@ test('compact sidebar keeps three Teams and project conversations separate witho
   assert.equal(await plus.evaluate(node => node === document.activeElement), true, "Escape returns focus to the plus button");
   const picker=page.getByRole('dialog',{name:'对话',exact:true});
   const createConversation=async()=>{
-    await page.getByRole('button',{name:'对话',exact:true}).click();
-    await picker.getByRole('button',{name:'新建对话',exact:true}).click();
-    await picker.waitFor({state:'hidden'});
-    assert.equal(await page.getByLabel('输入问题',{exact:true}).inputValue(),'');
+    const created=page.waitForResponse(r=>r.ok()&&r.url().endsWith('/api/action')&&r.request().postDataJSON()?.action==='session.create');
+    await chooseRailCreation(page,"新对话");
+    await created;
+    assert.equal(await page.getByRole('dialog').count(),0);
+    await page.waitForFunction(()=>document.querySelector('textarea')?.value==='');
   };
   const fillDraft=async text=>{
     const saved=page.waitForResponse(response=>{
@@ -131,10 +133,17 @@ test('compact sidebar keeps three Teams and project conversations separate witho
     await saved;
   };
   const names=['CoThink 开发','LLM 学习与多头注意力代码的长期讨论项目','课程笔记'];
+  const folders=mkdtempSync(join(tmpdir(),'cothink-team-navigation-'));
+  t.after(()=>rmSync(folders,{recursive:true,force:true}));
   for (const name of names) {
+    const folder=join(folders,name);
+    mkdirSync(folder);
     await chooseRailCreation(page, "新建 Team");
     const dialog=page.getByRole('dialog',{name:'新建 Team',exact:true});
     await dialog.getByLabel('名称',{exact:true}).fill(name);
+    await dialog.getByText('手动输入路径',{exact:true}).click();
+    await dialog.getByLabel('项目绝对路径').fill(folder);
+    await dialog.getByRole('button',{name:'只读检查目录'}).click();
     await dialog.getByRole('button',{name:'创建',exact:true}).click();
     await dialog.waitFor({state:'hidden'});
     await fillDraft(name+' 第一份草稿');
@@ -146,8 +155,10 @@ test('compact sidebar keeps three Teams and project conversations separate witho
   for (const workspace of [a,b,c]) {
     const {items}=await controller.sessions({workspaceId:workspace.id});
     assert.equal(items.length,2);
-    const drafts=await Promise.all(items.map(async row=>(await controller.session(row.id)).draft));
-    assert.deepEqual(drafts.sort(),[workspace.name+' 第一份草稿',workspace.name+' 第二份草稿'].sort());
+    const saved=await Promise.all(items.map(row=>controller.session(row.id)));
+    assert.deepEqual(saved.map(row=>row.draft).sort(),[workspace.name+' 第一份草稿',workspace.name+' 第二份草稿'].sort());
+    assert.equal(new Set(saved.map(row=>row.project)).size,2);
+    for(const row of saved) assert.ok(dirname(row.project)===workspace.project&&statSync(row.project).isDirectory());
   }
   const assertTeamOnly=async()=>{
     assert.equal(await nav.locator('[aria-label="最近对话"]').count(),0);

@@ -72,13 +72,12 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
   };
   await open(teams[0].name);
   await page.getByText(teams[0].reply,{exact:true}).waitFor();
-  assert.equal(await page.getByText(/文件工作需要准备/).count(),0);
   await page.getByRole("button",{name:"对话操作："+teams[0].name+" · 已保存答复",exact:true}).click();
-  await page.getByRole("dialog",{name:"对话操作"}).getByRole("button",{name:"准备文件工作"}).click();
-  const preparation=page.getByRole("dialog",{name:"准备文件工作"});
-  await preparation.getByText(teams[0].project,{exact:true}).waitFor();
+  const actions=page.getByRole("dialog",{name:"对话操作"});
+  await actions.waitFor();
+  assert.equal(await actions.getByRole("button",{name:"准备文件工作"}).count(),0);
   await page.keyboard.press("Escape");
-  await preparation.waitFor({state:"hidden"});
+  await actions.waitFor({state:"hidden"});
   const footer=page.locator("article > footer");
   const action=name=>footer.getByRole("button",{name,exact:true});
   const hint=name=>footer.locator('[role="tooltip"]').filter({hasText:name});

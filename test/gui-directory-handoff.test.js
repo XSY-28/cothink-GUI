@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {randomUUID} from "node:crypto";
 import {spawnSync} from "node:child_process";
-import {mkdirSync,mkdtempSync,realpathSync,rmSync} from "node:fs";
+import {existsSync,mkdtempSync,readFileSync,realpathSync,rmSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {dirname,join} from "node:path";
 import {chromium} from "playwright";
 import {fixture} from "./helpers/pi-fixture.js";
-import {controller,load,productRoot,teamId} from "./helpers/gui-controller-fixture.js";
+import {controller,load,productRoot} from "./helpers/gui-controller-fixture.js";
+import {chooseRailCreation} from "./helpers/gui-rail.js";
 
 const {startGuiServer}=await load("src/gui-server.js");
 
@@ -43,68 +43,57 @@ test("scope recovery is read-only and neutral directory creation refuses symlink
   assert.equal(probe.status,0,probe.stderr);
 });
 
-test("changed Team directory can start a fresh conversation with the original draft text", async t => {
+test("choosing a Team folder once creates independent conversation folders", async t => {
   const f = await fixture(t);
   const c = await controller(t, f);
-  const parent = mkdtempSync(join(tmpdir(),"cothink-handoff-"));
+  const parent = realpathSync(mkdtempSync(join(tmpdir(),"cothink-team-folder-")));
   t.after(()=>rmSync(parent,{recursive:true,force:true}));
-  const oldPath = join(parent,"old"), newPath = join(parent,"new");
-  mkdirSync(oldPath);
-  mkdirSync(newPath);
-  const workspaceId = randomUUID();
-  const team = await c.action("workspace.create", {workspaceId,name:"项目目录迁移",project:realpathSync(oldPath),defaultRosterId:teamId});
-  const old = await c.action("session.create", {sessionId:randomUUID(), workspaceId});
-  await c.action("workspace.rebind", {
-    workspaceId, expectedRevision:team.revision, path:realpathSync(newPath), operationId:randomUUID(),
-  });
-  await assert.rejects(c.action("session.create", {
-    workspaceId,sessionId:randomUUID(),handoff:{project:realpathSync(oldPath),text:"过期目标"},
-  }),{code:"WORKSPACE_CONFLICT"});
+  const teamFile=join(parent,"existing.txt");
+  writeFileSync(teamFile,"existing Team contents");
   const host = await startGuiServer({home:f.home, cwd:f.cwd, open:false, controller:c});
   t.after(() => host.close());
   const browser = await chromium.launch({headless:true});
   t.after(() => browser.close());
   const page = await browser.newPage({viewport:{width:1280,height:820}});
   page.setDefaultTimeout(5000);
+  const creation=()=>page.waitForResponse(response=>response.ok() &&
+    new URL(response.url()).pathname==="/api/action" && response.request().postDataJSON()?.action==="session.create");
+  const button=name=>page.getByRole("button",{name,exact:true});
   await page.goto(host.url);
-  await page.getByRole("navigation",{name:"工作导航"}).getByRole("button",{name:"项目目录迁移",exact:true}).click();
-  const input = page.getByLabel("输入问题",{exact:true});
-  const draft = "请生成 index.html";
-  await input.fill(draft);
-  await page.getByRole("button",{name:"用新目录继续",exact:true}).click();
-  const dialog = page.getByRole("dialog",{name:"使用 Team 目录",exact:true});
-  await dialog.getByText(realpathSync(newPath),{exact:true}).waitFor();
-  await dialog.getByRole("button",{name:"新建并复制草稿",exact:true}).click();
+  await chooseRailCreation(page,"新建 Team");
+  const dialog=page.getByRole("dialog",{name:"新建 Team",exact:true});
+  await dialog.getByLabel("名称",{exact:true}).fill("独立对话文件夹");
+  await dialog.getByText("手动输入路径",{exact:true}).click();
+  await dialog.getByLabel("项目绝对路径",{exact:true}).fill(parent);
+  await dialog.getByRole("button",{name:"只读检查目录",exact:true}).click();
+  await dialog.getByText("可以使用这个文件夹。",{exact:true}).waitFor();
+  const firstCreation=creation();
+  await dialog.getByRole("button",{name:"创建",exact:true}).click();
+  const first=await (await firstCreation).json();
   await dialog.waitFor({state:"hidden"});
-  assert.equal(await input.inputValue(),draft);
-  const chats = await c.sessions({workspaceId});
-  assert.equal(chats.items.length,2);
-  const next = await c.session(chats.items.find(item=>item.id!==old.id).id);
-  const original = await c.session(old.id);
-  assert.equal(next.project,realpathSync(newPath));
-  assert.equal(next.editor.text,draft);
-  assert.deepEqual(next.editor.materials,[]);
-  assert.equal(next.editor.turnOptions??null,null);
-  assert.equal(original.project,realpathSync(oldPath));
-  assert.equal(original.editor.text,draft);
-
-  // A receipt from the previous destination cannot acknowledge a new handoff.
-  const savedTeam=(await c.bootstrap()).workspaces.find(row=>row.id===workspaceId);
-  await c.action("workspace.rebind", {
-    workspaceId,expectedRevision:savedTeam.revision,path:realpathSync(oldPath),operationId:randomUUID(),
-  });
-  await page.evaluate(({workspaceId,sessionId,project,text})=>{
-    const scope=JSON.stringify(["workspace",workspaceId]);
-    sessionStorage.setItem("cothink.creations",JSON.stringify([[scope,{
-      sessionId,options:{workspaceId,handoff:{project,text}},
-    }]]));
-  },{workspaceId,sessionId:next.id,project:realpathSync(newPath),text:draft});
-  await page.reload();
-  await page.getByRole("navigation",{name:"工作导航"}).getByRole("button",{name:"项目目录迁移",exact:true}).click();
-  await page.getByRole("button",{name:"用新目录继续",exact:true}).click();
-  await dialog.getByText(realpathSync(oldPath),{exact:true}).waitFor();
-  await dialog.getByRole("button",{name:"新建并复制草稿",exact:true}).click();
-  await dialog.getByRole("alert").filter({hasText:/上一次新建已保存/}).waitFor();
-  assert.equal((await c.sessions({workspaceId})).items.length,2);
+  await page.getByRole("heading",{name:"这次想完成什么？",exact:true}).waitFor();
+  assert.equal(dirname(first.project),parent);
+  const firstFile=join(first.project,"first.txt");
+  writeFileSync(firstFile,"first conversation fixture");
+  const input = page.getByLabel("输入问题",{exact:true});
+  const draft = "第一条对话中未发送的草稿";
+  await input.fill(draft);
+  await button("对话").click();
+  const picker=page.getByRole("dialog",{name:"对话",exact:true});
+  const secondCreation=creation();
+  await picker.getByRole("button",{name:"新建对话",exact:true}).click();
+  const second=await (await secondCreation).json();
+  await picker.waitFor({state:"hidden"});
+  assert.equal(await page.getByRole("dialog",{name:"新建 Team",exact:true}).count(),0);
+  assert.equal(second.workspaceId,first.workspaceId);
+  assert.equal(dirname(second.project),parent);
+  assert.notEqual(first.project,second.project);
+  assert.equal(await input.inputValue(),"");
+  assert.equal((await c.session(first.id)).editor.text,draft);
+  assert.equal((await c.sessions({workspaceId:first.workspaceId})).items.length,2);
+  assert.equal(readFileSync(firstFile,"utf8"),"first conversation fixture");
+  assert.equal(existsSync(join(second.project,"first.txt")),false);
+  assert.equal(readFileSync(teamFile,"utf8"),"existing Team contents");
+  assert.equal(existsSync(join(parent,".git")),false);
   assert.equal(f.calls.length,0);
 });

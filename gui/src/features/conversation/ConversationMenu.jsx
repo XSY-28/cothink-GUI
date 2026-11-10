@@ -3,23 +3,17 @@ import {Modal} from "../../Modal.jsx";
 import {TurnLimits} from "./TurnLimits.jsx";
 import styles from "./Conversation.module.css";
 
-function ConversationMenu({session, homeDraft, onRename, onOrganize, onPrepareProject, onOpenTurnLimits, onClose}) {
-  const needsPreparation = session?.project && session.projectDirectoryAvailable !== false &&
-    !session.readOnly && !session.workspaceArchived && !session.navigation?.archived &&
-    session.projectStatus?.executionReady === false && !session.projectStatus.homeDirectory;
-
+function ConversationMenu({session, homeDraft, onRename, onOrganize, onOpenTurnLimits, onClose}) {
   return <Modal title="对话操作" onClose={onClose}>
     <div className="dialog-body">
       {session || homeDraft ? <>
         <p className="workspace-directory">{session?.title ?? "首页草稿"}</p>
+        {session?.project && <p className="workspace-directory">{session.project}</p>}
         <div className="form-actions">
           {session && <button type="button" disabled={session.readOnly} onClick={()=>onRename(session)}>重命名对话</button>}
           {onOpenTurnLimits && <button type="button" aria-haspopup="dialog" onClick={()=>onOpenTurnLimits()}>下一条消息的限制</button>}
           {onOrganize && <button type="button" onClick={onOrganize}>整理上下文…</button>}
-          {needsPreparation && <button type="button"
-            onClick={()=>onPrepareProject(session.project,session.projectStatus.preparation)}>准备文件工作</button>}
         </div>
-        {needsPreparation && <p className="field-note">修改文件或运行检查前，可为这个对话的目录建立 Git 起点。</p>}
       </> : <p role="status">原对话当前不可用。</p>}
     </div>
   </Modal>;
@@ -52,14 +46,14 @@ export function useConversationActions(state, workspace, setOverlay) {
   }};
 }
 
-export function ConversationActionDialogs({state, overlay, actions, setOverlay, onRename, onPrepareProject, onClose, onChangeTurnLimits, onOrganize}) {
+export function ConversationActionDialogs({state, overlay, actions, setOverlay, onRename, onClose, onChangeTurnLimits, onOrganize}) {
   const {bootstrap, session, homeReady, turnOptions} = state;
   const {editorScope, canEditTurnLimits, controls} = actions;
   const currentEditor = editorScope!==null && overlay?.editorScope===editorScope;
   const canOrganize = !!(session?.team && session.turns?.length && !session.readOnly && !session.selectionError && !state.draftConflict &&
     !state.pending && !state.submitting && !bootstrap.active && !bootstrap.extensionUI?.command && state.connection==="connected");
   if (overlay?.kind==="conversation-menu") return <ConversationMenu session={currentEditor ? session : null} homeDraft={currentEditor && homeReady}
-    onRename={onRename} onClose={onClose} onPrepareProject={onPrepareProject}
+    onRename={onRename} onClose={onClose}
     onOpenTurnLimits={currentEditor ? controls.onOpenTurnLimits : undefined}
     onOrganize={currentEditor && canOrganize ? ()=>setOverlay({kind:"organize-context",sessionId:session.id}) : undefined} />;
   if (overlay?.kind==="turn-limits") return <TurnLimits available={currentEditor && canEditTurnLimits} team={session?.team} models={bootstrap.models}

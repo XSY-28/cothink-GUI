@@ -9,8 +9,8 @@ import { ReplyActions, StopButton, UserMessage, WorkProposal } from "./ReplyActi
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
-  onSettings, onPlugins, onToggleNavigation, onWorkspaceMenu, onPrepareProject, onConversations, onRoster, onAttention, onFork, onOpenFile, onOpenDetails, onNotes, onCopy, onLocalCommand, onConversationMenu, onChooseProjectFiles, onAssociateProject,
-  onChooseSkill, onPreviewMaterial, onRetryMaterial, onOpenTurnLimits, conversationMenuTrigger, onUseTeamDirectory}) {
+  onSettings, onPlugins, onToggleNavigation, onWorkspaceMenu, onConversations, onRoster, onAttention, onFork, onOpenFile, onOpenDetails, onNotes, onCopy, onLocalCommand, onConversationMenu, onChooseProjectFiles,
+  onChooseSkill, onPreviewMaterial, onRetryMaterial, onOpenTurnLimits, conversationMenuTrigger, onCreateTeam}) {
   const {bootstrap: boot, task, draft, ready, submitting, pending, pendingStatus} = state;
   const session = workspace?.archived && state.session ? {...state.session,workspaceArchived:true,readOnly:true} : state.session;
   const replyTeamId = session?.workspaceId && !session.workspaceError &&
@@ -27,6 +27,10 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   const recoverPending = () => commands.recoverSubmission();
   const editDraft = text => commands.setDraft(session?.id, text);
   const submit = async (options) => {
+    if (!session && state.homeReady && !/^\/(?:team|models|settings|help)$/u.test(draft.trim())) {
+      onCreateTeam?.();
+      return;
+    }
     const result = await commands.submit({sessionId:session?.id,...options});
     if(result?.local) {
       if(onLocalCommand)onLocalCommand(result.local);
@@ -257,13 +261,6 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                         )}
                       </div>
                     )}
-                    {turn.projectPreparationBlocked && <div className={styles.incompleteAnswer}>
-                      <p>已保存原任务。准备目录后可明确发起一次新请求继续。</p>
-                      {session.turns.some(item=>item.continuationSource?.taskId===turn.taskId) ? <p>此任务已有一条续作。</p> : session.projectStatus?.executionReady
-                        ? <button disabled={!!boot.active||!!pending||session.readOnly||submitting} onClick={()=>safely(commands.continuePrepared(turn))}>继续原任务（将新增请求）</button>
-                        : session.projectStatus?.homeDirectory || session.project!==turn.projectPreparationBlocked.path ? null :
-                          <button disabled={session.projectDirectoryAvailable===false} onClick={()=>onPrepareProject(turn.projectPreparationBlocked.path,session.projectStatus?.preparation)}>准备文件工作</button>}
-                    </div>}
                     {turn.hasWork && <OutcomeFiles taskId={turn.taskId} status={turn.status} commands={commands} onOpen={onOpenFile}/>}
                     <ReplyActions turn={turn} forkDisabled={!!boot.active || !!pending || session.readOnly || !!session.selectionError || !turn.canFork}
                       showChanges={turn.hasWork || task?.id === turn.taskId && task.work}
@@ -286,7 +283,6 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             创建待确认 · {state.creationNotice?.sessionId ?? state.homeDraft?.pendingCreateSessionId}{" "}
             <button type="button" disabled={state.creating} onClick={()=>safely(commands.recoverCreation())}>查询原会话</button>
           </p>}
-          {state.homeReady && <p className={styles.contextNote}>首次发送将建立未分组对话。</p>}
           {!session && boot.homeDraftError && <p className="error-text" role="alert">{boot.homeDraftError}</p>}
           <Composer
             session={session}
@@ -313,11 +309,6 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             onPreviewMaterial={onPreviewMaterial}
             onRetryMaterial={onRetryMaterial}
             onChooseProjectFiles={onChooseProjectFiles}
-            onAssociateProject={onAssociateProject}
-            onUseTeamDirectory={onUseTeamDirectory}
-            onPrepareProject={session?.project && session.projectDirectoryAvailable !== false && onPrepareProject
-              ? ()=>onPrepareProject(session.project,session.projectStatus?.preparation) : undefined}
-            onWorkspaceMenu={workspace ? onWorkspaceMenu : undefined}
             onChooseSkill={onChooseSkill}
             selectedSkill={state.selectedSkill}
             onRemoveSkill={commands.removeSkill}

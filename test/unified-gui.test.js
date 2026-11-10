@@ -91,8 +91,9 @@ test('cancelling a formal root drains its child and later chat does not resume p
  assert.equal((await projectChatState(f.home,repo.project)).state.status,'paused');assert.equal(f.calls.length,3);
 });
 
-test('an inherited visible plan in a GUI fork needs new confirmation and keeps the formal ref',async t=>{
+test('a GUI fork can see inherited work but cannot execute a plan in the source folder',async t=>{
  const {digest}=await import('../src/project-turn.js');
+ const {projectChatState}=await import('../src/project.js');
  const repo=repository(t),plan={goal:'Verify a.txt',scope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"require('fs').accessSync('a.txt')"]}]};let planRef;
  const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:'start_work',args:{action:'start',reason:'verify',plan}}]}:n===3?{toolCalls:[{name:'start_work',args:{action:'resume',reason:'continue inherited plan',planRef}}]}:{text:'Verified'});
  const c=await controller(t,f,{execution}),s=await c.action('session.create',{project:repo.project});
@@ -101,8 +102,10 @@ test('an inherited visible plan in a GUI fork needs new confirmation and keeps t
  const first=await confirm(s.id,await submit(s.id,'initial'));
  const fork=await c.action('session.fork',{sessionId:s.id,taskId:first.id});
  planRef={taskId:first.id,field:'proposal',sha256:digest(first.proposal)};
- const pending=await submit(fork.id,'continue inherited plan');assert.equal(pending.status,'blocked');assert.ok(pending.proposalRef);assert.equal(f.calls.length,3);
- const result=await confirm(fork.id,pending);assert.equal(result.status,'completed',result.error);assert.equal(result.executionBinding.formalRef,first.executionBinding.formalRef);assert.equal(result.deliveryRef.sources[0].relation,'inherited');assert.equal(f.calls.length,3);
+ const pending=await submit(fork.id,'continue inherited plan');assert.notEqual(fork.project,s.project);
+ assert.ok(fork.turns.some(turn=>turn.taskId===first.id));
+ assert.match(pending.error,/Saved plan does not belong/);assert.equal(pending.proposalRef,undefined);assert.equal(f.calls.length,3);
+ assert.equal((await projectChatState(f.home,repo.project)).state.version,first.deliveryRef.version);
 });
 
 test('legacy editor read choice requires reselection before a model request, and the selected version can send',async t=>{

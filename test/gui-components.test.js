@@ -1273,7 +1273,7 @@ test('file reader ignores a late file response, aborts departed reads and revoke
   });
 });
 
-test("project inspection keeps a newer path when an older read completes and foregrounds actual execution limits",async()=>{
+test("project inspection keeps the newer path when an older read completes",async()=>{
   await modalEnvironment(async({root,container,win,ProjectDialog})=>{
     const waits=[],opened=[];
     const commands={inspectProject:path=>new Promise(resolve=>waits.push({path,resolve})),
@@ -1288,14 +1288,11 @@ test("project inspection keeps a newer path when an older read completes and for
     };
     await enter("/old");
     await enter("/new");
-    const value=path=>({path,valid:true,dirty:true,head:'head',version:'version',checks:[{command:'npm',args:['test']}],execution:null});
+    const value=canonicalPath=>({canonicalPath,directoryAvailable:true});
     await act(()=>waits[0].resolve(value('/old')));
     assert.equal(container.querySelector('.project-inspection'),null,'stale result must not offer the wrong project');
     await act(()=>waits[1].resolve(value('/new')));
-    assert.match(container.textContent,/未提交修改/);
-    assert.match(container.textContent,/未配置执行环境/);
-    assert.match(container.textContent,/尚未运行/);
-    assert.equal(container.querySelector('.project-inspection details').open,false);
+    assert.match(container.textContent,/已选目录：\/new/);
     await act(async()=>{container.querySelector('form').dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true}));});
     assert.deepEqual(opened,['/new']);
   });
@@ -1331,15 +1328,21 @@ test("native directory picker suggests an empty Team name and retains the select
 });
 
 
-test("Team creation form needs only a name even without a directory or roster",async()=>{
+test("Team creation requires a folder even without a default roster",async()=>{
   await modalEnvironment(async({root,container,win,ProjectDialog})=>{
     const requests=[],saved=[];
-    const commands={createWorkspace:async args=>{requests.push(args);return {id:"new",...args};}};
+    win.cothinkDesktop={chooseProjectDirectory:async()=>"/team"};
+    const commands={inspectProject:async canonicalPath=>({canonicalPath,directoryAvailable:true}),
+      createWorkspace:async args=>{requests.push(args);return {id:"new",...args};}};
     await act(()=>root.render(React.createElement(ProjectDialog,{commands,onSaved:value=>saved.push(value),onClose(){}})));
     assert.match(container.textContent,/暂无默认阵容/);
     await act(()=>{const input=container.querySelector("input");Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(input,"课程笔记");input.dispatchEvent(new win.Event("input",{bubbles:true}));});
-    await act(async()=>{container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true}));});
-    assert.deepEqual(requests,[{name:"课程笔记",project:null,defaultRosterId:null}]);
+    const submit=()=>act(async()=>container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true})));
+    await submit();
+    assert.equal(requests.length,0);
+    await act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent==="选择或新建文件夹…").click());
+    await submit();
+    assert.deepEqual(requests,[{name:"课程笔记",project:"/team",defaultRosterId:null}]);
     assert.equal(saved[0].id,"new");
   });
 });
@@ -2134,7 +2137,7 @@ test("composer keeps add actions separate and refuses incomplete materials", asy
     const imports=[], removes=[], sends=[];
     const props={boot:{protocol:{unified:1}},homeReady:true,draft:"",onDraft(){},onSubmit:()=>sends.push(true),
       onImportMaterials:files=>imports.push(...files),onRemoveMaterial:item=>removes.push(item),
-      onAssociateProject(){},onTurnOptions(){}};
+      onTurnOptions(){}};
     const material={key:"upload",name:"plot.png",mediaType:"image/png",byteLength:10,status:"failed",error:"图片未保存"};
     const render=items=>act(()=>root.render(React.createElement(Composer,{...props,materials:items})));
     await render([material]);
@@ -2142,8 +2145,7 @@ test("composer keeps add actions separate and refuses incomplete materials", asy
     await act(()=>plus.click());
     assert.equal(plus.getAttribute("aria-expanded"),"true");
     assert.match(container.textContent,/添加文件或图片/);
-    assert.match(container.textContent,/关联目录/);
-    assert.doesNotMatch(container.textContent,/只分析，不修改|使用技能|插件命令/);
+    assert.doesNotMatch(container.textContent,/关联目录|只分析，不修改|使用技能|插件命令/);
     await act(()=>win.document.body.dispatchEvent(new win.Event("pointerdown",{bubbles:true})));
     assert.equal(plus.getAttribute("aria-expanded"),"false");
     await act(()=>plus.click());

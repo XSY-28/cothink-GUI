@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,7 +15,7 @@ const { saveConfig } = await load("src/config.js");
 const { createTeamConfig } = await load("src/teams.js");
 const { startGuiServer } = await load("src/gui-server.js");
 
-test("file requests wait for directory preparation while ordinary chat remains usable", { timeout: 30000 }, async t => {
+test("a Team file request uses its own folder without a setup or network-choice step", { timeout: 30000 }, async t => {
   const reply = Promise.withResolvers();
   const plan = { goal:"Verify the proposal display", scope:["__init__.py"], deliverables:["__init__.py"],
     checks:[{command:"node",args:["-e","process.exit(0)"]}] };
@@ -57,20 +57,17 @@ test("file requests wait for directory preparation while ordinary chat remains u
   await create.getByText("手动输入路径", { exact: true }).click();
   await create.getByLabel("项目绝对路径", { exact: true }).fill(project);
   await create.getByRole("button", { name: "只读检查目录", exact: true }).click();
-  await create.getByText(/目录可以关联/).waitFor();
+  await create.getByText("可以使用这个文件夹。",{exact:true}).waitFor();
   await create.getByRole("button", { name: "创建", exact: true }).click();
   await create.waitFor({ state: "hidden" });
-
-  const filePrompt = "给我生成一个自行车骑鹈鹕的html界面，svg图像，不允许联网";
-  await editor.fill(filePrompt);
-  assert.equal(await button("发送").isDisabled(), true, "the file request cannot send before directory preparation");
-  await page.getByText(/目录尚未准备/).waitFor();
-  await page.getByText(project, { exact: true }).waitFor();
-  await editor.press("Enter");
-  assert.equal(await editor.inputValue(), filePrompt);
+  await page.getByRole("heading",{name:"这次想完成什么？",exact:true}).waitFor();
+  const folders=readdirSync(project,{withFileTypes:true}).filter(entry=>entry.isDirectory());
+  assert.equal(folders.length,1,"creating the Team also creates its first conversation folder");
+  const conversationFolder=join(project,folders[0].name);
+  const childHead=join(conversationFolder,".git","HEAD");
+  assert.equal(existsSync(childHead),false,"a new chat needs no Git initialization");
   assert.deepEqual(submitted, []);
   assert.equal(f.calls.length, 0);
-  await capture("file-task-unprepared.png");
 
   const chatPrompt = "HTML 和 SVG 有什么区别？\n用一个简短例子。";
   await editor.fill(chatPrompt);
@@ -88,6 +85,7 @@ test("file requests wait for directory preparation while ordinary chat remains u
   await page.getByText("已回答普通问题。", { exact: true }).waitFor();
   assert.deepEqual(submitted, [chatPrompt]);
   assert.equal(f.calls.length, 1);
+  assert.equal(existsSync(childHead),false,"ordinary chat does not initialize the project");
 
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   const copy = input.getByRole("button", { name: "复制消息", exact: true });
@@ -106,40 +104,22 @@ test("file requests wait for directory preparation while ordinary chat remains u
   await copy.click();
   await page.waitForFunction(async expected => (await navigator.clipboard.readText()) === expected, chatPrompt);
 
+  const wholeTurn = "请全程不联网，帮我生成 index.html。";
+  await editor.fill(wholeTurn);
+  await button("发送").click();
+  await page.getByText(/整轮离线.*未发送模型请求/).waitFor();
+  assert.equal(await editor.inputValue(),wholeTurn);
+  assert.equal(f.calls.length,1,"explicit whole-turn offline sends no model request");
+  assert.equal(existsSync(childHead),false,"the rejected request does not initialize Git");
+
+  const filePrompt = "给我生成一个自行车骑鹈鹕的html界面，svg图像，不允许联网";
   await editor.fill(filePrompt);
-  await button("准备文件工作").click();
-  const preparation = page.getByRole("dialog", { name: "准备文件工作", exact: true });
-  await preparation.getByText(project, { exact: true }).waitFor();
-  let lostInventory = false;
-  await page.route("**/api/action", async route => {
-    const body = route.request().postDataJSON();
-    if (!lostInventory && body?.action === "project.prepare" && body.args.action === "preview") {
-      lostInventory = true;
-      return route.abort("failed");
-    }
-    return route.continue();
-  });
-  await preparation.getByRole("button", { name: "盘点文件", exact: true }).click();
-  await preparation.getByRole("button", { name: "查询原操作", exact: true }).click();
-  await preparation.getByText("未找到原盘点结果，可以重新盘点。", { exact: true }).waitFor();
-  for (const name of ["盘点文件", "预览起点"]) await preparation.getByRole("button", { name, exact: true }).click();
-  assert.equal(existsSync(join(project, ".git")), false);
-  await preparation.getByRole("button", { name: "确认建立起点", exact: true }).click();
-  await preparation.getByText(/文件工作起点已核对/).waitFor();
-  assert.equal(existsSync(join(project, ".git", "HEAD")), true);
-  await preparation.getByRole("button", { name: "关闭", exact: true }).click();
-  assert.equal(await editor.inputValue(), filePrompt);
-  await page.getByText("目录已准备", {exact:true}).waitFor();
-  assert.deepEqual(submitted, [chatPrompt], "preparing the directory does not send the saved draft");
-  assert.equal(f.calls.length, 1);
-  assert.equal(await button("发送").isDisabled(),true,"ambiguous offline text needs a choice after directory preparation");
-  await button("整轮不联网").click();
-  assert.equal(await button("发送").isDisabled(),true,"the configured model cannot satisfy whole-turn offline");
-  await button("重新选择联网要求").click();
-  await button("只要求成品离线").click();
-  await page.waitForFunction(() => document.querySelector('button[aria-label="发送"]')?.disabled === false);
+  await page.getByText(/整轮离线.*未发送模型请求/).waitFor({state:"hidden"});
+  assert.equal(await button("发送").isEnabled(),true);
+  assert.equal(await button("准备文件工作").count(),0);
+  assert.equal(await button("只要求成品离线").count(),0);
+  assert.equal(await page.getByText(/目录尚未准备|目录已准备|这次需要整轮离线/).count(),0);
   await capture("file-task-ready.png");
-  assert.equal(f.calls.length,1,"choosing network requirements does not send the draft");
 
   await page.getByRole("button",{name:/^对话操作：/}).click();
   await button("下一条消息的限制").click();
@@ -153,5 +133,11 @@ test("file requests wait for directory preparation while ordinary chat remains u
   assert.equal(await confirmation.isDisabled(),true,"planning spent the last allowed request");
   await page.getByText(/本轮模型请求额度已用完/).waitFor();
   assert.equal(f.calls.length,2);
+  const modelInput=JSON.stringify(f.calls[1].body.messages);
+  assert.ok(modelInput.includes(filePrompt));
+  assert.match(modelInput,/artifact-offline/);
+  assert.deepEqual(submitted,[chatPrompt,wholeTurn,filePrompt]);
+  assert.equal(existsSync(childHead),true,"the first file task prepares only its conversation folder");
+  assert.equal(existsSync(join(project,".git")),false,"the Team folder is not initialized");
   assert.deepEqual(errors, []);
 });
