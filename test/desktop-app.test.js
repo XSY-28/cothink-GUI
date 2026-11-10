@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {once} from 'node:events';
+import {createServer} from 'node:net';
 import {mkdtempSync,readdirSync,readFileSync,renameSync,mkdirSync,rmdirSync,rmSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -13,8 +14,7 @@ import {_electron as electron} from 'playwright';
 import {verifyPackagedTeamPortraits} from './helpers/desktop-team-portrait.js';
 const appPath=process.env.COTHINK_DESKTOP_APP;
 assert.ok(appPath,'COTHINK_DESKTOP_APP must name the actual isolated packaged App');
-async function launchCandidate(t, seed) {
- const home=mkdtempSync(join(tmpdir(),'cothink-app-lifecycle-'));
+async function launchCandidate(t, seed, home=mkdtempSync(join(tmpdir(),'cothink-app-lifecycle-'))) {
  let app;
  try {
   await seed?.(home);
@@ -290,6 +290,29 @@ test('actual App retains its review window if the child dies after phase one but
  assert.equal(f.appProcess.exitCode,0,'explicit user Quit must terminate normally after inspecting an unconfirmed child stop');
  assert.equal(f.appProcess.signalCode,null);
 });
+test('packaged desktop keeps its theme across a full restart', {timeout:30000}, async t=>{
+ const first=await launchCandidate(t);
+ const origin=new URL(first.page.url()).origin;
+ await first.page.getByRole('button',{name:'设置',exact:true}).click();
+ await first.page.getByRole('button',{name:'偏好与更新',exact:true}).click();
+ await first.page.getByLabel('界面主题').selectOption('dark');
+ await first.page.waitForFunction(async()=>await window.cothinkDesktop.readTheme()==='dark');
+ const stopped=first.app.waitForEvent('close');
+ const exited=once(first.appProcess,'exit');
+ await first.app.evaluate(({app})=>app.quit());
+ await stopped;
+ await exited;
+ const occupied=createServer().listen(Number(new URL(origin).port),'127.0.0.1');
+ await once(occupied,'listening');
+ t.after(()=>new Promise(resolve=>occupied.close(resolve)));
+ const second=await launchCandidate(t,undefined,first.home);
+ assert.notEqual(new URL(second.page.url()).origin,origin);
+ await second.page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
+ const closed=second.app.waitForEvent('close');
+ await second.app.evaluate(({app})=>app.quit());
+ await closed;
+});
+
 test('actual renderer crash keeps the host and reopens only the saved draft after explicit reload',async t=>{
  const f=await fixture(t);
  await f.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());

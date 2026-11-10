@@ -54,6 +54,24 @@ export function repository(t) {
     baseVersion: git(project, "rev-parse", "HEAD"),
   };
 }
+
+export async function invalidUtf8Tree(project) {
+  const { git: bytesGit } = await import("../../src/git.js");
+  const validName = "\ufffd.txt";
+  git(project, "status", "--porcelain");
+  const visible = (await bytesGit(project, ["hash-object", "-w", "--stdin"], "AUTHORIZED")).toString().trim();
+  git(project, "status", "--porcelain");
+  const hidden = (await bytesGit(project, ["hash-object", "-w", "--stdin"], "UNSELECTED")).toString().trim();
+  const rawTree = Buffer.concat([
+    Buffer.from(`100644 blob ${visible}\t${validName}\0`),
+    Buffer.from(`100644 blob ${hidden}\t`),
+    Buffer.from([0xff]),
+    Buffer.from(".txt\0"),
+  ]);
+  git(project, "status", "--porcelain");
+  const tree = (await bytesGit(project, ["mktree", "-z"], rawTree)).toString().trim();
+  return {version:git(project, "commit-tree", tree, "-m", "synthetic Git path bytes"), validName};
+}
 export async function backend(t, extra = {}) {
   const m = await import("../../src/index.js").catch(() => ({}));
   assert.equal(

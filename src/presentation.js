@@ -37,7 +37,21 @@ export function workCheckText(check) {
   return check.reusedFrom ? "通过（复用既有检查）" : "通过";
 }
 export function finalText(record, requests, {localArtifacts=true, hostFooter=true,home}={}) {
-  if(record.flow==="unified"&&record.proposal&&!record.projectOperation)return "待确认工作提议\n\n"+JSON.stringify(record.proposal.plan,null,2)+"\n\n实际目录："+record.proposal.canonicalRepo+"\n固定版本："+record.proposal.version+"\n本轮约束："+JSON.stringify(record.proposal.constraints)+"\n确认后剩余请求数："+(record.proposal.budgetAtProposal?.remainingCalls??"不设上限")+"\n冻结阵容："+JSON.stringify(record.models);
+  if(record.flow==="unified"&&record.proposal&&!record.projectOperation) {
+    const proposal=record.proposal;
+    return [
+      "待确认工作提议",
+      `所选目录：${proposal.executionScope?.path??proposal.canonicalRepo}`,
+      `仓库根目录：${proposal.canonicalRepo}`,
+      `固定版本：${proposal.version}`,
+      ...(proposal.reuseCompletedDelivery?["沿用已完成交付，不发出新模型请求。"]:[]),
+      `确认后剩余请求数：${proposal.budgetAtProposal?.remainingCalls??"不设上限"}`,
+      `本轮约束：${JSON.stringify(proposal.constraints)}`,
+      `冻结阵容：${JSON.stringify(record.models)}`,
+      "",
+      JSON.stringify(proposal.plan,null,2),
+    ].join("\n");
+  }
   if(record.deliveryRef && home){try{return resolveDelivery(home,record).map(source=>source.stepId+"\n\n"+finalAnswerText(source.call.text??"")).join("\n\n");}catch(error){return "交付来源尚不能核验："+error.message;}}
   if (record.status !== "completed") return "";
   const text = finalAnswerText(

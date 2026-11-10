@@ -1,9 +1,10 @@
-import {defaultTurnOptions,isGuiFileTask} from "../../src/gui-turn-options.js";
+import {defaultTurnOptions,editorReadPaths,guiNetworkChoice,isGuiFileTask} from "../../src/gui-turn-options.js";
+import {materialExtensions} from "../../src/gui-material-types.js";
 import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import {Icon} from "./Icon.js";
 import {shouldSubmit} from "./view.js";
 const h=React.createElement;
-export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,onOpenTurnLimits,homeReady=false,creating=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onAssociateProject,onPrepareProject,onWorkspaceMenu,onChooseSkill,selectedSkill,onRemoveSkill}) {
+export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,onOpenTurnLimits,homeReady=false,creating=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onAssociateProject,onPrepareProject,onWorkspaceMenu,onChooseSkill,selectedSkill,onRemoveSkill,onUseTeamDirectory}) {
   const composing=useRef(false), input=useRef(null), fileInput=useRef(null), addTrigger=useRef(null), menuPanel=useRef(null), importing=useRef(new Map());
   const [addingFor,setAddingFor]=useState(), [importError,setImportError]=useState(null), [,showImportState]=useState(0), team=session?.team;
   const scope=editorKey??session?.id??null, importScope=session?.id??null;
@@ -42,14 +43,18 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
   const localCommand=/^\/(?:team|models|settings|help)$/.test(draft.trim());
   const localTeam=/^\/(?:team|models)$/.test(draft.trim());
   const fileTask=!localCommand&&isGuiFileTask(draft,{readOnly,fileWork:options.fileWork||!!workRequest});
+  const network=localCommand?null:guiNetworkChoice(draft,options);
+  const networkBlocked=network==="choose"||network==="whole-turn-offline";
   const projectStatus=session?.projectStatus;
   const fileReady=!!session?.project&&projectStatus?.executionReady===true;
+  const executionMissing=fileTask&&fileReady&&!!boot.work&&!boot.work.execution;
   const fileStatus=!session?.project ? "未关联项目目录" :
     fileReady ? "目录已准备" :
     session.projectDirectoryAvailable===false ? "目录不可用" : "目录尚未准备";
   const incomplete=!!importing.current.get(importScope)||materials.some(item=>item.status!=="ready");
   const blocks=boot.protocol?.unified!==1 || disabled || draftConflict || (!draft.trim()&&!materials.length) ||
-    (creating || !localCommand && (busy || submitting || pending || incomplete || !team && !homeReady || fileTask && !fileReady));
+    (creating || !localCommand && (busy || submitting || pending || incomplete || !team && !homeReady ||
+      fileTask && !fileReady || executionMissing || networkBlocked));
   const send=async()=>{if(!blocks&&(localCommand||!importing.current.get(importScope)))await onSubmit();};
   const optionDisabled=disabled||submitting||pending||creating||session?.contextOrganizing;
   const importFiles=async files=>{
@@ -80,7 +85,7 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     delegate!==true&&["dispatch",delegate===false&&!review?"禁止派工及按需评审（旧限制）":"禁止派工",()=>onTurnOptions?.({delegate:true}),onOpenTurnLimits],
     review&&["review","独立评审",()=>onTurnOptions?.({review:false}),onOpenTurnLimits],
     maxCalls!==""&&["max-calls",`最多 ${maxCalls} 次请求`,()=>onTurnOptions?.({maxCalls:""}),onOpenTurnLimits],
-    options.readAllowed&&["read-scope",readAllowed?`读取已保存版本：${readPaths||"未选范围"}`:"项目读取范围需重新确认",()=>onTurnOptions?.({readAllowed:false,readPaths:""})],
+    options.readAllowed&&["read-scope",readAllowed?`读取已保存版本：${editorReadPaths(readPaths).join("、")||"未选范围"}`:"项目读取范围需重新确认",()=>onTurnOptions?.({readAllowed:false,readPaths:[]})],
     selectedSkill&&["skill",`技能：${typeof selectedSkill==="string"?selectedSkill:selectedSkill.name}`,onRemoveSkill],
     options.fileWork&&!readOnly&&["file-work","文件任务 · 仅本次",()=>onTurnOptions?.({fileWork:false})],
     workRequest&&["work","制作网页 · 仅本次",()=>onWorkRequest?.(null)],
@@ -133,7 +138,7 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
       edit ? h("button",{type:"button",className:"chip-edit",title:label,disabled:optionDisabled,onClick:event=>edit(event.currentTarget),"aria-label":`修改${label}`,"aria-haspopup":"dialog"},label)
         : h("span",{title:label},label),
       remove&&h("button",{type:"button",disabled:optionDisabled,onClick:()=>{remove();input.current?.focus();},"aria-label":`移除${label}标记`},"×")))),
-  onImportMaterials && h("input",{type:"file",hidden:true,multiple:true,ref:fileInput,accept:materialCapabilities?.mediaTypes?.join(","),
+  onImportMaterials && h("input",{type:"file",hidden:true,multiple:true,ref:fileInput,accept:[...(materialCapabilities?.mediaTypes??[]),...materialExtensions].join(","),
     onChange:e=>{const files=Array.from(e.target.files??[]);e.target.value="";importFiles(files);input.current?.focus();},
     onCancel:()=>input.current?.focus()}),
   h("label",{className:"sr-only",htmlFor:"message-input"},"输入问题"),
@@ -150,13 +155,26 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     h("div",{className:"composer-file-path",role:"status"},
       h("span",{className:fileReady?"":"file-not-ready"},fileStatus),
       session?.project&&h("span",{title:session.project},session.project)),
-    !fileReady && projectStatus?.homeDirectory && h("small",null,"当前是用户主目录。可选用专用项目文件夹后新建对话。"),
-    !fileReady && h("div",{className:"composer-file-actions"},
-      onPrepareProject&&!projectStatus?.homeDirectory&&h("button",{type:"button",disabled:optionDisabled,onClick:onPrepareProject},"准备文件工作"),
+    !fileReady && projectStatus?.homeDirectory && h("small",null,"请选择专用项目文件夹后新建对话。"),
+    !fileReady && !projectStatus?.homeDirectory && projectStatus?.reason && h("small",null,projectStatus.reason),
+    executionMissing && h("small",{role:"status"},"执行环境未配置。可在设置中配置 Docker 和执行镜像。"),
+    (!fileReady||executionMissing||onUseTeamDirectory) && h("div",{className:"composer-file-actions"},
+      onUseTeamDirectory&&h("button",{type:"button",disabled:optionDisabled,onClick:onUseTeamDirectory},"用新目录继续"),
+      !fileReady&&onPrepareProject&&!projectStatus?.homeDirectory&&h("button",{type:"button",disabled:optionDisabled,onClick:onPrepareProject},"准备文件工作"),
       onWorkspaceMenu&&session?.project
         ? h("button",{type:"button",disabled:optionDisabled,onClick:onWorkspaceMenu},"查看 Team 目录")
         : !session?.project&&onAssociateProject&&h("button",{type:"button",disabled:optionDisabled,onClick:onAssociateProject},"选择项目目录"),
-      onTurnOptions&&h("button",{type:"button",disabled:optionDisabled,onClick:()=>onTurnOptions({fileWork:false,readOnly:true})},"只聊这件事"))),
+      (!fileReady||executionMissing)&&onTurnOptions&&h("button",{type:"button",disabled:optionDisabled,onClick:()=>onTurnOptions({fileWork:false,readOnly:true})},"只聊这件事"))),
+  network && h("div",{className:"composer-file-status",role:"status"},
+    network==="choose" ? h(React.Fragment,null,
+      "这次需要整轮离线，还是只要求成品离线？模型请求与成品运行是两个环节。",
+      h("div",{className:"composer-file-actions"},
+        h("button",{type:"button",disabled:optionDisabled,onClick:()=>onTurnOptions?.({networkMode:"artifact-offline"})},"只要求成品离线"),
+        h("button",{type:"button",disabled:optionDisabled,onClick:()=>onTurnOptions?.({networkMode:"whole-turn-offline"})},"整轮不联网"))) :
+      network==="whole-turn-offline" ? "这条消息要求整轮离线。当前不能保证模型调用离线，发送已暂停。" :
+      "只要求成品离线。发送仍会调用模型服务，成品离线性需要验证。",
+    options.networkMode && h("div",{className:"composer-file-actions"},
+      h("button",{type:"button",disabled:optionDisabled,onClick:()=>onTurnOptions?.({networkMode:null})},"重新选择联网要求"))),
   h("div",{className:"composer-options"},
     addActions.length>0 && h("button",{type:"button",ref:addTrigger,disabled:optionDisabled,"aria-label":"添加本次操作","aria-expanded":adding,onClick:()=>setAddingFor(adding?undefined:scope)},h(Icon,{name:"plus"})),
     adding && h("div",{className:"composer-add-menu composer-add-actions",ref:menuPanel},

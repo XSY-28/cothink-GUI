@@ -83,3 +83,7 @@
 .turnChoice input { flex:none; margin:0; }
 .turnLimitPolicy { padding:0 10px; max-height:230px; overflow:auto; overflow-wrap:anywhere; color:var(--muted); font-size:12px; line-height:1.6; }
 .turnLimitPolicy summary { padding:8px 0; cursor:pointer; font-size:13px; }
+.proposalText {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -1,4 +1,5 @@
 import {loadInputMaterials} from "./context.js";
+import {guiNetworkBlocker} from "./gui-turn-options.js";
 import {assertCleanProjectProcess} from "./pi-runtime.js";
 import {createHash,randomUUID} from 'node:crypto';
 import {readFileSync,existsSync,realpathSync} from 'node:fs';
@@ -7,7 +8,7 @@ import {runTurn} from './discussion.js';
 import {conversationTaskIds} from './conversation.js';
 import {problem,readRequest,readRequests,readTask,taskDisplayStatus} from './task.js';
 import {legacyGit} from './git-versioning.js';
-import {validProjectPath,inScope,createVersioning} from './versioning.js';
+import {validProjectPath,inScope,createVersioning,readProjectContext} from './versioning.js';
 import {projectChatState,validateChatPlan,assertProjectReviewRequirement} from './project.js';
 
 export const unifiedProtocol = 1;
@@ -18,9 +19,10 @@ export function assertRootOwner(owner,rootTaskId) {
   return owner;
 }
 export function normalizeConstraints(input={}) {
-  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['readOnly','allowedSubtasks','requireDifferentModelReview'].includes(k)))throw problem('CONSTRAINTS','Invalid turn constraints');
+  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['readOnly','allowedSubtasks','requireDifferentModelReview','networkMode'].includes(k)))throw problem('CONSTRAINTS','Invalid turn constraints');
   const value={readOnly:false,allowedSubtasks:['review','work'],requireDifferentModelReview:false,...input};
   if(typeof value.readOnly!=='boolean'||typeof value.requireDifferentModelReview!=='boolean'||!Array.isArray(value.allowedSubtasks)||value.allowedSubtasks.some(x=>!['review','work'].includes(x)))throw problem('CONSTRAINTS','Invalid turn constraints');
+  if(value.networkMode!==undefined&&!['whole-turn-offline','artifact-offline'].includes(value.networkMode))throw problem('CONSTRAINTS','Invalid network mode');
   value.allowedSubtasks=[...new Set(value.allowedSubtasks)];return value;
 }
 export function normalizeRootBudget(input={}) {
@@ -125,39 +127,6 @@ export async function freezeReadAuthorization({home,workspace,sessionId,submissi
   version??=await legacyGit(canonicalRepo,['rev-parse','--verify','HEAD^{commit}']);
   return {canonicalRepo,workspaceId:workspace.id??null,sessionId,version,projectId:state?.id??null,paths:[...new Set(input.paths)],source:{kind:'user_ui',submissionId,...(editorEditId?{editorEditId}:{})},uncommitted:false};
 }
-async function readContext(task,args) {
-  const grant=task.record.readAuthorization;
-  if(!grant)throw problem('READ_AUTHORIZATION','No file-read authorization for this turn; ask for materials or explicit read scope');
-  const {operation,paths,query='',offset=0,limit=100}=args;
-  if(!['list','read','search'].includes(operation)||!Array.isArray(paths)||!paths.length||paths.some(p=>!validProjectPath(p,true)||!inScope(p,grant.paths))||!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>200||typeof query!=='string'||query.length>500)throw problem('READ_SCOPE','Invalid or unauthorized read request');
-  // Read fixed Git objects only. No checkout, untracked file or shell command is consulted.
-  let versioning;
-  try {
-    let files;
-    if(grant.projectId){
-      versioning=await createVersioning({home:task.home,project:grant.canonicalRepo,readOnly:true});
-      const tree=await versioning.read({version:grant.version,path:'.',kind:'tree'});
-      if(tree.version!==grant.version||!Array.isArray(tree.entries))throw problem('READ_VERSION','Cannot verify formal version');
-      files=tree.entries.map(f=>({path:f.path,mode:f.mode,oid:f.object}));
-    }else{
-      const tree=await legacyGit(grant.canonicalRepo,['ls-tree','-rz',grant.version]);
-      files=tree.split('\0').filter(Boolean).map(line=>{const [meta,path]=line.split('\t'),[mode,,oid]=meta.split(' ');return {mode,path,oid};});
-    }
-    files=files.filter(f=>f.path&&paths.some(p=>inScope(f.path,[p]))&&inScope(f.path,grant.paths)&&['100644','100755'].includes(f.mode));
-    let items=[];
-    if(operation==='list')items=files.map(f=>f.path);
-    else for(const file of files){
-      if(operation==='read'&&!paths.includes(file.path))continue;
-      let text;
-      if(versioning){const value=await versioning.read({version:grant.version,path:file.path});text=Buffer.from(value.contentBase64,'base64').toString('utf8');}
-      else{const size=Number(await legacyGit(grant.canonicalRepo,['cat-file','-s',file.oid]));if(size>512*1024)throw problem('READ_LIMIT','File exceeds bounded text read: '+file.path);text=await legacyGit(grant.canonicalRepo,['cat-file','blob',file.oid]);}
-      if(Buffer.byteLength(text)>512*1024)throw problem('READ_LIMIT','File exceeds bounded text read');
-      for(const [i,line]of text.split('\n').entries())if(operation==='read'||line.includes(query))items.push({path:file.path,line:i+1,text:line.slice(0,2000)});
-      if(items.length>offset+limit)break;
-    }
-  return {version:grant.version,uncommitted:false,items:items.slice(offset,offset+limit),more:items.length>offset+limit};
-  }finally{await versioning?.close();}
-}
 export function loadPreparedContinuation({home,manager,sourceTaskId}) {
   if(!conversationTaskIds(manager).includes(sourceTaskId))
     throw problem('PROJECT_SOURCE','原工作任务不在当前对话分支。');
@@ -178,7 +147,7 @@ export function loadPreparedContinuation({home,manager,sourceTaskId}) {
   return {source,materials:loadInputMaterials(home,source.materials??[]),spentCalls,remainingBudget};
 }
 export function bindUnifiedActions(task,{workspace,onWork,beforeWork}) {
-  task.unifiedReadContext=args=>readContext(task,args);
+  task.unifiedReadContext=args=>readProjectContext(task,args);
   let admission=Promise.resolve();
   const admit=async(kind,toolCallId,args)=>{
     if(task.record.phase!=='draft'||task.record.status!=='running')throw problem('INTENT_STAGE','Only the initial main stage may choose a route');
@@ -278,13 +247,39 @@ async function prepareWork(task,intent) {
   if(needsReview&&!task.record.constraints.allowedSubtasks.includes("review"))throw problem("REVIEW_REQUIRED","Plan review requirement conflicts with forbidden review delegation");
   validateChatPlan(plan);
   task.record.proposal={action:args.action,plan,constraints:task.record.constraints,canonicalRepo:repo,...(scope?{executionScope:scope}:{}),version:state?.version??await legacyGit(repo,['rev-parse','--verify','HEAD^{commit}']),projectId:state?.id??null,expectedRevision:state?.revision??null,toolCallId:intent.toolCallId,workspaceId:task.record.workspace.id??null,sessionId:task.record.sessionId,budget:task.record.budget,contextDigest:digest(task.record.handoffContext),packageDigest:digest(task.record.packageSnapshot),budgetAtProposal:{spentCalls:task.record.rootRequests.filter(r=>!r.notSent).length,remainingCalls:task.record.budget.maxCalls===null?null:Math.max(0,task.record.budget.maxCalls-task.record.rootRequests.filter(r=>!r.notSent).length)},source:{taskId:task.record.id,callId:intent.callId}};
+  if(args.action==="resume"&&completedDelivery(state))task.record.proposal.reuseCompletedDelivery=true;
   task.record.proposalRef={sourceTaskId:task.record.id,toolCallId:intent.toolCallId,planDigest:digest(task.record.proposal),workspace:task.record.workspace.id??null,revision:state?.revision??null};
-  if(args.action==='resume' && state.status!=='paused' && !authorityRoot?.cancelRequestedAt && authorityRoot?.sessionId===task.record.sessionId && authorityRoot.executionBinding?.projectId===state.id && authorityRoot.executionBinding.canonicalRepo===repo && state.entryPolicy==='unified'){
+  if(args.action==='resume' && state.status!=='paused' && !authorityRoot?.cancelRequestedAt && authorityRoot?.sessionId===task.record.sessionId && authorityRoot.executionBinding?.projectId===state.id && authorityRoot.executionBinding.canonicalRepo===repo && state.entryPolicy==='unified' && !workConfirmationBlocker(task.record)){
     const authorizationSource={kind:'existing_project',taskId:authorityRoot.id,projectId:state.id,revision:state.revision};
     const reservation={commandId:randomUUID(),proposalRef:task.record.proposalRef,budgetSource:{sourceTaskId:task.record.id,consumed:task.record.proposal.budgetAtProposal.spentCalls,remaining:task.record.budget},authorizationSource};
     delete task.record.proposalRef;task.save();return executeConfirmed(task,task.record,reservation);
   }
   task.save();task.finish('blocked','具体工作提议已保存，请核对计划后确认执行。');return task;
+}
+
+function completedDelivery(state) {
+  return state?.status==="completed"&&!!state.delivery&&
+    state.delivery.version===state.version&&state.delivery.revision===state.revision;
+}
+
+export function assertConfirmedProjectState(proposal,{repo,version,state,expectedRevision}) {
+  if(proposal.canonicalRepo!==repo||proposal.version!==version||(state?.revision??null)!==(expectedRevision??null))
+    throw problem("PROPOSAL_STALE","Confirmed project version/revision changed before dispatch");
+  if(proposal.reuseCompletedDelivery&&!completedDelivery(state))
+    throw problem("PROPOSAL_STALE","已交付状态已变化，无法只沿用已有成果。请重新核对。");
+}
+
+export function workConfirmationBlocker(source) {
+  const {proposal,frozenConfig}=source;
+  if(!proposal)return null;
+  const network=guiNetworkBlocker(source.input??"",proposal.constraints);
+  if(network)return network;
+  if(proposal.reuseCompletedDelivery)return null;
+  if(proposal.budgetAtProposal?.remainingCalls===0)
+    return "本轮模型请求额度已用完，请调整额度后重新发起计划。";
+  if(frozenConfig&&!frozenConfig.work?.execution)
+    return "提议生成时未配置项目执行环境。请完成设置后重新发起计划。";
+  return null;
 }
 
 export function checkedProposal(home,source,ref,{sessionId,workspaceId}) {
@@ -298,6 +293,8 @@ export function checkedProposal(home,source,ref,{sessionId,workspaceId}) {
 export async function reserveConfirmation({home,source,proposalRef,sessionId,workspaceId,submissionId,save}) {
   const proposal=checkedProposal(home,source,proposalRef,{sessionId,workspaceId});
   if(source.confirmationIntent)return source.confirmationIntent;
+  const blocker=workConfirmationBlocker(source);
+  if(blocker)throw problem('PROPOSAL_BLOCKED',blocker);
   const {repo,state}=await projectChatState(home,proposal.canonicalRepo);
   if(proposal.executionScope){
     selectedExecutionScope(proposal.executionScope.path,repo,proposal.executionScope.relativePath);
@@ -305,9 +302,10 @@ export async function reserveConfirmation({home,source,proposalRef,sessionId,wor
     if(state)checkPlanScope({...state,readScope:state.readScope??['.']},proposal.executionScope);
   }
   const currentVersion=state?.version??await legacyGit(repo,['rev-parse','--verify','HEAD^{commit}']);
-  if(repo!==proposal.canonicalRepo||currentVersion!==proposal.version||(state?.revision??null)!==proposal.expectedRevision)throw problem('PROPOSAL_STALE','Project revision or version changed; inspect the concrete difference before confirming');
+  assertConfirmedProjectState(proposal,{repo,version:currentVersion,state,expectedRevision:proposal.expectedRevision});
   const consumed=(source.rootRequests??[]).filter(r=>!r.notSent).length;
   const remaining={...source.budget,maxCalls:source.budget.maxCalls===null?null:Math.max(0,source.budget.maxCalls-consumed)};
+  if(remaining.maxCalls===0&&!proposal.reuseCompletedDelivery)throw problem('PROPOSAL_BLOCKED','本轮模型请求额度已用完，请调整额度后重新发起计划。');
   const reservation={taskId:randomUUID(),commandId:randomUUID(),submissionId,proposalRef:structuredClone(proposalRef),budgetSource:{sourceTaskId:source.id,consumed,budget:source.budget,remaining},status:'reserved'};
   source.confirmationIntent=reservation;save();return reservation;
 }

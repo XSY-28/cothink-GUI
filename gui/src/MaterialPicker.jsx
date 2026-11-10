@@ -82,8 +82,8 @@ export function MaterialPicker({project,commands,sessionId,capabilities,onClose,
       if(source==="current"){
         await commands.importProjectMaterials({source,paths:selected.map(({path,sha256,sourceToken})=>({path,sha256,sourceToken}))});
       }else{
-        if(!list?.version||selected.some(item=>item.path.includes(",")||item.version!==list.version))throw Error("选定范围无法按已保存版本提交。");
-        await commands.setTurnOptions(sessionId,{readAllowed:true,readPaths:selected.map(item=>item.path).join(","),readVersion:list.version});
+        if(!list?.version||selected.some(item=>item.version!==list.version))throw Error("选定范围无法按已保存版本提交。");
+        await commands.setTurnOptions(sessionId,{readAllowed:true,readPaths:selected.map(item=>item.path),readVersion:list.version});
       }
       if(id===request.current)onSelected();
     }catch(e){if(id===request.current){
@@ -105,7 +105,7 @@ export function MaterialPicker({project,commands,sessionId,capabilities,onClose,
         <button type="button" aria-pressed={source==="current"} disabled={busy||unknown} onClick={()=>switchSource("current")}>当前磁盘副本</button>
         <button type="button" aria-pressed={source==="saved"} disabled={busy||unknown} onClick={()=>switchSource("saved")}>读取已保存版本</button>
       </div>
-      <p className="field-note">{source==="current"?"逐项预览后导入当前文件，包括尚未提交的内容。副本不授予目录访问权限。":"只允许读取所选已保存版本和范围，不包括未提交内容，也不授予写入或执行权限。"}</p>
+      <p className="field-note">{source==="current"?"逐项预览后导入当前文件，包括尚未提交的内容。副本不授予目录访问权限。":"只读取所选已保存版本的文本。图片可从当前磁盘导入副本。此选项不授予写入或执行权限。"}</p>
       <div className="form-actions material-source-switch">
         {path&&list&&list.path!==list.scope&&<button type="button" disabled={busy} onClick={()=>setPath(parentPath(path))}>上一级</button>}
         <span className="workspace-directory">{list?.path&&list.path!==list.scope?list.path:"项目根目录"}</span>

@@ -5,6 +5,30 @@ export function copyText(text) {
     : navigator.clipboard.writeText(text);
 }
 
+export async function saveWorkspaceChange(api, action, args, readWorkspaces) {
+  try {
+    return await api.action(action,args);
+  } catch (error) {
+    const {workspaceId,operationId,expectedRevision}=args;
+    if (error.unknown && action==="workspace.rebind") {
+      const operation={workspaceId,operationId,expectedRevision};
+      const receipt=await api.action("workspace.rebind.query",operation).catch(()=>null);
+      if (receipt?.status==="confirmed") return receipt.workspace;
+      throw Object.assign(Error("原目录变更尚未确认。可查询原操作，当前目录以最新记录为准。"),{unknown:true,operation});
+    }
+    if (error.unknown || error.code==="WORKSPACE_CONFLICT") {
+      const workspaces=await readWorkspaces().catch(()=>[]);
+      const found=workspaces.find(row=>row.id===workspaceId);
+      if (error.unknown && found && (action==="workspace.create" ||
+          action==="workspace.update" && Object.entries(args.change).every(([key,value])=>found[key]===value))) return found;
+      if (error.unknown) throw Object.assign(Error("Team 操作结果尚未确认。请查询原记录。"),{
+        unknown:true, operation:action==="workspace.create"?{workspaceId}:undefined,
+      });
+    }
+    throw error;
+  }
+}
+
 // Transport owns credentials and reconnects only reads. Mutations are sent once.
 export function consumeToken(win = window) {
   const token = new URLSearchParams(win.location.hash.slice(1)).get("token");
@@ -103,10 +127,10 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
         const intent=source?.confirmationIntent;
         return intent ? session.submissions.find(t=>t.taskId===intent.taskId)??null : null;
       }
-      return (
-        (session.submissions ?? session.turns).find((t) => t.submissionId === pending.submissionId) ||
-        null
-      );
+      const receipts = session.submissions ?? session.turns;
+      const editId = !pending.kind && pending.editorSnapshot?.editId;
+      return receipts.find(t => t.submissionId === pending.submissionId) ??
+        (editId ? receipts.find(t => t.editorEditId === editId) : undefined) ?? null;
     },
     subscribe(invalidate, status) {
       const abort = new AbortController();

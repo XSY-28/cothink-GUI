@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, rmSync, existsSync} from 'node:fs';
+import {mkdtempSync, rmSync, existsSync, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fork} from 'node:child_process';
-import {once} from 'node:events';
+import {EventEmitter, once} from 'node:events';
+import {runInNewContext} from 'node:vm';
+import {createRequire} from 'node:module';
 import {randomUUID} from 'node:crypto';
 import {createGuiController} from '../src/gui-controller.js';
 import {startGuiServer} from '../src/gui-server.js';
@@ -109,4 +111,136 @@ test('IPC parent loss cancels an in-flight real HTTP fixture request and persist
  const saved=readTask(model.home,submitted.taskId);assert.equal(saved.id,submitted.taskId);
  assert.ok(saved.cancelRequestedAt);assert.ok(saved.cancelSettledAt);assert.notEqual(saved.status,'completed');
  assert.equal(model.calls.length,1);await assert.rejects(fetch(ready.origin));
+});
+
+const desktopMain = readFileSync(new URL('../desktop/main.cjs', import.meta.url), 'utf8');
+const buildFixture = {backendVersion:'0.8.14-desktop.3', protocolVersion:1, buildId:'a'.repeat(64)};
+const nativeRequire = createRequire(import.meta.url);
+
+// Exercise the actual main-process event handlers with a controlled clock and
+// host replies. This also verifies filesystem preferences without starting App.
+async function desktopShell(profile, port = 32123) {
+ const state={host:[], renderer:[], dialogs:[], timers:new Set(), quit:0, handlers:new Map()};
+ const origin='http://127.0.0.1:'+port;
+ const app=new EventEmitter();
+ app.setName=()=>{};
+ app.getPath=key=>{assert.equal(key,'userData');return profile;};
+ app.requestSingleInstanceLock=()=>true;
+ app.whenReady=()=>Promise.resolve();
+ app.quit=()=>{
+  let prevented=false;
+  app.emit('before-quit',{preventDefault(){prevented=true;}});
+  if(!prevented)state.quit++;
+ };
+ const child=new EventEmitter();
+ child.connected=true;
+ child.send=message=>state.host.push(message);
+ const ipcMain=new EventEmitter();
+ ipcMain.handle=(name, fn)=>state.handlers.set(name,fn);
+ class BrowserWindow extends EventEmitter {
+  constructor(){
+   super();
+   const wc=this.webContents=new EventEmitter();
+   state.wc=wc;
+   wc.session={setPermissionRequestHandler(){},setPermissionCheckHandler(){}};
+   wc.mainFrame={url:origin+'/'};
+   wc.setWindowOpenHandler=()=>{};
+   wc.send=(type,message)=>state.renderer.push({type,...message});
+  }
+  loadURL(){return Promise.resolve();}
+  isDestroyed(){return false;}
+  show(){this.emit('show');}
+  restore(){}
+  focus(){}
+ }
+ const electron={app,BrowserWindow,ipcMain,shell:{},clipboard:{},
+  Menu:{setApplicationMenu(menu){state.menu=menu;},buildFromTemplate:menu=>menu},
+  dialog:{showMessageBox(...args){state.dialogs.push(args.at(-1));return Promise.resolve({response:0});}},
+ };
+ const nonce=randomUUID();
+ let firstUUID=true;
+ runInNewContext(desktopMain,{
+  require(name){
+   if(name==='electron')return electron;
+   if(name==='node:child_process')return {spawn:()=>child};
+   if(name==='node:crypto')return {randomUUID:()=>{if(!firstUUID)return randomUUID();firstUUID=false;return nonce;}};
+   if(name==='node:fs')return {...nativeRequire(name),readFileSync(path,...args){
+    return String(path).endsWith('/build.json') ? JSON.stringify(buildFixture) : readFileSync(path,...args);
+   }};
+   return nativeRequire(name);
+  },
+  __dirname:join(profile,'desktop-fixture'),
+  process:{env:{},platform:'darwin',resourcesPath:profile},URL,
+  setTimeout(callback,delay){const timer={callback,delay};state.timers.add(timer);return timer;},
+  clearTimeout(timer){state.timers.delete(timer);},
+ });
+ await new Promise(resolve=>setImmediate(resolve));
+ return {app,child,ipcMain,state,nonce,ready(){
+  child.emit('message',{type:'ready',nonce,origin:origin+'/',token:'x'.repeat(43),...buildFixture});
+  state.wc.emit('did-finish-load');
+ }, invoke(name,value,frame=state.wc.mainFrame){
+  const handler=state.handlers.get(name);
+  assert.equal(typeof handler,'function','missing desktop IPC '+name);
+  return handler({sender:state.wc,senderFrame:frame},value);
+ }};
+}
+
+test('desktop theme survives a new main process and port, with main-frame-only writes', async t=>{
+ const profile=home(t);
+ const first=await desktopShell(profile,32123);
+ first.ready();
+ assert.equal(await first.invoke('cothink:theme:read'),null);
+ await first.invoke('cothink:theme:write','dark');
+ assert.equal(await first.invoke('cothink:theme:read'),'dark');
+ const next=await desktopShell(profile,32124);
+ next.ready();
+ assert.equal(await next.invoke('cothink:theme:read'),'dark');
+ await assert.rejects(async()=>next.invoke('cothink:theme:write','light',{url:'http://127.0.0.1:32124/'}));
+ await assert.rejects(async()=>next.invoke('cothink:theme:write','unknown'));
+ assert.equal(await next.invoke('cothink:theme:read'),'dark');
+});
+
+test('desktop shows one accurate startup failure dialog and exposes the exact build in About',async t=>{
+ const f=await desktopShell(home(t));
+ f.child.emit('message',{type:'startupError',nonce:f.nonce,code:'HOST_START_FAILED'});
+ f.child.emit('exit',1,null);
+ assert.equal(f.state.dialogs.length,1);
+ assert.match(f.state.dialogs[0].message,/启动失败/);
+ assert.doesNotMatch(f.state.dialogs[0].message,/已加载内容/);
+ const about=f.state.menu[0].submenu.find(item=>item.label==='关于 CoThink');
+ await about.click();
+ assert.ok(f.state.dialogs.at(-1).detail.includes(buildFixture.buildId));
+});
+
+test('desktop final quit timeout allows rechecking the same stop without unlocking the saved editor',async t=>{
+ const f=await desktopShell(home(t));
+ f.ready();
+ f.app.quit();
+ const drain=f.state.host[0];
+ f.child.emit('message',{type:'shutdownState',requestId:drain.requestId,settled:true});
+ const flush=f.state.renderer.at(-1);
+ assert.equal(flush.phase,'prepare');
+ f.ipcMain.emit('cothink:close-ack',{sender:f.state.wc,senderFrame:f.state.wc.mainFrame},
+  {requestId:flush.requestId,saved:true});
+ const final=f.state.host.at(-1);
+ assert.equal(final.finalize,true);
+ f.child.emit('message',{type:'shutdownState',requestId:final.requestId,settled:false,reason:'正在停止所属任务并保存。'});
+ f.app.quit();
+ assert.equal(f.state.host.length,2,'another Quit waits while the acknowledgement timer is active');
+ const timer=[...f.state.timers][0];
+ assert.ok(timer?.delay>0,'final acknowledgement needs its own bounded wait');
+ f.state.timers.delete(timer);
+ timer.callback();
+ assert.match(f.state.dialogs.at(-1).message,/尚未确认/);
+ assert.equal(f.state.quit,0);
+ f.app.emit('activate');
+ f.app.emit('second-instance');
+ assert.ok(!f.state.renderer.some(message=>message.phase==='resume'));
+ f.app.quit();
+ assert.equal(f.state.host.length,3);
+ assert.equal(f.state.host.at(-1).requestId,final.requestId);
+ assert.equal(f.state.host.at(-1).finalize,true);
+ f.child.emit('message',{type:'stopped',requestId:final.requestId,settled:true});
+ assert.equal(f.state.timers.size,0);
+ assert.equal(f.state.quit,1);
 });

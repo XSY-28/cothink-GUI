@@ -35,6 +35,7 @@ export const statusLabel = (value) =>
     cancelled: "已停止",
     cancelling: "正在停止",
     stop_unknown: "停止未确认",
+    checking_stop: "正在核对停止",
     canceled: "已停止",
     outcome_unknown: "结果未知",
     not_called: "尚未调用",
@@ -84,20 +85,79 @@ export function checkLabel(check) {
   if (check.verification !== "passed") return "未验证（空检查策略）";
   return check.reusedFrom ? "通过（复用既有检查）" : "通过";
 }
+export function readGuiStorage(key, fallback = null) {
+  try { return JSON.parse(globalThis.sessionStorage.getItem(key) ?? "null") ?? fallback; }
+  catch { return fallback; }
+}
+export function writeGuiStorage(key, value) {
+  try {
+    if (value == null) globalThis.sessionStorage.removeItem(key);
+    else globalThis.sessionStorage.setItem(key, JSON.stringify(value));
+  } catch { /* A browser buffer is best-effort; the host owns saved state. */ }
+}
+
 // Local unsent text must survive background snapshots and a late submit response.
-export function createDraftBook() {
+export function createDraftBook(buffer = false) {
   const drafts = new Map();
   const empty = () => ({editorVersion:2,text:"",workRequest:null,selectionId:null,editId:null,materials:[]});
+  const key = id => "cothink.draft." + id;
+  const dirty = draft => !!draft?.editId && draft.editId !== draft.savedEditId;
+  function put(id, draft) {
+    drafts.set(id, draft);
+    if (buffer) writeGuiStorage(key(id), dirty(draft) ? draft : null);
+  }
+  function snapshotFromHost(id, editor, draftRevision, branchAnchor) {
+    return {sessionId:id,...empty(),...(typeof editor === "string" ? {text:editor} : editor),revision:0,
+      expectedDraftRevision:draftRevision,branchAnchor,savedEditId:typeof editor === "object" ? editor?.editId ?? null : null};
+  }
   return {
     load(id, editor, draftRevision = null, branchAnchor = null) {
-      if (!drafts.has(id)) drafts.set(id,{sessionId:id,...empty(),
-        ...(typeof editor === "string" ? {text:editor} : editor),revision:0,
-        expectedDraftRevision:draftRevision,branchAnchor,savedEditId:typeof editor === "object" ? editor?.editId ?? null : null});
+      if (!drafts.has(id)) {
+        const host = snapshotFromHost(id,editor,draftRevision,branchAnchor);
+        const local = buffer ? readGuiStorage(key(id)) : null;
+        const recover = local?.sessionId===id && typeof local.editId==="string" && dirty(local) &&
+          typeof local.text==="string" && Array.isArray(local.materials) &&
+          Number.isSafeInteger(local.revision) && local.editId!==host.savedEditId;
+        put(id,recover ? local : host);
+      }
       return drafts.get(id).text;
+    },
+    observe(id, saved, observed) {
+      const now=drafts.get(id);
+      if (!now) {
+        this.load(id,saved.editor ?? saved.draft,saved.draftRevision,saved.branchAnchor);
+        return true;
+      }
+      // A read started before a newer edit or its write acknowledgement.
+      if (now.editId !== observed.editId || now.savedEditId !== observed.savedEditId ||
+          now.expectedDraftRevision !== observed.expectedDraftRevision || now.branchAnchor !== observed.branchAnchor) return false;
+      if (dirty(now)) {
+        return saved.editor?.editId === now.editId && this.confirmed(now,saved);
+      }
+      if (saved.editor?.editId === now.savedEditId && saved.draftRevision === now.expectedDraftRevision &&
+          saved.branchAnchor === now.branchAnchor) return false;
+      this.restore(id,saved);
+      return true;
+    },
+    reconcile(id, saved, observed, recoverReceipt) {
+      if (saved.selectionError || (!saved.editor && typeof saved.draft !== "string")) {
+        this.load(id,"");
+        return null;
+      }
+      const changed = this.observe(id,saved,observed);
+      const editor = drafts.get(id);
+      const accepted = recoverReceipt && editor.editId && editor.editId === editor.savedEditId &&
+        editor.editId === saved.editor?.editId &&
+        saved.submissions?.some(receipt => receipt.editorEditId === editor.editId);
+      if (accepted) this.accepted(editor);
+      if (!changed && !accepted) return null;
+      const current = drafts.get(id);
+      const save = !saved.readOnly && dirty(current);
+      return {accepted, save, conflict:save && current.expectedDraftRevision !== (saved.draftRevision ?? null)};
     },
     edit(id, change) {
       const prior=drafts.get(id) ?? {sessionId:id,...empty(),revision:0,expectedDraftRevision:null,branchAnchor:null};
-      drafts.set(id,{...prior,...(typeof change === "string" ? {text:change} : change),
+      put(id,{...prior,...(typeof change === "string" ? {text:change} : change),
         editId:crypto.randomUUID(),revision:prior.revision+1});
     },
     snapshot(id) { return structuredClone(drafts.get(id) ?? {}); },
@@ -105,15 +165,17 @@ export function createDraftBook() {
     confirmed(sent, saved) {
       const now=drafts.get(sent.sessionId);
       if (!now || saved.editor?.editId !== sent.editId) return false;
-      drafts.set(sent.sessionId,{...now,expectedDraftRevision:saved.draftRevision,branchAnchor:saved.branchAnchor,savedEditId:sent.editId});
+      put(sent.sessionId,{...now,expectedDraftRevision:saved.draftRevision,branchAnchor:saved.branchAnchor,savedEditId:sent.editId});
       return true;
     },
     rebase(id,saved) {
       const now=drafts.get(id);
-      if (now) drafts.set(id,{...now,expectedDraftRevision:saved.draftRevision,branchAnchor:saved.branchAnchor});
+      if (now) put(id,{...now,expectedDraftRevision:saved.draftRevision,branchAnchor:saved.branchAnchor});
     },
     restore(id,saved) {
-      drafts.delete(id); return this.load(id,saved.editor ?? saved.draft,saved.draftRevision,saved.branchAnchor);
+      const host = snapshotFromHost(id,saved.editor ?? saved.draft,saved.draftRevision ?? null,saved.branchAnchor ?? null);
+      put(id,host);
+      return host.text;
     },
     accepted(sent) {
       const now=drafts.get(sent.sessionId);
@@ -124,7 +186,7 @@ export function createDraftBook() {
       const submitted=new Set((sent.materials??[]).map(ref=>`${ref.id}:${ref.sha256}`));
       const materials=(now.materials??[]).filter(ref=>!submitted.has(`${ref.id}:${ref.sha256}`));
       if (same || consume || consumeOptions || materials.length!==(now.materials??[]).length)
-        drafts.set(sent.sessionId,{...now,materials,...(same ? {text:""} : {}),
+        put(sent.sessionId,{...now,materials,...(same ? {text:""} : {}),
         ...(consume ? {workRequest:null,selectionId:null} : {}),...(consumeOptions?{turnOptions:null}:{}),editId:crypto.randomUUID(),revision:now.revision+1});
     },
   };

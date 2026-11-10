@@ -28,6 +28,50 @@ async function prepared(t){
 }
 const ref=(r,path)=>({taskId:r.id,version:r.work.version,path});
 
+test("session search keeps a real file match when conversation text matches too", async t=>{
+  const f = await prepared(t);
+  const filename = "accepted-notes.txt", secondFile = "accepted-table.txt";
+  const published = await f.publish({[filename]:"accepted file body\n",[secondFile]:"accepted table body\n"});
+  const {SessionManager} = await load("node_modules/@earendil-works/pi-coding-agent/dist/index.js");
+  const {createTask} = await load("src/task.js");
+  function seedSession(title,input,work) {
+    const manager = SessionManager.create(f.project,join(f.home,"pi/sessions/main"));
+    const id = manager.getSessionId();
+    manager.appendCustomEntry("cothink-title",{title});
+    const task = createTask({home:f.home,input,sessionId:id,models:{main:{provider:"fixture",modelId:"main"},secondary:[]}});
+    if(work) task.record.work=work;
+    task.finish("completed");
+    manager.appendCustomEntry("cothink-task",{taskId:task.record.id});
+    manager.appendMessage({role:"user",content:input,timestamp:Date.now()});
+    return {id,taskId:task.record.id};
+  }
+  const delivery = seedSession(filename+" 交付",`请交付 ${filename} 与 ${secondFile}`,published.work);
+  const chat = seedSession("文件名讨论","请说明 "+filename+" 的命名。");
+  const host = await startGuiServer({home:f.home,cwd:f.project,suggestedProject:null,open:false});
+  t.after(()=>host.close());
+  async function page(queryText, cursor) {
+    const query = new URLSearchParams({query:queryText,limit:"1"});
+    if(cursor) query.set("cursor",cursor);
+    const response = await fetch(host.origin+"/api/sessions?"+query,{headers:{Authorization:"Bearer "+host.token}});
+    assert.equal(response.status,200);
+    return response.json();
+  }
+  const first = await page(filename);
+  assert.ok(first.nextCursor,"a second matching conversation is paginated");
+  const second = await page(filename,first.nextCursor);
+  assert.equal(second.nextCursor,null);
+  const rows = [...first.items,...second.items];
+  assert.deepEqual(new Set(rows.map(row=>row.id)),new Set([delivery.id,chat.id]));
+  const match = rows.find(row=>row.id===delivery.id).match;
+  assert.equal(match.field,"file");
+  assert.deepEqual(match.fileRef,{taskId:delivery.taskId,version:published.work.version,path:filename});
+  assert.equal(rows.find(row=>row.id===chat.id).match.field,"input");
+  const inputMatch = await page(secondFile);
+  assert.equal(inputMatch.nextCursor,null);
+  assert.equal(inputMatch.items[0].match.field,"file","a message-only match cannot hide the accepted file either");
+  assert.equal(inputMatch.items[0].match.fileRef.path,secondFile);
+});
+
 test('fixed task files preserve original bytes after newer versions, with honest deleted/binary/quoted diffs',async t=>{
   const f=await prepared(t), name='中文 空格/a "quote".txt';
   const old=await f.publish({'a.txt':'first\n','b.txt':null,[name]:'line\ndiff --git trick\n','binary.bin':Buffer.from([0,255,1,2])});

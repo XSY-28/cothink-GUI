@@ -1,5 +1,5 @@
 import {validateWorkRequest} from "./visual-preview.js";
-import {assertRootOwner, digest, resolveHandoffContext} from "./project-turn.js";
+import {assertRootOwner, assertConfirmedProjectState, digest, resolveHandoffContext} from "./project-turn.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -1556,7 +1556,7 @@ export async function runProjectCommand({
     if(unified){
       const observed=await formal(home,loc.repo),proposal=unified.rootOwner.rootTask.record.proposal;
       const current=existsSync(loc.file)?stored(loc):null;
-      if(proposal.canonicalRepo!==loc.repo||proposal.version!==observed.version||(current?.revision??null)!==(expectedRevision??null))throw Error("Confirmed project version/revision changed before dispatch");
+      assertConfirmedProjectState(proposal,{repo:loc.repo,version:observed.version,state:current,expectedRevision});
       signal.throwIfAborted();
     }
     const state = action === "start" ? initialState(plan, loc) : stored(loc);

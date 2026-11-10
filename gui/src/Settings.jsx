@@ -779,7 +779,7 @@ export function Settings({
           {boot.active && <button type="button" onClick={()=>commands.openSession(boot.active.sessionId,boot.active.status === "preparing" ? undefined : boot.active.taskId)}>返回运行任务</button>}
           {tab === "preferences" && <>
             <label>界面主题<select value={theme} onChange={e=>onTheme?.(e.target.value)}><option value="light">浅色</option><option value="dark">深色</option></select></label>
-            <p className="field-note">主题仅保存在此浏览器。清除偏好会保留历史、Team 和成果。</p>
+            <p className="field-note">主题保存在{boot.installation==="desktop"?"桌面":"网页"}偏好中。</p>
             <ReleaseNotes notes={boot.releaseNotes} version={boot.version} show={showNotes || initialTab === "notes"} busy={busy} onAcknowledge={()=>act(commands.acknowledgeNotes,undefined,"当前安装版本的更新记录已标为看过。")}/>
             <UpdateSettings state={boot.updates} busy={busy} onCheck={()=>act(commands.checkUpdates,undefined,"检查结束，结果见下方。")} onConfigure={args=>act(commands.configureUpdates,args)}/>
           </>}

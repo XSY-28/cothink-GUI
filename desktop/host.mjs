@@ -12,7 +12,7 @@ function startupError(code) {send({type:'startupError',nonce,code});process.exit
 if (!process.send || !/^[\da-f-]{36}$/i.test(nonce ?? '') || process.env.NODE_OPTIONS || process.env.NODE_PATH || process.execArgv.length) {
   startupError('UNTRUSTED_STARTUP');
 } else {
-  let host, orphaned=false, shutdown, shutdownId;
+  let host, orphaned=false, shutdown, shutdownId, finalStop, stopped=false;
   const buildPath=join(here,'build.json');
   const packaged=existsSync(buildPath);
   const backend=packaged ? join(here,'backend') : resolve(here,'..');
@@ -21,16 +21,22 @@ if (!process.send || !/^[\da-f-]{36}$/i.test(nonce ?? '') || process.env.NODE_OP
     backendVersion:JSON.parse(readFileSync(join(backend,'package.json'))).version,
   };
   async function stop(requestId,finalize=true) {
-    if(shutdownId && requestId !== shutdownId) return;
+    if(stopped || (shutdownId && requestId !== shutdownId)) return;
     shutdownId=requestId;
     if(!host) {orphaned=true;return;}
     send({type:'shutdownState',requestId,settled:false,reason:'正在停止所属任务并保存。',taskRefs:host.shutdownState().taskRefs ?? []});
+    if(finalStop)return finalStop;
+    if(!finalize)return drain(requestId,false);
+    finalStop=drain(requestId,true).finally(()=>{finalStop=null;});
+    return finalStop;
+  }
+  async function drain(requestId,finalize) {
     shutdown ??= host.beginShutdown().finally(()=>{shutdown=null;});
     const state=await shutdown;
     if(!state.settled) {send({type:'shutdownState',requestId,...state});return;}
     if(!finalize) {send({type:'shutdownState',requestId,...state});return;}
     try {
-      await host.close();send({type:'stopped',requestId,settled:true});
+      await host.close();stopped=true;send({type:'stopped',requestId,settled:true});
       if(process.connected)process.disconnect();
       process.exitCode=0;
     } catch {

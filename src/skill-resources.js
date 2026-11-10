@@ -43,43 +43,57 @@ export function freezeTaskSkillResources({task,skills=task.frozenSkills??task.an
   }
   if(existsSync(resourceRoot)&&readdirSync(resourceRoot).length)throw problem('SKILL_CHANGED','Unbound task resource bytes already exist; preserved without refreshing');
   privateDirectory(resourceRoot);
-  const records=[];
-  for(const skill of skills){
-    if(!safeRelative(skill.name)||skill.name.includes('/'))throw problem('SKILL_PATH','Unsafe skill name');
-    const sourceDirectory=dirname(skill.path),root=join(resourceRoot,skill.name);privateDirectory(root);
-    const files={},modes={},unavailable=[],selected=new Set(['SKILL.md']),roots=new Set(['references','scripts','assets','templates']);
-    for(const m of skill.body.matchAll(/\]\(([^)\s]+)\)|`([^`\n\s]+)`/g)){
-      const candidate=(m[1]??m[2]).replace(/\/$/,'');if(candidate.includes(':')||candidate.startsWith('#'))continue;
-      if(!safeRelative(candidate)){unavailable.push({path:candidate,reason:'Reference escapes selected skill or uses an unsupported path'});continue;}
-      if(!existsSync(join(sourceDirectory,candidate))){unavailable.push({path:candidate,reason:'Referenced resource is missing'});continue;}roots.add(candidate);
-    }
-    function select(path){
-      if(!safeRelative(path))throw problem('SKILL_PATH','Unsafe selected resource path: '+path);
-      const stat=lstatSync(join(sourceDirectory,path));if(stat.isSymbolicLink())throw problem('SKILL_CHANGED','Selected resource is a symbolic link: '+path);
-      if(stat.isDirectory())for(const entry of readdirSync(join(sourceDirectory,path)).sort())select(path+'/'+entry);
-      else if(stat.isFile())selected.add(path);else throw problem('SKILL_CHANGED','Unsupported selected resource: '+path);
-    }
-    for(const path of roots)if(existsSync(join(sourceDirectory,path)))select(path);
-    // Resolve local JS/TS imports in selected scripts too, without treating Markdown as dependency analysis.
-    const pending=[...selected];
-    for(let i=0;i<pending.length;i++){
-      const path=pending[i],{bytes,mode}=stableRead(sourceDirectory,path==='SKILL.md'?basename(skill.path):path);
-      if(path==='SKILL.md'&&hash(bytes)!==skill.hash)throw problem('SKILL_CHANGED','Skill main changed before freeze: '+skill.name);
-      files[path]=hash(bytes);modes[path]=mode;
-      mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),bytes,{mode});chmodSync(join(root,path),mode);
-      if(/\.[cm]?[jt]sx?$/.test(path))for(const match of bytes.toString('utf8').matchAll(/(?:from\s*|import\s*\(|require\s*\(|import\s*)["'](\.[^"']+)["']/g)){
-        const target=resolve(sourceDirectory,dirname(path),match[1]);
-        if(!inside(sourceDirectory,target)){unavailable.push({path:match[1],reason:'Local import escapes selected skill'});continue;}
-        const found=[target,target+'.js',target+'.mjs',target+'.ts',join(target,'index.js')].find(p=>existsSync(p)&&lstatSync(p).isFile());
-        if(!found){unavailable.push({path:match[1],reason:'Local script import is missing'});continue;}
-        const rel=relative(sourceDirectory,found).replaceAll('\\','/');if(!selected.has(rel)){selected.add(rel);pending.push(rel);}
-      }
-    }
-    // Recheck original bytes after collection, so an edit cannot mix two versions.
-    for(const [path,digest]of Object.entries(files))if(hash(stableRead(sourceDirectory,path==='SKILL.md'?basename(skill.path):path).bytes)!==digest)throw problem('SKILL_CHANGED','Skill changed during resource freeze: '+skill.name+'/'+path);
-    records.push({name:skill.name,description:skill.description,version:skill.version??null,sourceKind:skill.sourceKind??'selected',sourceDigest:skill.sourceDigest??skill.hash,hash:skill.hash,disabledModelInvocation:!!skill.disabledModelInvocation,sourceDirectory,sourcePath:skill.path,root,path:join(root,'SKILL.md'),executionPath:'/resources/'+skill.name+'/SKILL.md',unavailable,files,modes});
-  }
+  const records=skills.map(skill=>checkedSkillResources(skill,resourceRoot));
   task.record.skillResources=records;task.skillResourceRoot=resourceRoot;task.save();return records;
+}
+
+// Use the same source validation for a settings preview and for a task freeze.
+export function validateSkillResources(skills) {
+  for (const skill of skills) checkedSkillResources(skill);
+}
+
+function checkedSkillResources(skill, resourceRoot) {
+  try { return collectSkillResources(skill,resourceRoot); }
+  catch(error) {
+    throw problem(error.code??'SKILL_CHANGED', `技能 ${skill.name} 的资源无法验证。${error.message}。请检查技能来源或在设置中移除。`);
+  }
+}
+
+function collectSkillResources(skill,resourceRoot){
+  if(!safeRelative(skill.name)||skill.name.includes('/'))throw problem('SKILL_PATH','Unsafe skill name');
+  const sourceDirectory=dirname(skill.path),root=resourceRoot&&join(resourceRoot,skill.name);
+  if(root)privateDirectory(root);
+  const files={},modes={},unavailable=[],selected=new Set(['SKILL.md']),roots=new Set(['references','scripts','assets','templates']);
+  for(const m of skill.body.matchAll(/\]\(([^)\s]+)\)|`([^`\n\s]+)`/g)){
+    const candidate=(m[1]??m[2]).replace(/\/$/,'');if(candidate.includes(':')||candidate.startsWith('#'))continue;
+    if(!safeRelative(candidate)){unavailable.push({path:candidate,reason:'Reference escapes selected skill or uses an unsupported path'});continue;}
+    if(!existsSync(join(sourceDirectory,candidate))){unavailable.push({path:candidate,reason:'Referenced resource is missing'});continue;}roots.add(candidate);
+  }
+  function select(path){
+    if(!safeRelative(path))throw problem('SKILL_PATH','Unsafe selected resource path: '+path);
+    const stat=lstatSync(join(sourceDirectory,path));if(stat.isSymbolicLink())throw problem('SKILL_CHANGED','Selected resource is a symbolic link: '+path);
+    if(stat.isDirectory())for(const entry of readdirSync(join(sourceDirectory,path)).sort())select(path+'/'+entry);
+    else if(stat.isFile())selected.add(path);else throw problem('SKILL_CHANGED','Unsupported selected resource: '+path);
+  }
+  for(const path of roots)if(existsSync(join(sourceDirectory,path)))select(path);
+  // Resolve local JS/TS imports in selected scripts too, without treating Markdown as dependency analysis.
+  const pending=[...selected];
+  for(let i=0;i<pending.length;i++){
+    const path=pending[i],{bytes,mode}=stableRead(sourceDirectory,path==='SKILL.md'?basename(skill.path):path);
+    if(path==='SKILL.md'&&hash(bytes)!==skill.hash)throw problem('SKILL_CHANGED','Skill main changed before freeze: '+skill.name);
+    files[path]=hash(bytes);modes[path]=mode;
+    if(root){mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),bytes,{mode});chmodSync(join(root,path),mode);}
+    if(/\.[cm]?[jt]sx?$/.test(path))for(const match of bytes.toString('utf8').matchAll(/(?:from\s*|import\s*\(|require\s*\(|import\s*)["'](\.[^"']+)["']/g)){
+      const target=resolve(sourceDirectory,dirname(path),match[1]);
+      if(!inside(sourceDirectory,target)){unavailable.push({path:match[1],reason:'Local import escapes selected skill'});continue;}
+      const found=[target,target+'.js',target+'.mjs',target+'.ts',join(target,'index.js')].find(p=>existsSync(p)&&lstatSync(p).isFile());
+      if(!found){unavailable.push({path:match[1],reason:'Local script import is missing'});continue;}
+      const rel=relative(sourceDirectory,found).replaceAll('\\','/');if(!selected.has(rel)){selected.add(rel);pending.push(rel);}
+    }
+  }
+  // Recheck original bytes after collection, so an edit cannot mix two versions.
+  for(const [path,digest]of Object.entries(files))if(hash(stableRead(sourceDirectory,path==='SKILL.md'?basename(skill.path):path).bytes)!==digest)throw problem('SKILL_CHANGED','Skill changed during resource freeze: '+skill.name+'/'+path);
+  if(root)return {name:skill.name,description:skill.description,version:skill.version??null,sourceKind:skill.sourceKind??'selected',sourceDigest:skill.sourceDigest??skill.hash,hash:skill.hash,disabledModelInvocation:!!skill.disabledModelInvocation,sourceDirectory,sourcePath:skill.path,root,path:join(root,'SKILL.md'),executionPath:'/resources/'+skill.name+'/SKILL.md',unavailable,files,modes};
 }
 export function taskSkillDirectory(task){return (getTaskSkillResources(task)).map(({name,description,version,sourceKind,hash,disabledModelInvocation,unavailable})=>({name,description,version:version??null,sourceKind:sourceKind??'selected',hash,disabledModelInvocation,path:'skill:'+name+'/SKILL.md',executionPath:'/resources/'+name+'/SKILL.md',unavailable:unavailable?.map(x=>({reason:x.reason})),resourceMode:'on-demand'}));}
 /** Narrow model-facing reader; arbitrary source aliases remain internal to managed read. */

@@ -209,6 +209,7 @@ export async function runTurn({
   };
   signal?.addEventListener("abort", cancel, { once: true });
   if (signal?.aborted) await task.cancel();
+  let priorToolNames;
   try {
     task.frozenSkills = answerSkills;
     if(project || unified){freezeTaskSkillResources({task,skills:answerSkills});task.answerSkills=taskSkillDirectory(task);}
@@ -249,6 +250,10 @@ export async function runTurn({
       const userMessage={role:"user",content:[{type:"text",text:input}],timestamp:Date.now()};
       manager.appendMessage(userMessage);rt.session.agent.state.messages=[...rt.session.agent.state.messages,userMessage];
     } else {
+      if (unified && (!workspace?.project || constraints.readOnly)) {
+        priorToolNames = rt.session.getActiveToolNames();
+        rt.setToolNames(priorToolNames.filter(name => name !== "start_work"));
+      }
       const draftStage=task.beginPhase("draft","main",frozen.main);rt.bindTask(task,draftStage);draft=await rt.prompt(input,{inputMaterials:currentMaterials});
     }
     if(unified&&task.record.projectPreparationBlocked){
@@ -406,6 +411,9 @@ export async function runTurn({
     rt.hostContext?.(undefined);
     signal?.removeEventListener("abort", cancel);
     if (own) await rt.dispose();
-    else rt.unbindTask();
+    else {
+      rt.unbindTask();
+      if(priorToolNames)rt.setToolNames(priorToolNames);
+    }
   }
 }

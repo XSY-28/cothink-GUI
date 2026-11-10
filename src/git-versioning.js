@@ -6,21 +6,22 @@ import { resolve, join } from "node:path";
 import { createHash } from "node:crypto";
 import { problem } from "./task.js";
 const exec = promisify(execFile);
-export async function legacyGit(root, args) {
-  return (
-    await exec(
-      "git",
-      [
-        "--no-optional-locks",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        ...args,
-      ],
-      { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
-    )
-  ).stdout.trim();
+export async function legacyGit(root, args, { bytes = false } = {}) {
+  const { stdout } = await exec(
+    "git",
+    [
+      "--no-optional-locks",
+      "--no-replace-objects",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "core.fsmonitor=false",
+      ...args,
+    ],
+    { cwd: root, encoding: bytes ? "buffer" : "utf8", maxBuffer: 32 * 1024 * 1024,
+      ...(bytes && { env: { ...process.env, GIT_NO_LAZY_FETCH: "1" } }) },
+  );
+  return bytes ? stdout : stdout.trim();
 }
 export async function legacyProjectInfo({ project, home }) {
   let root, common;

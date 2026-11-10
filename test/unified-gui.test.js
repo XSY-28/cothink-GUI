@@ -65,11 +65,12 @@ test('resume inherits completed delivery without charging or reparenting old chi
  let planRef;
  const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:'start_work',args:{action:'start',reason:'verify',plan}}]}:n===3?{toolCalls:[{name:'start_work',args:{action:'resume',reason:'continue saved project',planRef}}]}:{text:'Verified'});
  const c=await controller(t,f,{execution}),s=await c.action('session.create',{project:repo.project});
- const submit=async id=>{const r=await c.action('task.submit',{sessionId:s.id,input:id,submissionId:id,protocolVersion:1});await complete(c,r.taskId);return readTask(f.home,r.taskId);};
+ const submit=async id=>{const r=await c.action('task.submit',{sessionId:s.id,input:id,submissionId:id,protocolVersion:1,...(id==='resume'?{budget:{maxCalls:1}}:{})});await complete(c,r.taskId);return readTask(f.home,r.taskId);};
  const confirm=async source=>{const r=await c.action('task.confirmWork',{sessionId:s.id,proposalRef:source.proposalRef,submissionId:randomUUID(),protocolVersion:1});await complete(c,r.taskId);return readTask(f.home,r.taskId);};
  const firstProposal=await submit('initial'),first=await confirm(firstProposal),childId=first.projectOperation.childTaskIds[0];
  planRef={taskId:firstProposal.id,field:'proposal',sha256:digest(firstProposal.proposal)};
  const resumed=await submit('resume');
+ assert.equal(resumed.proposal.budgetAtProposal.remainingCalls,0);
  assert.equal(resumed.status,'completed',resumed.error);assert.equal(f.calls.length,3);assert.deepEqual(resumed.projectOperation.childTaskIds,[]);assert.equal(resumed.deliveryRef.sources[0].relation,'inherited');
  assert.equal(readTask(f.home,childId).rootTaskId,first.id);assert.equal(resumed.usage.calls,1);assert.match((await c.session(s.id)).turns.find(turn=>turn.taskId===first.id).finalText,/Verified/);
 });

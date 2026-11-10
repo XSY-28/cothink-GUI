@@ -2,9 +2,8 @@ import {validateEditorTurnOptions} from "./gui-turn-options.js";
 import { join, resolve, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { isWorkspaceId, workspaceError } from "./gui-workspace-state.js";
-import { privateDirectory } from "./storage.js";
 import { loadConfig, updateConfig } from "./config.js";
 import {
   readSessionTeam,
@@ -72,15 +71,33 @@ export function readSessionProject(manager) {
     throw Error("会话项目关联损坏；保留原记录。");
   return project;
 }
+function neutralPaths(home) {
+  const root = join(realpathSync(tmpdir()), "cothink-chat");
+  const key = createHash("sha256").update(resolve(home)).digest("hex").slice(0, 24);
+  return [root, join(root,key)];
+}
+function checkNeutralDirectory(path) {
+  const stat = lstatSync(path);
+  const uid = process.getuid?.();
+  if (!stat.isDirectory() || realpathSync(path)!==path ||
+      uid!==undefined && (stat.uid!==uid || (stat.mode&0o022)!==0))
+    throw Error("CoThink 的临时对话目录不可安全使用。");
+}
+export function existingNeutralDirectory(home) {
+  try {
+    const paths = neutralPaths(home);
+    paths.forEach(checkNeutralDirectory);
+    return paths[1];
+  } catch { return undefined; }
+}
 export function neutralDirectory(home) {
-  const path = join(
-    tmpdir(),
-    "cothink-chat",
-    createHash("sha256").update(resolve(home)).digest("hex").slice(0, 24),
-  );
-  privateDirectory(path);
-  // Match process.cwd() and Pi session discovery even when tmpdir is a symlink (macOS /var).
-  return realpathSync(path);
+  const paths = neutralPaths(home);
+  for (const path of paths) {
+    try { mkdirSync(path,{mode:0o700}); }
+    catch (error) { if (error.code!=="EEXIST") throw error; }
+    checkNeutralDirectory(path);
+  }
+  return paths[1];
 }
 export function conversationCwd(manager, home) {
   return readSessionProject(manager) ?? neutralDirectory(home);

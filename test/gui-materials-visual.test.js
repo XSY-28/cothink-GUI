@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
-import { repository } from "./helpers/git-fixture.js";
+import { git, repository } from "./helpers/git-fixture.js";
 import { chooseRailCreation } from "./helpers/gui-rail.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
 const packageRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL("..",import.meta.url)));
@@ -119,10 +119,10 @@ test("desktop browser imports, previews and sends materials while keeping menus 
   await rows.getByRole("button",{name:"预览 pasted.png",exact:true}).waitFor();
   await editor.evaluate(node=>{
     const dataTransfer=new DataTransfer();
-    dataTransfer.items.add(new File(["dropped text"],"drop.md",{type:"text/markdown"}));
+    dataTransfer.items.add(new File(['{"fixture":"dropped text"}'],"drop.json",{type:"application/json"}));
     node.dispatchEvent(new DragEvent("drop",{dataTransfer,bubbles:true,cancelable:true}));
   });
-  await rows.getByRole("button",{name:"预览 drop.md",exact:true}).waitFor();
+  await rows.getByRole("button",{name:"预览 drop.json",exact:true}).waitFor();
 
   await page.unroute("**/api/materials?**");
   let lostUploads=0;
@@ -239,7 +239,13 @@ test("desktop browser imports, previews and sends materials while keeping menus 
 });
 
 test("compact browser chooses current project bytes and a pinned saved range; navigation shows true history",async t=>{
-  const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:"read_project_context",args:{operation:"read",paths:["a.txt"]}}]}:{text:"已按实际材料完成"}),repo=repository(t);
+  const fixedName="guide,notes.txt";
+  const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:"read_project_context",args:{operation:"read",paths:[fixedName]}}]}:{text:"已按实际材料完成"}),repo=repository(t);
+  writeFileSync(join(repo.project,fixedName),"base comma fixture\n");
+  git(repo.project,"status","--porcelain");
+  git(repo.project,"add","--",fixedName);
+  git(repo.project,"commit","-m","saved file with literal comma");
+  const fixedVersion=git(repo.project,"rev-parse","HEAD");
   writeFileSync(join(repo.project,"a.txt"),"uncommitted A fixture\n");
   saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},"文件阵容","7c8094cd-3476-4bfa-8f53-055d87972896"));
   const host=await startGuiServer({home:f.home,cwd:f.cwd,open:false});t.after(()=>host.close());
@@ -269,18 +275,18 @@ test("compact browser chooses current project bytes and a pinned saved range; na
   await button("预览 a.txt").waitFor();
   await button("添加本次操作").click();await button("选择项目文件").click();
   await picker.getByRole("button",{name:"读取已保存版本",exact:true}).click();
-  await picker.getByText(repo.baseVersion.slice(0,12),{exact:true}).waitFor();
+  await picker.getByText(fixedVersion.slice(0,12),{exact:true}).waitFor();
   await page.screenshot({path:resolve("work/gui-usability-repair/T3-compact-project-picker.png")});
-  await row().getByRole("button",{name:"选择范围",exact:true}).click();
+  await picker.getByRole("listitem").filter({hasText:fixedName}).getByRole("button",{name:"选择范围",exact:true}).click();
   await picker.getByRole("button",{name:"确认读取范围",exact:true}).click();
   await picker.waitFor({state:"hidden"});
-  await button("移除读取已保存版本：a.txt标记").waitFor();
+  await button(`移除读取已保存版本：${fixedName}标记`).waitFor();
   await button("发送").click();
   await page.getByText("已按实际材料完成",{exact:true}).waitFor();
   const first=JSON.stringify(f.calls[0].body);
   assert.match(first,/uncommitted A fixture/);
   assert.equal(f.calls.length,2);
-  assert.match(JSON.stringify(f.calls[1].body),/base A/);
+  assert.match(JSON.stringify(f.calls[1].body),/base comma fixture/);
   await button("对话").click();
   const histories=page.getByRole("dialog",{name:"对话",exact:true});
   await histories.getByText("第一段用户摘要，足以区别相同标题",{exact:true}).first().waitFor();
