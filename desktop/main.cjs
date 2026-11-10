@@ -128,7 +128,7 @@ else {
     });
     ipcMain.handle('cothink:copy-text',(event,text)=>{
       if(!trusted(event)||typeof text!=='string')throw Error('剪贴板写入请求无效。');
-      clipboard.writeText(text);
+      return clipboard.writeText(text);
     });
     ipcMain.on('cothink:close-ack',(event,value)=>{
       if(!trusted(event)||!pendingClose||!value||Object.keys(value).some(k=>!['requestId','saved'].includes(k))||value.requestId!==pendingClose.requestId||typeof value.saved!=='boolean')return;

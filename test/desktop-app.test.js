@@ -85,7 +85,7 @@ test('packaged Team portraits reveal the name only after hover dwell',async t=>{
  await verifyPackagedTeamPortraits(t,{appPath,launchCandidate});
 });
 
-async function preservePasteboard(testText, run) {
+async function preservePasteboard(marker, run) {
  // Keep every representation in memory, including images and Finder items.
  // Restore only if our unique fixture text is still on the pasteboard.
  const helper = spawn('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `
@@ -103,12 +103,12 @@ async function preservePasteboard(testText, run) {
    }
    $.NSFileHandle.fileHandleWithStandardOutput.writeData($('ready\\n').dataUsingEncoding($.NSUTF8StringEncoding));
    $.NSFileHandle.fileHandleWithStandardInput.readDataOfLength(1);
-   if (ObjC.unwrap(pasteboard.stringForType($.NSPasteboardTypeString)) === argv[0]) {
+   if (ObjC.unwrap(pasteboard.stringForType($.NSPasteboardTypeString))?.includes(argv[0])) {
     pasteboard.clearContents;
     if (saved.count && !pasteboard.writeObjects(saved)) throw Error('Could not restore the pasteboard');
    }
   }
- `, testText], {stdio:['pipe','pipe','inherit']});
+ `, marker], {stdio:['pipe','pipe','inherit']});
  const exited = once(helper, 'exit');
  await Promise.race([
   once(helper.stdout, 'data'),
@@ -165,11 +165,15 @@ test('packaged copy buttons write original text to the system clipboard', {timeo
  for (const [name,text,success,failure] of cases) {
   const copied = page.getByText(success, {exact:true});
   const failed = page.getByText(failure, {exact:true});
-  await preservePasteboard(text, async ()=>{
+  const marker = text.match(/[0-9a-f-]{36}/)[0];
+  await preservePasteboard(marker, async ()=>{
    await page.getByRole('button', {name,exact:true}).click();
    assert.equal(await copied.or(failed).textContent({timeout:4000}), success);
-   const matches = await app.evaluate(({clipboard}, expected)=>clipboard.readText() === expected, text);
-   assert.equal(matches, true, `${name} preserves Unicode, whitespace and line breaks in the native clipboard`);
+   const actual = await app.evaluate(async ({clipboard}, marker)=>{
+    const value = await clipboard.readText();
+    return value.includes(marker) ? value : {empty:!value,length:value.length};
+   }, marker);
+   assert.equal(actual, text, `${name} preserves Unicode, whitespace and line breaks in the native clipboard`);
   });
   if (name === '复制消息') await copied.waitFor({state:'hidden',timeout:6000});
  }
