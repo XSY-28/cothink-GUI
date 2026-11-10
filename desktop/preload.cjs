@@ -2,6 +2,7 @@ const {contextBridge,ipcRenderer}=require('electron');
 // Sandboxed subframes, including file previews, receive no system bridge.
 if(process.isMainFrame) contextBridge.exposeInMainWorld('cothinkDesktop',Object.freeze({
   info:Object.freeze({installation:'desktop',protocolVersion:1,platform:process.platform}),
+  writeClipboardText:text=>ipcRenderer.invoke('cothink:copy-text',text),
   chooseProjectDirectory:defaultPath=>ipcRenderer.invoke('cothink:directory',{requestId:globalThis.crypto.randomUUID(),defaultPath}),
   onPrepareClose:callback=>{
     if(typeof callback!=='function')throw TypeError('callback required');

@@ -1,6 +1,6 @@
 import {FilePanel} from "./features/files/FilePanel.jsx";
 import React, { useEffect, useReducer, useRef, useState } from "react";
-import { createApi, consumeToken } from "./api.js";
+import { createApi, consumeToken, copyText } from "./api.js";
 import { useGuiWorkspace } from "./useGuiWorkspace.js";
 import { initialView, workspaceViewReducer, readDisplayPreferences, saveDisplayPreferences } from "./workspace-view.js";
 import { Navigation, ConversationPicker } from "./features/navigation/Navigation.jsx";
@@ -305,8 +305,8 @@ export function App() {
     }
   }
   async function copy(text) {
-    try { await navigator.clipboard.writeText(text); setToast("已复制原文"); }
-    catch { commands.setError("未能访问系统剪贴板，请手动选中文字复制。"); }
+    try { await copyText(text); setToast("已复制原文"); }
+    catch { setToast("未能访问系统剪贴板，请手动选中文字复制。"); }
   }
   return <div className={`app-shell ${detailOpen ? "detail-expanded" : ""}`} data-desktop-platform={window.cothinkDesktop?.info?.platform}>
     {commands.resumeMaterial&&<input type="file" hidden ref={resumeInput} onChange={onResumeFile} onCancel={()=>{resumeChoice.current=null;document.querySelector("#message-input")?.focus();}}/>}

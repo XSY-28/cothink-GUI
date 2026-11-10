@@ -3,6 +3,7 @@ import ReactMarkdown, {defaultUrlTransform} from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import {copyText} from "./api.js";
 
 const h=React.createElement;
 const ImageResolver=createContext(null);
@@ -55,7 +56,7 @@ function MarkdownCodeBlock({children}) {
   const block=useRef(null),[status,setStatus]=useState("");
   async function copy() {
     try {
-      await navigator.clipboard.writeText(block.current?.textContent??"");
+      await copyText(block.current?.textContent??"");
       setStatus("已复制");
     } catch {setStatus("复制失败，请手动选中");}
   }
