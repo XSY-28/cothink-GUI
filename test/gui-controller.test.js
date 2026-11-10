@@ -4,37 +4,20 @@ import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, renameSync, rmSync
 import {tmpdir} from "node:os";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { controller, controllerModule, finished, load, productRoot, teamId } from "./helpers/gui-controller-fixture.js";
-const sdkUrl=pathToFileURL(join(productRoot,"node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
-const {SessionManager}=await import(sdkUrl);
+import { controller, controllerModule, finished, load, teamId, prepareSubmit, submitDraft, fixtureConversation, fixtureWorkspace, seedFixtureConversationRepository } from "./helpers/gui-controller-fixture.js";
 import { fixture } from "./helpers/pi-fixture.js";
-import { repository } from "./helpers/git-fixture.js";
+import { git, repository } from "./helpers/git-fixture.js";
+import { SessionManager, checkedPlan, confirmProject, createTeamConfig, readTask, sdkUrl } from "./gui-controller-project.fixture.js";
+
 const {saveConfig}=await load("src/config.js");
-const {createTeamConfig}=await load("src/teams.js");
-const {readTask}=await load("src/task.js");
-const checkedPlan=(goal='Observe project',checks=[{command:'node',args:['-e',"require('fs').accessSync('a.txt')"]}])=>({goal,scope:['a.txt'],readScope:['.'],deliverables:['a.txt'],checks});
-async function confirmProject(c,sessionId,submitted){
- const proposal=await finished(c,submitted.taskId);assert.equal(proposal.status,'blocked',proposal.error);
- const accepted=await c.action('task.confirmWork',{sessionId,submissionId:randomUUID(),proposalRef:proposal.proposalRef,protocolVersion:1});
- const root=await finished(c,accepted.taskId);assert.equal(root.status,'completed',root.error);
- return {taskId:accepted.taskId,task:await c.task(root.projectOperation.childTaskIds[0])};
-}
 
 test("unified quick answer uses one original call, deduplicates durable submissions and keeps continuous context", async (t) => {
   const f = await fixture(t, (_, n) => ({ text: `original reply ${n}` })),
     c = await controller(t, f);
-  const s = await c.action("session.create", { project: null });
-  const first = await c.action("task.submit", {
-    sessionId: s.id,
-    input: "first question",
-    protocolVersion:1, submissionId: "first",
-  });
-  const duplicate = await c.action("task.submit", {
-    sessionId: s.id,
-    input: "first question",
-    protocolVersion:1, submissionId: "first",
-  });
+  const s = await fixtureConversation(t, c);
+  const args = await prepareSubmit(c,{sessionId:s.id,input:"first question",submissionId:"first"});
+  const first = await c.action("task.submit",args);
+  const duplicate = await c.action("task.submit",args);
   assert.equal(duplicate.taskId, first.taskId);
   const task = await finished(c, first.taskId);
   assert.equal(task.status, "completed", task.error);
@@ -44,7 +27,7 @@ test("unified quick answer uses one original call, deduplicates durable submissi
     ["original reply 1"],
   );
   assert.equal(task.participants.filter((p) => p.participated).length, 1);
-  const second = await c.action("task.submit", {
+  const second = await submitDraft(c, {
     sessionId: s.id,
     input: "second question",
     protocolVersion:1, submissionId: "second",
@@ -60,11 +43,7 @@ test("unified quick answer uses one original call, deduplicates durable submissi
   t.after(() => restored.close());
   assert.equal(
     (
-      await restored.action("task.submit", {
-        sessionId: s.id,
-        input: "first question",
-        protocolVersion:1, submissionId: "first",
-      })
+      await restored.action("task.submit",args)
     ).taskId,
     first.taskId,
   );
@@ -86,13 +65,13 @@ test("unified quick answer uses one original call, deduplicates durable submissi
   assert.equal(cancelledTurn.cancelSettledAt,saved.cancelSettledAt);
   assert.equal(cancelledTurn.endedAt,null);
 });
-test("unbound project neither loads startup AGENTS nor exposes work tools; ONE is durable", async (t) => {
+test("Team chat does not load the host startup AGENTS", async (t) => {
   const f = await fixture(t),
     c = await controller(t, f);
   writeFileSync(join(f.cwd, "AGENTS.md"), "STARTUP_PRIVATE_CANARY");
-  const s = await c.action("session.create", { project: null });
+  const s = await fixtureConversation(t, c);
 
-  const r = await c.action("task.submit", {
+  const r = await submitDraft(c, {
     sessionId: s.id,
     input: "plain chat",
     protocolVersion:1, submissionId: "plain",
@@ -106,7 +85,7 @@ test("unbound project neither loads startup AGENTS nor exposes work tools; ONE i
     /STARTUP_PRIVATE_CANARY/,
   );
   assert.equal((await c.session(s.id)).turns[0].flow, "unified");
-  assert.equal((await c.session(s.id)).project, null);
+  assert.equal((await c.session(s.id)).workspaceId, s.workspaceId);
 });
 test("one global active task rejects concurrent submission, reads live status and cancels on host close", async (t) => {
   const f = await fixture(t, async () => {
@@ -114,15 +93,15 @@ test("one global active task rejects concurrent submission, reads live status an
       return { text: "slow" };
     }),
     c = await controller(t, f);
-  const s = await c.action("session.create", { project: null });
-  const r = await c.action("task.submit", {
+  const s = await fixtureConversation(t, c);
+  const r = await submitDraft(c, {
     sessionId: s.id,
     input: "slow",
     protocolVersion:1, submissionId: "slow",
   });
   assert.equal((await c.task(r.taskId)).status, "running");
   await assert.rejects(
-    c.action("task.submit", {
+    submitDraft(c, {
       sessionId: s.id,
       input: "other",
       protocolVersion:1, submissionId: "other",
@@ -134,30 +113,26 @@ test("one global active task rejects concurrent submission, reads live status an
   await c.close();
   assert.notEqual(readTask(f.home, r.taskId).status, "completed");
 });
-test("historical sessions without team need explicit binding, and read-only viewing takes no writer", async (t) => {
+test("ungrouped historical sessions remain readable and cannot resume model calls", async (t) => {
   const f = await fixture(t),
     c = await controller(t, f);
   const m = SessionManager.create(f.cwd, join(f.home, "pi/sessions/main"));
   m.appendCustomEntry("cothink-project",{project:null});
+  m.appendCustomEntry("cothink-title",{title:"Saved ungrouped history"});
   m.appendMessage({ role: "user", content: "old", timestamp: Date.now() });
+  const before=readFileSync(m.getSessionFile());
   const s = await c.session(m.getSessionId());
   assert.equal(s.team, null);
+  assert.equal(s.workspaceId, null);
+  assert.equal((await c.sessions({workspaceId:null,query:"saved ungrouped"})).items[0].id,s.id);
+  const {sessionWriterBusy}=await load("src/storage.js");
+  assert.equal(sessionWriterBusy(join(f.home,"pi"),s.id),false);
   await assert.rejects(
-    c.action("task.submit", {
-      sessionId: s.id,
-      input: "continue",
-      protocolVersion:1, submissionId: "old",
-    }),
-    /team|Team/,
+    submitDraft(c,{sessionId:s.id,input:"continue",submissionId:"old"}),
+    {code:"WORKSPACE_UNAVAILABLE"},
   );
-  await c.action("session.team", { sessionId: s.id, teamId });
-  writeFileSync(join(f.home,"gui-workspaces.json"),"corrupt workspace directory");
-  const r = await c.action("task.submit", {
-    sessionId: s.id,
-    input: "continue",
-    protocolVersion:1, submissionId: "bound",
-  });
-  assert.equal((await finished(c, r.taskId)).status, "completed");
+  assert.deepEqual(readFileSync(m.getSessionFile()),before);
+  assert.equal(f.calls.length,0);
 });
 test("bound project confirms formal work and fixed version diff, leaves original checkout unchanged", async (t) => {
   const repo = repository(t);
@@ -170,9 +145,9 @@ test("bound project confirms formal work and fixed version diff, leaves original
   await c.action("settings.work", { work: {execution:(await import("./helpers/agent-sync-fixture.js")).execution, checks: [] } });
   const p = await c.action("project.inspect", { path: repo.project });
   assert.equal(p.valid, true);
-  const s = await c.action("session.create", { project: repo.project });
+  const s = seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
 
-  const r = await c.action("task.submit", {
+  const r = await submitDraft(c, {
       sessionId: s.id,
       input: "observe project",
       protocolVersion:1, submissionId: "project",
@@ -264,9 +239,9 @@ test("failed metadata persistence preserves prior flow and blocks generation unt
   const { renameSync, rmSync } = await import("node:fs");
   const f = await fixture(t),
     c = await controller(t, f);
-  const s = await c.action("session.create", { project: null });
+  const s = await fixtureConversation(t, c);
 
-  const r = await c.action("task.submit", {
+  const r = await submitDraft(c, {
     sessionId: s.id,
     input: "initial",
     protocolVersion:1, submissionId: "initial",
@@ -283,7 +258,7 @@ test("failed metadata persistence preserves prior flow and blocks generation unt
     );
     assert.equal(readTask(f.home,r.taskId).flow,"unified");
     await assert.rejects(
-      c.action("task.submit", {
+      submitDraft(c, {
         sessionId: s.id,
         input: "must not send",
         protocolVersion:1, submissionId: "blocked",
@@ -299,7 +274,6 @@ test("failed metadata persistence preserves prior flow and blocks generation unt
 
 test("project work reads edits checks accepts and returns task-bound logs and immutable diff", async (t) => {
   const { execution } = await import("./helpers/agent-sync-fixture.js");
-  const { git } = await import("./helpers/git-fixture.js");
   const repo = repository(t);
   const original = git(repo.project, "status", "--porcelain=v1");
   const f = await fixture(t, (_call, n) => {
@@ -329,9 +303,9 @@ test("project work reads edits checks accepts and returns task-bound logs and im
       ],
     },
   });
-  const s = await c.action("session.create", { project: repo.project });
+  const s = seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
 
-  const r = await c.action("task.submit", {
+  const r = await submitDraft(c, {
       sessionId: s.id,
       input: "change source",
       protocolVersion:1, submissionId: "edit",
@@ -360,6 +334,8 @@ test("delegated work exposes actual member calls and only evidence-linked handof
   let leader = 0;
   const f = await fixture(t, (call) => {
     const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
+    if (JSON.stringify(call.body.messages).includes("cothink-process-observation"))
+      return {text:'{"issues":[]}'};
     if (call.body.model === "r1")
       return { text: "Member inspected original text" };
     leader++;
@@ -382,8 +358,8 @@ test("delegated work exposes actual member calls and only evidence-linked handof
   });
   const c = await controller(t, f);
   await c.action("settings.work", { work: {execution:(await import("./helpers/agent-sync-fixture.js")).execution, checks: [] } });
-  const s = await c.action("session.create", { project: repo.project });
-  const r = await c.action("task.submit", {
+  const s = seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
+  const r = await submitDraft(c, {
       sessionId: s.id,
       input: "inspect with member",
       protocolVersion:1, submissionId: "delegate",
@@ -393,8 +369,11 @@ test("delegated work exposes actual member calls and only evidence-linked handof
   const member = task.participants.find((p) => p.role === "member");
   assert.equal(member.participated, true);
   assert.equal(member.model.modelId, "r1");
-  // A worker is actual participation even though that model never reviewed.
-  assert.equal(task.participants.find((p) => p.role === "reviewer-1").participated, false);
+  assert.equal(member.position, "employee");
+  assert.equal(member.reason, "independent source inspection");
+  assert.deepEqual(member.readScope, ["."]);
+  assert.equal(task.participants.find((p) => p.role === "process-check")?.participated, true);
+  assert.ok(task.participants.every((p) => p.role !== "reviewer-1"));
   assert.ok(
     task.messages.some(
       (m) =>
@@ -413,14 +392,22 @@ test("delegated work exposes actual member calls and only evidence-linked handof
         a.text.includes("Member inspected original text"),
     ),
   );
+  const root = await c.task(confirmed.taskId);
+  const covered = root.processCheck.observations.find(observation =>
+    observation.members.some(person => person.memberId === member.id && person.covered));
+  assert.ok(covered, "the GUI root projects checked coverage backed by a completed child request");
+  assert.equal(covered.actualModel.modelId, "r1");
+  assert.equal(covered.requestStatus, "completed");
+  assert.ok(root.executionTasks.some(source => source.messages.some(message =>
+    message.id === covered.requestId && message.role === "process-check" && message.text === "")));
 });
 
 test("one corrupt task surfaces its error while healthy history and settings remain readable", async (t) => {
   const f = await fixture(t),
     c = await controller(t, f);
-  const s = await c.action("session.create", { project: null });
+  const s = await fixtureConversation(t, c);
 
-  const r = await c.action("task.submit", {
+  const r = await submitDraft(c, {
     sessionId: s.id,
     input: "healthy",
     protocolVersion:1, submissionId: "healthy",
@@ -449,19 +436,16 @@ test("accepted submit freezes mode and thinking before immediately following cha
   catalog.providers.fixture.models[0].reasoning = true;
   writeFileSync(catalogPath, JSON.stringify(catalog));
   const c = await controller(t, f),
-    s = await c.action("session.create", { project: null });
+    s = await fixtureConversation(t, c);
   await c.action("session.thinking", { sessionId: s.id, level: "low" });
-  const warm = await c.action("task.submit", {
+  const warm = await submitDraft(c, {
     sessionId: s.id,
     input: "warm context",
     protocolVersion:1, submissionId: "freeze-warm",
   });
   await finished(c, warm.taskId);
-  const pending = c.action("task.submit", {
-    sessionId: s.id,
-    input: "accepted before edits",
-    protocolVersion:1, submissionId: "freeze-current",
-  });
+  const args=await prepareSubmit(c,{sessionId:s.id,input:"accepted before edits",submissionId:"freeze-current"});
+  const pending=c.action("task.submit",args);
   const mode = assert.rejects(c.action("session.mode", { sessionId: s.id, mode:"one" }),/移除/);
   const thinking = c.action("session.thinking", {
     sessionId: s.id,
@@ -477,7 +461,7 @@ test("accepted submit freezes mode and thinking before immediately following cha
   );
   assert.equal(task.team.main.thinkingLevel, "low");
   assert.equal(f.calls.length, 2);
-  const next = await c.action("task.submit", {
+  const next = await submitDraft(c, {
     sessionId: s.id,
     input: "next snapshot",
     protocolVersion:1, submissionId: "freeze-next",
@@ -492,7 +476,9 @@ test("runtime initialization handoff allows concurrent metadata saves without lo
   const { ModelRuntime } = await import(sdkUrl);
   const f = await fixture(t),
     c = await controller(t, f),
-    s = await c.action("session.create", { project: null });
+    s = await fixtureConversation(t, c);
+  const args=await prepareSubmit(c,{sessionId:s.id,input:"first initialization",submissionId:"handoff-current"});
+  const editor=await c.session(s.id);
   const entered = deferred(),
     release = deferred(),
     original = ModelRuntime.create;
@@ -505,18 +491,14 @@ test("runtime initialization handoff allows concurrent metadata saves without lo
     }
     return original.apply(this, args);
   });
-  const pending = c.action("task.submit", {
-    sessionId: s.id,
-    input: "first initialization",
-    protocolVersion:1, submissionId: "handoff-current",
-  });
+  const pending=c.action("task.submit",args);
   await entered.promise;
   const starting = await c.bootstrap();
   const callsWhilePreparing = f.calls.length;
   const saves = Promise.allSettled([
     c.action("session.draft", {
-      sessionId: s.id,expectedDraftRevision:s.draftRevision,branchAnchor:s.branchAnchor,
-      editId:randomUUID(),workRequest:null,selectionId:null,
+      sessionId: s.id,expectedDraftRevision:editor.draftRevision,branchAnchor:editor.branchAnchor,
+      editId:randomUUID(),workRequest:null,selectionId:null,turnOptions:null,
       text: "typed during initialization",
     }),
     c.action("session.name", { sessionId: s.id, title:"Opening name" }),
@@ -549,8 +531,8 @@ test("async Team switching reserves management until native model selection has 
   const { AgentSession } = await import(sdkUrl);
   const f = await fixture(t),
     c = await controller(t, f),
-    s = await c.action("session.create", { project: null });
-  const warm = await c.action("task.submit", {
+    s = await fixtureConversation(t, c);
+  const warm = await submitDraft(c, {
     sessionId: s.id,
     input: "warm context",
     protocolVersion:1, submissionId: "team-warm",
@@ -575,6 +557,7 @@ test("async Team switching reserves management until native model selection has 
       return original.call(this, model, ...args);
     },
   );
+  const overlapping=await prepareSubmit(c,{sessionId:s.id,input:"must not race Team",submissionId:"team-overlap"});
   const selecting = c.action("session.team", {
     sessionId: s.id,
     teamId: team.id,
@@ -582,11 +565,7 @@ test("async Team switching reserves management until native model selection has 
   await entered.promise;
   try {
     await assert.rejects(
-      c.action("task.submit", {
-        sessionId: s.id,
-        input: "must not race Team",
-        protocolVersion:1, submissionId: "team-overlap",
-      }),
+      c.action("task.submit",overlapping),
       /任务|设置/,
     );
     assert.equal(
@@ -599,7 +578,7 @@ test("async Team switching reserves management until native model selection has 
     await selecting;
   }
   assert.equal((await c.session(s.id)).team.id, team.id);
-  const next = await c.action("task.submit", {
+  const next = await submitDraft(c, {
     sessionId: s.id,
     input: "after selection",
     protocolVersion:1, submissionId: "team-next",
@@ -610,8 +589,8 @@ test("async Team switching reserves management until native model selection has 
 test("provider saves refresh idle cached catalog and auth while preserving context and managed requests", async (t) => {
   const f = await fixture(t),
     c = await controller(t, f),
-    s = await c.action("session.create", { project: null });
-  const warm = await c.action("task.submit", {
+    s = await fixtureConversation(t, c);
+  const warm = await submitDraft(c, {
     sessionId: s.id,
     input: "previous context must survive",
     protocolVersion:1, submissionId: "catalog-warm",
@@ -636,7 +615,7 @@ test("provider saves refresh idle cached catalog and auth while preserving conte
     providerId: "added-later",
     apiKey: "replacement-local-key",
   });
-  const next = await c.action("task.submit", {
+  const next = await submitDraft(c, {
       sessionId: s.id,
       input: "after adding provider",
       protocolVersion:1, submissionId: "catalog-next",
@@ -660,9 +639,9 @@ test("provider saves refresh idle cached catalog and auth while preserving conte
   );
 });
 
-test('HTML action without associated project preserves draft and sends zero model requests',async t=>{
+test('an injected HTML action preserves the Team draft and sends zero model requests',async t=>{
  const f=await fixture(t), c=await controller(t,f);
- const s=await c.action('session.create',{project:null});
+ const s=await fixtureConversation(t, c);
  await c.action('session.draft',{sessionId:s.id,text:'make my HTML',expectedDraftRevision:s.draftRevision,branchAnchor:s.branchAnchor,editId:randomUUID(),workRequest:null,selectionId:null});
  await assert.rejects(c.action('task.submit',{sessionId:s.id,input:'make my HTML',protocolVersion:1, submissionId:'html-no-project',workRequest:{kind:'html-svg'}}),/协议/);
  assert.equal(f.calls.length,0);
@@ -673,20 +652,23 @@ test('HTML action without associated project preserves draft and sends zero mode
 });
 
 
-test("unified role prompts preserve direct answer and explicit review responsibilities",async t=>{
- const f=await fixture(t,(call,n)=>n===2?{toolCalls:[{name:'request_review',args:{reason:'check',draft:'draft'}}]}:{text:'answer'}),c=await controller(t,f),s=await c.action('session.create',{project:null});
- const one=await c.action('task.submit',{sessionId:s.id,input:'direct',submissionId:'direct',protocolVersion:1});await finished(c,one.taskId);
- const review=await c.action('task.submit',{sessionId:s.id,input:'review draft',submissionId:'review',protocolVersion:1});assert.equal((await finished(c,review.taskId)).status,'completed');
- assert.equal(f.calls.length,4);assert.match(JSON.stringify(f.calls[0].body.messages),/unified conversation/);assert.match(JSON.stringify(f.calls[2].body.messages),/independent reviewer/);
- await assert.rejects(c.action('session.mode',{sessionId:s.id,mode:'one'}),/移除/);await assert.rejects(c.action('task.submit',{sessionId:s.id,input:'/one temporary',submissionId:'old',protocolVersion:1}),/移除/);
+test("unified manager prompt handles ordinary text and retires old mode commands",async t=>{
+ const f=await fixture(t,()=>({text:'answer'})),c=await controller(t,f),s=await fixtureConversation(t, c);
+ const one=await submitDraft(c,{sessionId:s.id,input:'direct',submissionId:'direct'});
+ assert.equal((await finished(c,one.taskId)).status,'completed');
+ assert.equal(f.calls.length,1);
+ assert.match(JSON.stringify(f.calls[0].body.messages),/conversation manager/);
+ assert.ok(!f.calls[0].body.tools.some(tool=>tool.function.name==='request_review'));
+ await assert.rejects(c.action('session.mode',{sessionId:s.id,mode:'one'}),/移除/);
+ await assert.rejects(submitDraft(c,{sessionId:s.id,input:'/one temporary',submissionId:'old'}),/移除/);
 });
 
 test("navigation persists across restart, preserves history, rejects stale revision and releases real writer", async t => {
   const {acquireSessionWriter, sessionWriterBusy} = await import("../src/storage.js");
   const f = await fixture(t,(_,n)=>({text:`navigation reply ${n}`}));
   let c = await controller(t,f);
-  const s = await c.action("session.create",{project:null});
-  const accepted = await c.action("task.submit",{sessionId:s.id,input:"archive searchable input",protocolVersion:1, submissionId:"archive"});
+  const s = await fixtureConversation(t, c);
+  const accepted = await submitDraft(c,{sessionId:s.id,input:"archive searchable input",protocolVersion:1, submissionId:"archive"});
   await finished(c,accepted.taskId);
   const before = await c.session(s.id), file = readTask(f.home,accepted.taskId).stages[0].sessionFile, bytes = readFileSync(file);
   assert.equal(sessionWriterBusy(join(f.home,"pi"),s.id),true);
@@ -704,7 +686,7 @@ test("navigation persists across restart, preserves history, rejects stale revis
   assert.deepEqual(readFileSync(file),bytes);
   assert.equal((await c.sessions()).items.length,0);
   assert.equal((await c.sessions({archived:"archived",query:"reply 1"})).items[0].match.taskId,accepted.taskId);
-  await assert.rejects(c.action("task.submit",{sessionId:s.id,input:"blocked",protocolVersion:1, submissionId:"new"}),{code:"SESSION_STATE_UNAVAILABLE"});
+  await assert.rejects(submitDraft(c,{sessionId:s.id,input:"blocked",protocolVersion:1, submissionId:"new"}),{code:"SESSION_STATE_UNAVAILABLE"});
   const restored = await c.action("session.archive",{sessionId:s.id,archived:false,expectedRevision:2});
   assert.equal(restored.navigation.pinned,true);
   assert.equal((await c.sessions()).items[0].id,s.id);
@@ -716,15 +698,15 @@ test("navigation archives persisted empty records and rejects busy tasks, damage
   const {readSessionUiState,writeSessionUiState} = await import("../src/session-ui-state.js");
   const {sessionWriterBusy} = await import("../src/storage.js");
   const f = await fixture(t,async()=>{await new Promise(r=>setTimeout(r,30)); return {text:"done"};});
-  const c = await controller(t,f), empty = await c.action("session.create",{project:null});
+  const c = await controller(t,f), empty = await fixtureConversation(t, c);
   assert.equal(empty.persisted,true);
   await c.action("session.draft",{sessionId:empty.id,text:"keep my draft",expectedDraftRevision:empty.draftRevision,branchAnchor:empty.branchAnchor,editId:randomUUID(),workRequest:null,selectionId:null});
   await assert.rejects(c.action("session.close",{sessionId:empty.id}),/归档/);
   await c.action("session.archive",{sessionId:empty.id,archived:true,expectedRevision:0});
   assert.equal(sessionWriterBusy(join(f.home,"pi"),empty.id),false);
   assert.equal((await c.session(empty.id)).draft,"keep my draft");
-  const s = await c.action("session.create",{project:null});
-  const run = await c.action("task.submit",{sessionId:s.id,input:"busy",protocolVersion:1, submissionId:"busy"});
+  const s = await fixtureConversation(t, c);
+  const run = await submitDraft(c,{sessionId:s.id,input:"busy",protocolVersion:1, submissionId:"busy"});
   await assert.rejects(c.action("session.archive",{sessionId:s.id,archived:true,expectedRevision:0}),{code:"SESSION_BUSY"});
   await finished(c,run.taskId);
   await assert.rejects(c.action("session.close",{sessionId:s.id}),{code:"SESSION_STATE_UNAVAILABLE"});
@@ -744,21 +726,22 @@ test("navigation archives persisted empty records and rejects busy tasks, damage
   }
 });
 
-test("session query pages pinned recent IDs with explicit project filtering and expiring cursors",async t=>{
+test("session query pages pinned recent IDs with explicit Team filtering and expiring cursors",async t=>{
   const f = await fixture(t,()=>({text:"final search text"}));
   const c = await controller(t,f), ids=[];
+  const workspace=await fixtureWorkspace(t,c);
   for (let n=0;n<3;n++) {
-    const s=await c.action("session.create",{project:null}); ids.push(s.id);
+    const s=await fixtureConversation(t,c,{workspace}); ids.push(s.id);
 
-    const run=await c.action("task.submit",{sessionId:s.id,input:`query item ${n}`,protocolVersion:1, submissionId:`item${n}`});
+    const run=await submitDraft(c,{sessionId:s.id,input:`query item ${n}`,protocolVersion:1, submissionId:`item${n}`});
     await finished(c,run.taskId);
   }
-  const page=await c.sessions({limit:1,project:null});
-  const next=await c.sessions({limit:1,project:null,cursor:page.nextCursor});
+  const page=await c.sessions({limit:1,workspaceId:workspace.id});
+  const next=await c.sessions({limit:1,workspaceId:workspace.id,cursor:page.nextCursor});
   assert.notEqual(next.items[0].id,page.items[0].id);
   await c.action("session.pin",{sessionId:ids[0],pinned:true,expectedRevision:0});
-  await assert.rejects(c.sessions({limit:1,project:null,cursor:page.nextCursor}),{code:"CURSOR_EXPIRED"});
-  assert.equal((await c.sessions({project:null})).items[0].id,ids[0]);
+  await assert.rejects(c.sessions({limit:1,workspaceId:workspace.id,cursor:page.nextCursor}),{code:"CURSOR_EXPIRED"});
+  assert.equal((await c.sessions({workspaceId:workspace.id})).items[0].id,ids[0]);
   assert.equal((await c.sessions({project:"/missing-project"})).items.length,0);
   assert.equal((await c.sessions({query:"final search"})).items.length,3);
   assert.equal((await c.sessions({query:"no match"})).items.length,0);
@@ -784,19 +767,19 @@ test("an explicit follow-Team choice clears a durable conversation thinking over
   const f=await fixture(t), path=join(f.home,"pi/models.json"), catalog=JSON.parse(readFileSync(path,"utf8"));
   catalog.providers.fixture.models[0].reasoning=true;
   writeFileSync(path,JSON.stringify(catalog));
-  const c=await controller(t,f), s=await c.action("session.create",{project:null});
+  const c=await controller(t,f), s=await fixtureConversation(t, c);
   await c.action("session.thinking",{sessionId:s.id,level:"high"});
   const team=await c.action("team.save",{name:"Low team",main:{...f.models.main,thinkingLevel:"low"},secondary:f.models.secondary});
   await c.action("session.team",{sessionId:s.id,teamId:team.id});
   assert.equal((await c.session(s.id)).thinking,"high");
-  const first=await c.action("task.submit",{sessionId:s.id,input:"with conversation override",protocolVersion:1, submissionId:"override-first"});
+  const first=await submitDraft(c,{sessionId:s.id,input:"with conversation override",protocolVersion:1, submissionId:"override-first"});
   assert.equal((await finished(c,first.taskId)).team.main.thinkingLevel,"high");
   await c.action("session.thinking",{sessionId:s.id});
   assert.equal((await c.session(s.id)).thinking,null);
   await c.close();
   const reopened=await controllerModule.createGuiController({home:f.home,cwd:f.cwd});t.after(()=>reopened.close());
   assert.equal((await reopened.session(s.id)).thinking,null,"following Team survives closing and reopening the host");
-  const second=await reopened.action("task.submit",{sessionId:s.id,input:"follow selected team",protocolVersion:1, submissionId:"override-second"});
+  const second=await submitDraft(reopened,{sessionId:s.id,input:"follow selected team",protocolVersion:1, submissionId:"override-second"});
   assert.equal((await finished(reopened,second.taskId)).team.main.thinkingLevel,"low");
   assert.equal((await reopened.task(first.taskId)).team.main.thinkingLevel,"high");
   assert.equal((await reopened.bootstrap()).teams.length,2,"the previous Team remains saved");
@@ -810,16 +793,17 @@ test("unified GUI never imports native command code and directs unmanaged comman
  const canary=join(f.home,'native-imported');writeFileSync(join(root,'package.json'),JSON.stringify({name:'gui-native',version:'1.0.0',type:'module',pi:{extensions:['index.js']}}));
  writeFileSync(join(root,'index.js'),`import{writeFileSync}from'node:fs';writeFileSync(${JSON.stringify(canary)},'imported');export default pi=>pi.registerCommand('dialog',{handler:async()=>{}});`);
  const {runPackageCommand}=await load('src/packages.js');assert.equal((await runPackageCommand({home:f.home,cwd:f.cwd,command:'install',source:root})).exitCode,0);
- const c=await controller(t,f),session=await c.action('session.create',{project:null});
+ const c=await controller(t,f),session=seedFixtureConversationRepository(repository(t).project,await fixtureConversation(t,c));
  assert.deepEqual(await c.action('extension.commands',{sessionId:session.id}),[]);assert.equal((await import('node:fs')).existsSync(canary),false);
  await assert.rejects(c.action('extension.command',{sessionId:session.id,input:'/dialog'}),/未知|不存在|unavailable/i);assert.equal(f.calls.length,0);
- const response=await c.action('task.submit',{sessionId:session.id,input:'plain question',submissionId:'clean',protocolVersion:1});assert.equal((await finished(c,response.taskId)).status,'completed');assert.equal((await import('node:fs')).existsSync(canary),false);
+ const response=await submitDraft(c,{sessionId:session.id,input:'plain question',submissionId:'clean',protocolVersion:1});assert.equal((await finished(c,response.taskId)).status,'completed');assert.equal((await import('node:fs')).existsSync(canary),false);
 });
 
 test("GUI creation persists a stable empty identity and complete versioned editor before any runtime", async t => {
   const {randomUUID} = await import("node:crypto"), {readdirSync} = await import("node:fs");
   const f = await fixture(t), c = await controller(t,f), id = randomUUID();
-  const s = await c.action("session.create", {sessionId:id,workspaceId:null});
+  const workspace=await fixtureWorkspace(t,c);
+  const s = await fixtureConversation(t,c,{sessionId:id,workspace});
   assert.equal(s.id,id); assert.equal(s.persisted,true); assert.equal(s.draftRevision,null);
   assert.deepEqual(s.view.seenResults,{});
   const editId=randomUUID(), selectionId=randomUUID();
@@ -829,14 +813,14 @@ test("GUI creation persists a stable empty identity and complete versioned edito
   assert.deepEqual(saved.editor,{editorVersion:2,text:"未发送",workRequest:{kind:"html-svg"},selectionId,editId,materials:[]});
   await assert.rejects(c.action("session.draft",{sessionId:id,text:"old request"}),{code:"DRAFT_CONFLICT"});
   await assert.rejects(c.action("session.draft",{...args,editId:randomUUID(),text:"stale"}),{code:"DRAFT_CONFLICT"});
-  await assert.rejects(c.action("session.create",{sessionId:id,workspaceId:null}),{code:"SESSION_STATE_CONFLICT"});
+  await assert.rejects(c.action("session.create",{sessionId:id,workspaceId:workspace.id}),{code:"SESSION_STATE_CONFLICT"});
   await c.close();
   const reopened=await controllerModule.createGuiController({home:f.home,cwd:f.cwd}); t.after(()=>reopened.close());
   const restored=await reopened.session(id);
   assert.deepEqual(restored.editor,saved.editor); assert.equal(restored.draftRevision,saved.draftRevision);
   assert.equal((await reopened.sessions()).items.some(s=>s.id===id),true); assert.equal(f.calls.length,0);
 
-  const task=await reopened.action("task.submit",{sessionId:id,input:"first real message",protocolVersion:1, submissionId:"durable-first"});
+  const task=await submitDraft(reopened,{sessionId:id,input:"first real message",protocolVersion:1, submissionId:"durable-first"});
   await finished(reopened,task.taskId);
   const files=readdirSync(join(f.home,"pi/sessions/main")).filter(n=>n.endsWith(id+".jsonl")); assert.equal(files.length,1);
   const entries=readFileSync(join(f.home,"pi/sessions/main",files[0]),"utf8").trim().split("\n").map(JSON.parse);
@@ -849,9 +833,10 @@ test("GUI stable ID creation rejects damaged or duplicate candidate headers with
   const {randomUUID}=await import("node:crypto"); const f=await fixture(t), c=await controller(t,f);
   const id=randomUUID(), path=join(f.home,"pi/sessions/main",`2026-11-07_${id}.jsonl`);
   writeFileSync(path,'{"broken');
-  await assert.rejects(c.action("session.create",{sessionId:id,workspaceId:null}),{code:"SESSION_STATE_UNAVAILABLE"});
+  const workspace=await fixtureWorkspace(t,c);
+  await assert.rejects(c.action("session.create",{sessionId:id,workspaceId:workspace.id}),{code:"SESSION_STATE_UNAVAILABLE"});
   assert.equal(readFileSync(path,"utf8"),'{"broken'); assert.equal(f.calls.length,0);
-  const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId:null});
+  const s=await fixtureConversation(t,c);
   const {readdirSync}=await import("node:fs"); const file=readdirSync(join(f.home,"pi/sessions/main")).find(n=>n.endsWith(s.id+".jsonl"));
   writeFileSync(join(f.home,"pi/sessions/main",file),'bad external write');
   assert.equal((await c.session(s.id)).readOnly,true);
@@ -860,7 +845,7 @@ test("GUI stable ID creation rejects damaged or duplicate candidate headers with
 
 test("GUI draft rejects a former branch anchor even when its draft revision matches",async t=>{
   const {randomUUID}=await import("node:crypto"); const f=await fixture(t), c=await controller(t,f);
-  const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId:null}); await c.close();
+  const s=await fixtureConversation(t,c); await c.close();
   const {readdirSync}=await import("node:fs"), dir=join(f.home,"pi/sessions/main");
   const path=join(dir,readdirSync(dir).find(n=>n.endsWith(s.id+".jsonl")));
   const manager=SessionManager.open(path); const oldAnchor=manager.appendCustomEntry("cothink-title",{title:"old branch"});
@@ -884,25 +869,25 @@ test("UI schema 2 initialization and management preserve each other's revisions 
   writeFileSync(path,'{broken'); assert.throws(()=>ui.initializeSessionView(f.home,{sessionId:id,seenResults:{}}),{code:"SESSION_STATE_UNAVAILABLE"}); assert.equal(readFileSync(path,"utf8"),'{broken');
 });
 
-test("legacy and modern creation inherit recent roster when a workspace default is unset",async t=>{
-  const {repository}=await import("./helpers/git-fixture.js");
-  const f=await fixture(t),c=await controller(t,f),project=repository(t).project;
-  const first=await c.action("session.create",{project}); assert.equal(first.team.id,teamId);
-  const w=(await c.bootstrap()).workspaces.find(w=>w.id===first.workspaceId);
-  await c.action("workspace.update",{workspaceId:w.id,expectedRevision:w.revision,change:{defaultRosterId:null}});
-  const existing=await c.action("session.create",{project}); assert.equal(existing.team.id,teamId);
-  const modern=await c.action("session.create",{sessionId:randomUUID(),workspaceId:w.id}); assert.equal(modern.team.id,teamId);
-  assert.equal((await c.bootstrap()).workspaces.find(row=>row.id===w.id).defaultRosterId,null);
+test("legacy creation cannot use an existing Team folder to bypass explicit selection",async t=>{
+  const f=await fixture(t),c=await controller(t,f);
+  const workspace=await fixtureWorkspace(t,c,{defaultRosterId:null});
+  const {project}=workspace;
+  await assert.rejects(c.action("session.create",{project}),{code:"WORKSPACE_UNAVAILABLE"});
+  await assert.rejects(c.action("session.create",{sessionId:randomUUID(),workspaceId:null}),{code:"WORKSPACE_UNAVAILABLE"});
+  const session=await fixtureConversation(t,c,{workspace});
+  assert.equal(session.team,null);
+  assert.equal(session.workspaceId,workspace.id);
   assert.equal(f.calls.length,0);
 });
 
 test("GUI publication survives optional view initialization failure and retries the empty baseline",async t=>{
   const {rmSync,readdirSync}=await import("node:fs"); const f=await fixture(t),c=await controller(t,f);
   writeFileSync(join(f.home,"gui-ui"),"blocked UI lock directory");
-  const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId:null});
+  const s=await fixtureConversation(t,c);
   assert.equal(s.persisted,true); assert.match(s.viewError,/阅读状态/); assert.deepEqual(s.view.seenResults,{});
 
-  const task=await c.action("task.submit",{sessionId:s.id,input:"view save is optional",protocolVersion:1, submissionId:"view-optional"});
+  const task=await submitDraft(c,{sessionId:s.id,input:"view save is optional",protocolVersion:1, submissionId:"view-optional"});
   await finished(c,task.taskId);
   rmSync(join(f.home,"gui-ui"));
   const restored=await c.session(s.id); assert.equal(restored.viewError,null); assert.deepEqual(restored.view.seenResults,{});
@@ -911,9 +896,9 @@ test("GUI publication survives optional view initialization failure and retries 
 
 test("external damaged GUI association keeps readable turns but blocks writes for a cached session",async t=>{
   const {readdirSync}=await import("node:fs"); const f=await fixture(t),c=await controller(t,f);
-  const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId:null});
+  const s=await fixtureConversation(t,c);
 
-  await finished(c,(await c.action("task.submit",{sessionId:s.id,input:"readable history",protocolVersion:1, submissionId:"association"})).taskId);
+  await finished(c,(await submitDraft(c,{sessionId:s.id,input:"readable history",protocolVersion:1, submissionId:"association"})).taskId);
   const dir=join(f.home,"pi/sessions/main"),path=join(dir,readdirSync(dir).find(n=>n.endsWith(s.id+".jsonl")));
   const entries=readFileSync(path,"utf8").trim().split("\n").map(JSON.parse);
   entries.find(e=>e.customType==="cothink-gui-workspace").data={workspaceId:"bad"};
@@ -929,12 +914,11 @@ test("view records exact results, preserves concurrent management, and updates w
   const pending = new Promise(resolve => {release=resolve;});
   const f = await fixture(t,async () => {await pending; return {text:"Can you review this?"};}), c = await controller(t,f);
   t.after(release);
-  const workspaceId = randomUUID();
-  await c.action("workspace.create",{workspaceId,name:"Review",project:null,defaultRosterId:teamId});
+  const {id:workspaceId}=await fixtureWorkspace(t,c,{name:"Review"});
   const s = await c.action("session.create",{sessionId:randomUUID(),workspaceId});
   const another = await c.action("session.create",{sessionId:randomUUID(),workspaceId});
 
-  const accepted = await c.action("task.submit",{sessionId:s.id,input:"Review",protocolVersion:1, submissionId:"review"});
+  const accepted = await submitDraft(c,{sessionId:s.id,input:"Review",protocolVersion:1, submissionId:"review"});
   const workspace = async () => (await c.bootstrap()).workspaces.find(w => w.id===workspaceId);
   try {
     assert.equal((await workspace()).attention.kind,"running");
@@ -986,11 +970,11 @@ test("view records exact results, preserves concurrent management, and updates w
 });
 
 test("archived workspace and session refuse the same conversation mutations; recovery stays available", async t => {
-  const f = await fixture(t,()=>({text:"Done"})), c = await controller(t,f), workspaceId = randomUUID();
-  await c.action("workspace.create",{workspaceId,name:"Archive",project:null,defaultRosterId:teamId});
+  const f = await fixture(t,()=>({text:"Done"})), c = await controller(t,f);
+  const {id:workspaceId}=await fixtureWorkspace(t,c,{name:"Archive"});
   const {id:sessionId} = await c.action("session.create",{sessionId:randomUUID(),workspaceId});
 
-  const submitted={sessionId,input:"Before archive",protocolVersion:1, submissionId:"existing"};
+  const submitted=await prepareSubmit(c,{sessionId,input:"Before archive",submissionId:"existing"});
   const {taskId}=await c.action("task.submit",submitted);
   await finished(c,taskId);
   const before=await c.session(sessionId);
@@ -1005,7 +989,7 @@ test("archived workspace and session refuse the same conversation mutations; rec
     ["extension.commands",{}],
     ["extension.command",{input:"/help"}],
     ["extension.reload",{}],
-    ["task.submit",{input:"Late task",protocolVersion:1, submissionId:"new"}],
+    ["task.submit",await prepareSubmit(c,{sessionId,input:"Late task",submissionId:"new"})],
   ];
   await c.action("workspace.update",{workspaceId,expectedRevision:0,change:{archived:true}});
   for (const [action,args] of mutations)
@@ -1022,8 +1006,8 @@ test("archived workspace and session refuse the same conversation mutations; rec
 });
 
 test("a rejected default roster write preserves the confirmed conversation switch only", async t => {
-  const f = await fixture(t), c = await controller(t,f), workspaceId=randomUUID();
-  await c.action("workspace.create",{workspaceId,name:"Rosters",project:null,defaultRosterId:teamId});
+  const f = await fixture(t), c = await controller(t,f);
+  const {id:workspaceId}=await fixtureWorkspace(t,c,{name:"Rosters"});
   const s = await c.action("session.create",{sessionId:randomUUID(),workspaceId});
   const other = await c.action("session.create",{sessionId:randomUUID(),workspaceId});
   const newRoster = await c.action("team.save",{name:"New roster",main:f.models.secondary[0],secondary:[f.models.main]});
@@ -1042,19 +1026,20 @@ test("a rejected default roster write preserves the confirmed conversation switc
 
 test("workspace attention targets corrupt navigation and clears after repair, without flagging missing view", async t => {
   const {rmSync} = await import("node:fs");
-  const f = await fixture(t), c = await controller(t,f), workspaceId = randomUUID();
-  await c.action("workspace.create",{workspaceId,name:"Reading repair",project:null,defaultRosterId:teamId});
+  const f = await fixture(t), c = await controller(t,f);
+  const {id:workspaceId}=await fixtureWorkspace(t,c,{name:"Reading repair"});
   const {id:sessionId} = await c.action("session.create",{sessionId:randomUUID(),workspaceId});
   const path = join(f.home,"session-ui",sessionId+".json"), original = readFileSync(path);
   const workspace = async () => (await c.bootstrap()).workspaces.find(w=>w.id===workspaceId);
   rmSync(path);
   assert.equal((await workspace()).attention,null,"a missing optional view does not block the conversation");
+  const blockedSubmission=await prepareSubmit(c,{sessionId,input:"Blocked before generation",submissionId:"blocked"});
   const corrupt = '{"broken"';
   writeFileSync(path,corrupt);
   const session = await c.session(sessionId);
   assert.equal(session.readOnly,true);
   assert.match(session.navigationError,/损坏/);
-  await assert.rejects(c.action("task.submit",{sessionId,input:"Blocked before generation",protocolVersion:1, submissionId:"blocked"}),
+  await assert.rejects(c.action("task.submit",blockedSubmission),
     {code:"SESSION_STATE_UNAVAILABLE"});
   assert.deepEqual((await workspace()).attention,{kind:"needs_attention",sessionId,taskId:null});
   assert.equal(readFileSync(path,"utf8"),corrupt);
@@ -1068,12 +1053,12 @@ test("workspace attention targets corrupt navigation and clears after repair, wi
 
 test('GUI submit validates explicit builtin skills through the unified frozen catalog',async t=>{
  const f=await fixture(t,()=>({text:'Selected skill received'})),c=await controller(t,f);
- const s=await c.action('session.create',{project:null});
- const submitted=await c.action('task.submit',{sessionId:s.id,input:'/skill:doc-maintenance explain documentation checks',protocolVersion:1,submissionId:randomUUID()});
+ const s=await fixtureConversation(t, c);
+ const submitted=await submitDraft(c,{sessionId:s.id,input:'/skill:doc-maintenance explain documentation checks',protocolVersion:1,submissionId:randomUUID()});
  assert.equal((await finished(c,submitted.taskId)).status,'completed');
  assert.equal(f.calls.length,1);
  assert.ok(f.calls[0].body.tools.some(x=>x.function.name==='read_skill'));
- await assert.rejects(c.action('task.submit',{sessionId:s.id,input:'/skill:unknown-skill explain',protocolVersion:1,submissionId:randomUUID()}),/技能|命令/);
+ await assert.rejects(submitDraft(c,{sessionId:s.id,input:'/skill:unknown-skill explain',protocolVersion:1,submissionId:randomUUID()}),/技能|命令/);
  assert.equal(f.calls.length,1);
 });
 
@@ -1082,8 +1067,8 @@ test('GUI disabled builtin and explicit-only external skill retain their selecti
  const f=await fixture(t,()=>({text:'answer'})),skill=join(f.home,'explicit','SKILL.md');
  mkdirSync(join(f.home,'explicit'));writeFileSync(skill,'---\nname: explicit-only\ndescription: Explicit test\ndisable-model-invocation: true\n---\nEXPLICIT_BODY');
  const c=await controller(t,f,{piResources:{skills:[skill],builtinSkills:{disabled:['doc-maintenance']}}});
- const s=await c.action('session.create',{project:null});
- const submit=input=>c.action('task.submit',{sessionId:s.id,input,protocolVersion:1,submissionId:randomUUID()});
+ const s=await fixtureConversation(t, c);
+ const submit=input=>submitDraft(c,{sessionId:s.id,input,protocolVersion:1,submissionId:randomUUID()});
  await assert.rejects(submit('/skill:doc-maintenance explain'),/技能/);assert.equal(f.calls.length,0);
  const normal=await submit('ordinary question');assert.equal((await finished(c,normal.taskId)).status,'completed');
  assert.doesNotMatch(JSON.stringify(f.calls[0].body.messages),/explicit-only|EXPLICIT_BODY/);
@@ -1094,34 +1079,39 @@ test('GUI disabled builtin and explicit-only external skill retain their selecti
 test("a missing Team folder stops creation but preserves existing chat", async t => {
   const f=await fixture(t,()=>({text:"reply without project"})), c=await controller(t,f);
   const {project}=repository(t);
-  const {id:workspaceId,project:root}=await c.action("workspace.create",{workspaceId:randomUUID(),name:"vanishing",project,defaultRosterId:null});
+  const {id:workspaceId,project:root}=await c.action("workspace.create",{workspaceId:randomUUID(),name:"vanishing",project,defaultRosterId:teamId});
   const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId});
   assert.equal(s.project,join(root,"对话-"+s.id));
   assert.equal(s.team.id,teamId);
   renameSync(project,project+"-moved");
   await assert.rejects(c.action("session.create",{workspaceId,sessionId:randomUUID()}),/ENOENT|不存在|不可用/);
-  const accepted=await c.action("task.submit",{sessionId:s.id,input:"hello",protocolVersion:1,submissionId:randomUUID()});
+  const accepted=await submitDraft(c,{sessionId:s.id,input:"hello",protocolVersion:1,submissionId:randomUUID()});
   assert.equal((await finished(c,accepted.taskId)).status,"completed");
   assert.equal(f.calls.length,1);
 });
 
 test("home editor reserves and recovers the same creation across host restarts without sending", async t => {
   const f=await fixture(t), c=await controller(t,f);
-  const draftId=randomUUID(), sessionId=randomUUID();
+  const draftId=randomUUID(), sessionId=randomUUID(), workspaceId=randomUUID();
+  const project=mkdtempSync(join(tmpdir(),"cothink-home-restart-"));
+  t.after(()=>rmSync(project,{recursive:true,force:true}));
+  await c.action("workspace.create",{workspaceId,project,name:"Restored Team",defaultRosterId:null});
   const editor={editorVersion:2,text:"retained home draft",editId:randomUUID(),workRequest:null,selectionId:null,turnOptions:null,materials:[]};
   const saved=await c.action("home.draft",{draftId,expectedRevision:null,editor});
   await assert.rejects(c.action("home.draft",{draftId,expectedRevision:null,editor}),{code:"DRAFT_CONFLICT"});
-  const pending=await c.action("home.reserve",{draftId,expectedRevision:saved.revision,sessionId,workspaceId:null});
+  const pending=await c.action("home.reserve",{draftId,expectedRevision:saved.revision,sessionId,workspaceId});
   assert.equal(pending.pendingCreateSessionId,sessionId);
-  await c.action("session.create",{sessionId,workspaceId:null,homeDraftId:draftId});
+  await c.action("session.create",{sessionId,workspaceId,homeDraftId:draftId});
   await c.close();
   const restored=await controllerModule.createGuiController({home:f.home,cwd:f.cwd});
   t.after(()=>restored.close());
   const loaded=(await restored.bootstrap()).homeDraft;
   assert.equal(loaded.pendingCreateSessionId,sessionId);
+  assert.equal(loaded.targetWorkspaceId,workspaceId);
   assert.equal(loaded.editor.text,editor.text);
   const transferred=await restored.action("home.transfer",{draftId,expectedRevision:loaded.revision,sessionId});
   assert.equal(transferred.editor.text,editor.text);
+  assert.equal(transferred.workspaceId,workspaceId);
   assert.equal(transferred.editor.editId,editor.editId);
   assert.equal((await restored.bootstrap()).homeDraft,null);
   assert.equal(f.calls.length,0);
@@ -1135,11 +1125,11 @@ test("failure freezing a skill before first progress confirms the original faile
   writeFileSync(join(skill,"SKILL.md"),"---\nname: resource-freeze-probe\ndescription: Test freeze rejection before any model call\n---\nProbe.\n");
   symlinkSync(join(skill,"SKILL.md"),join(skill,"references"));
   const c=await controller(t,f,{piResources:{skills:[join(skill,"SKILL.md")]}});
-  const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId:null}), submissionId=randomUUID();
+  const s=await fixtureConversation(t,c), submissionId=randomUUID();
   let timer;
   try {
     const accepted=await Promise.race([
-      c.action("task.submit",{sessionId:s.id,submissionId,input:"no request should leave this process",protocolVersion:1}),
+      submitDraft(c,{sessionId:s.id,submissionId,input:"no request should leave this process",protocolVersion:1}),
       new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("submission never settled")),1500);})
     ]);
     const saved=await c.task(accepted.taskId);
@@ -1150,22 +1140,30 @@ test("failure freezing a skill before first progress confirms the original faile
   } finally { clearTimeout(timer); }
 });
 
-test("new conversations prefer Team default, then the saved source roster, and require selection after drift",async t=>{
+test("an empty Team default leaves new conversations waiting for explicit roster selection",async t=>{
   const f=await fixture(t), c=await controller(t,f);
-  const source=await c.action("session.create",{sessionId:randomUUID(),workspaceId:null});
+  const make=(name,defaultRosterId)=>fixtureWorkspace(t,c,{name,defaultRosterId});
   const roster=await c.action("team.save",{name:"Alternative",main:f.models.secondary[0],secondary:[f.models.main]});
-  const pinned=await c.action("workspace.create",{workspaceId:randomUUID(),name:"With default",defaultRosterId:roster.id,project:null});
-  const plain=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Inherit",defaultRosterId:null,project:null});
+  const pinned=await make("With default",roster.id);
+  const plain=await make("Without default",null);
+  const source=await c.action("session.create",{sessionId:randomUUID(),workspaceId:pinned.id});
+  assert.equal(source.team.id,roster.id);
   const from={sourceSessionId:source.id,sourceLeafId:source.branchAnchor};
-  const pinnedChat=await c.action("session.create",{sessionId:randomUUID(),workspaceId:pinned.id,...from});
-  assert.equal(pinnedChat.team.id,roster.id);
-  const inherited=await c.action("session.create",{sessionId:randomUUID(),workspaceId:plain.id,...from});
-  assert.equal(inherited.team.id,source.team.id);
+  const first=await c.action("session.create",{sessionId:randomUUID(),workspaceId:plain.id,...from});
+  const second=await c.action("session.create",{sessionId:randomUUID(),workspaceId:plain.id});
+  assert.equal(first.team,null);
+  assert.equal(second.team,null);
+  await assert.rejects(submitDraft(c,{sessionId:first.id,input:"Can this send?"}),/阵容|Team/);
+  assert.equal(f.calls.length,0);
+  await c.action("session.team",{sessionId:first.id,teamId});
+  await c.action("session.team",{sessionId:second.id,teamId:roster.id});
+  assert.equal((await c.session(first.id)).team.id,teamId);
+  assert.equal((await c.session(second.id)).team.id,roster.id);
+  assert.equal((await c.bootstrap()).workspaces.find(row=>row.id===plain.id).defaultRosterId,null);
   await c.action("session.name",{sessionId:source.id,title:"Leaf changed"});
   const drift=await c.action("session.create",{sessionId:randomUUID(),workspaceId:plain.id,...from});
   assert.equal(drift.team,null);
   assert.match(drift.rosterRequired,/来源对话.*变化/);
-  assert.equal((await c.bootstrap()).workspaces.find(row=>row.id===plain.id).defaultRosterId,null);
   assert.equal(f.calls.length,0);
 });
 
@@ -1175,95 +1173,12 @@ test("setting a default with an unavailable later roster seat preserves the Team
   const brokenId=randomUUID();
   config.teams.push({id:brokenId,name:"Removed provider model",main:f.models.main,secondary:[f.models.secondary[0],{provider:"fixture",modelId:"removed-r2"}]});
   saveConfig(f.home,config);
-  const group=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Working default",project:null,defaultRosterId:teamId});
+  const group=await fixtureWorkspace(t,c,{name:"Working default"});
   await assert.rejects(c.action("workspace.update",{workspaceId:group.id,expectedRevision:group.revision,change:{defaultRosterId:brokenId}}),/默认阵容.*不可用/);
   const saved=(await c.bootstrap()).workspaces.find(row=>row.id===group.id);
   assert.equal(saved.defaultRosterId,teamId);
   assert.equal(saved.revision,group.revision);
   assert.equal(f.calls.length,0);
-});
-
-test("legacy project directory can prepare and resume work", async t => {
-  const checks=[{command:"node",args:["-e","if(require('fs').readFileSync('a.txt','utf8').trim()!=='prepared result')process.exit(1)"]}];
-  const f = await fixture(t, (_, n) => {
-    const tool=(name,args={})=>({toolCalls:[{name,args}]});
-    if (n<=2) return tool("start_work",{action:"start",reason:"edit",plan:checkedPlan("Edit prepared file",checks)});
-    if (n===3) return tool("read",{path:"a.txt"});
-    if (n===4) return tool("write",{path:"a.txt",content:"prepared result\n"});
-    if (n===5 || n===6) return tool("accept_change");
-    return {text:"delivered"};
-  });
-  const c = await controller(t,f);
-  const {execution}=await import("./helpers/agent-sync-fixture.js");
-  await c.action("settings.work",{work:{execution,checks}});
-  const ordinary = mkdtempSync(join(tmpdir(),"cothink-t2-ordinary-"));
-  t.after(()=>rmSync(ordinary,{recursive:true,force:true}));
-  writeFileSync(join(ordinary,"a.txt"),"initial\n");
-  const directory=await c.action("project.inspect",{path:ordinary,purpose:"directory"});
-  assert.equal(directory.directoryAvailable,true);
-  assert.equal((await c.action("project.inspect",{path:ordinary})).executionReady,false);
-  const s=await c.action("session.create",{project:ordinary});
-  assert.equal(s.project,directory.canonicalPath);
-  const first=await c.action("task.submit",{sessionId:s.id,input:"work with a.txt",protocolVersion:1,submissionId:randomUUID()});
-  const blocked=await finished(c,first.taskId);
-  assert.equal(blocked.status,"blocked");
-  assert.equal(blocked.projectPreparationBlocked?.code,"PROJECT_NOT_PREPARED");
-  assert.equal(blocked.proposalRef??null,null);
-  assert.equal(f.calls.length,1);
-  const operationId=randomUUID();
-  const prep=(action,rest={})=>c.action("project.prepare",{action,operationId,...rest});
-  assert.equal((await prep("preview",{path:ordinary})).status,"inventory");
-  const preview=await prep("preview",{path:ordinary,selectedPaths:["a.txt"]});
-  assert.equal(preview.status,"preview");
-  assert.equal((await prep("confirm")).status,"ready");
-  assert.equal((await prep("query")).commit,preview.expectedCommit);
-  assert.equal(f.calls.length,1);
-  const continued=await c.action("task.continuePrepared",{sessionId:s.id,sourceTaskId:first.taskId,submissionId:randomUUID(),protocolVersion:1});
-  assert.equal(readTask(f.home,continued.taskId).continuationSource.taskId,first.taskId);
-  assert.equal((await finished(c,first.taskId)).status,"blocked");
-  const delivery=await confirmProject(c,s.id,continued);
-  assert.ok(delivery.task.work.version);
-  assert.match((await c.diff(delivery.task.id)).text,/prepared result/);
-  assert.equal(readFileSync(join(ordinary,"a.txt"),"utf8"),"initial\n");
-});
-
-test("rebind preserves legacy branches and checks their writers", async t => {
-  const f=await fixture(t), c=await controller(t,f);
-  const root=mkdtempSync(join(tmpdir(),"cothink-rebind-"));
-  t.after(()=>rmSync(root,{recursive:true,force:true}));
-  const [old,other,next]=["old","other","next"].map(name=>join(root,name));
-  for (const path of [old,other,next]) mkdirSync(path);
-  const oldTeam=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Old",project:old,defaultRosterId:teamId});
-  const otherTeam=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Other",project:other,defaultRosterId:teamId});
-  const m=SessionManager.create(f.cwd,join(f.home,"pi/sessions/main"));
-  m.appendMessage({role:"user",content:"legacy",timestamp:Date.now()});
-  const fork=m.getLeafId();
-  m.appendCustomEntry("cothink-project",{project:oldTeam.project});
-  m.branch(fork);
-  m.appendCustomEntry("cothink-project",{project:otherTeam.project});
-  const before=readFileSync(m.getSessionFile());
-  const {acquireSessionWriter}=await load("src/storage.js");
-  const writer=acquireSessionWriter(join(f.home,"pi"),m.getSessionId());
-  const nextPath=(await c.action("project.inspect",{path:next,purpose:"directory"})).canonicalPath;
-  const operationId=randomUUID(), args={workspaceId:oldTeam.id,expectedRevision:0,path:nextPath,operationId};
-  try { await assert.rejects(c.action("workspace.rebind",args),{code:"WORKSPACE_CONFLICT"}); }
-  finally { writer.release(); }
-  const changed=await c.action("workspace.rebind",args);
-  assert.equal(changed.project,nextPath);
-  assert.deepEqual(readFileSync(m.getSessionFile()),before);
-  const state=JSON.parse(readFileSync(join(f.home,"gui-workspaces.json")));
-  assert.equal(state.legacyMembership[m.getSessionId()][oldTeam.project],oldTeam.id);
-  assert.equal(state.legacyMembership[m.getSessionId()][otherTeam.project],otherTeam.id);
-  assert.equal((await c.action("workspace.rebind.query",{workspaceId:oldTeam.id,expectedRevision:0,operationId})).status,"confirmed");
-  const existing=await c.session(m.getSessionId());
-  assert.equal(existing.project,otherTeam.project);
-  assert.equal(existing.workspaceId,otherTeam.id);
-  const created=await c.action("session.create",{workspaceId:oldTeam.id,sessionId:randomUUID()});
-  assert.equal(created.project,join(nextPath,"对话-"+created.id));
-  const detached=await c.action("workspace.rebind",{workspaceId:oldTeam.id,expectedRevision:1,path:null,operationId:randomUUID()});
-  assert.equal(detached.project,null);
-  assert.equal((await c.session(created.id)).project,created.project);
-  assert.equal((await c.session(created.id)).workspaceId,oldTeam.id);
 });
 
 test("browser folder chooser creates a directory without Git and preserves it when not attached", async t => {
@@ -1281,9 +1196,9 @@ test("browser folder chooser creates a directory without Git and preserves it wh
 
 test("rebind cannot absorb an undiscovered legacy session at the destination", async t => {
   const f=await fixture(t), c=await controller(t,f);
-  const from=join(f.cwd,"original"), into=join(f.cwd,"late-legacy");
-  mkdirSync(from); mkdirSync(into);
-  const team=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Original",project:from,defaultRosterId:teamId});
+  const team=await fixtureWorkspace(t,c,{name:"Original"});
+  const into=mkdtempSync(join(tmpdir(),"cothink-late-legacy-"));
+  t.after(()=>rmSync(into,{recursive:true,force:true}));
   const {canonicalPath:destination}=await c.action("project.inspect",{path:into,purpose:"directory"});
   const m=SessionManager.create(f.cwd,join(f.home,"pi/sessions/main"));
   m.appendCustomEntry("cothink-project",{project:destination});

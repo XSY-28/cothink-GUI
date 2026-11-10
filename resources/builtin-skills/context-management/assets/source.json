@@ -1,7 +1,7 @@
 {
   "name": "context-management",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "origin": "CoThink original guidance based on desktop unified contracts sections 7\u20139",
   "license": "MIT",
-  "hostContextTools": "current-branch search/read/derived notes and explicit budgeted organization implemented in D6; availability is host-reported per role"
+  "hostContextTools": "current-branch search/read/derived notes, purpose-bound process facts and explicit budgeted organization; availability is host-reported per role"
 }

@@ -139,3 +139,16 @@ export function ownerAt(path) {
     },
   };
 }
+
+export const canonical = (x) => JSON.stringify(sort(x));
+function sort(x) {
+  return Array.isArray(x)
+    ? x.map(sort)
+    : x && typeof x === "object"
+      ? Object.fromEntries(
+          Object.keys(x)
+            .sort()
+            .map((k) => [k, sort(x[k])]),
+        )
+      : x;
+}

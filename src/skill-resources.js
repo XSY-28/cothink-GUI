@@ -1,18 +1,18 @@
 import {parseFrontmatter} from "@earendil-works/pi-coding-agent";
 import {createHash} from 'node:crypto';
 import {constants,openSync,closeSync,fstatSync,readFileSync,lstatSync,readdirSync,mkdirSync,writeFileSync,realpathSync,existsSync,chmodSync} from 'node:fs';
-import {join,dirname,basename,resolve,relative,isAbsolute} from 'node:path';
+import {join,dirname,basename,resolve,relative,isAbsolute,sep} from 'node:path';
 import {privateDirectory} from './storage.js';
 import {problem} from './task.js';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
-const inside=(root,path)=>{const rel=relative(root,path);return !isAbsolute(rel)&&rel!=='..'&&!rel.startsWith('../');};
+const inside=(root,path)=>{const rel=relative(root,path);return !isAbsolute(rel)&&rel!=='..'&&!rel.startsWith('..'+sep);};
 function safeRelative(path){return typeof path==='string'&&path&&!isAbsolute(path)&&!/[\\\0]/.test(path)&&!path.split('/').some(p=>!p||p==='.'||p==='..'||p.toLowerCase()==='.git');}
 // Every ancestor and the opened descriptor are checked; a symlink is never followed.
 function stableRead(root,path){
   const abs=resolve(root,path);if(!inside(root,abs))throw problem('SKILL_CHANGED','Resource escaped frozen directory');
   if(lstatSync(root).isSymbolicLink())throw problem('SKILL_CHANGED','Selected skill resource root is a symbolic link');
   let part=root;
-  for(const p of relative(root,abs).split('/').filter(Boolean)){part=join(part,p);if(lstatSync(part).isSymbolicLink())throw problem('SKILL_CHANGED','Symbolic link in selected skill resource: '+part);}
+  for(const p of relative(root,abs).split(sep).filter(Boolean)){part=join(part,p);if(lstatSync(part).isSymbolicLink())throw problem('SKILL_CHANGED','Symbolic link in selected skill resource: '+part);}
   const fd=openSync(abs,constants.O_RDONLY|(constants.O_NOFOLLOW??0));
   try{const before=fstatSync(fd);if(!before.isFile()||before.nlink!==1)throw problem('SKILL_CHANGED','Unsupported skill resource: '+abs);
     const bytes=readFileSync(fd),after=fstatSync(fd),pathStat=lstatSync(abs);
@@ -96,14 +96,31 @@ function collectSkillResources(skill,resourceRoot){
   if(root)return {name:skill.name,description:skill.description,version:skill.version??null,sourceKind:skill.sourceKind??'selected',sourceDigest:skill.sourceDigest??skill.hash,hash:skill.hash,disabledModelInvocation:!!skill.disabledModelInvocation,sourceDirectory,sourcePath:skill.path,root,path:join(root,'SKILL.md'),executionPath:'/resources/'+skill.name+'/SKILL.md',unavailable,files,modes};
 }
 export function taskSkillDirectory(task){return (getTaskSkillResources(task)).map(({name,description,version,sourceKind,hash,disabledModelInvocation,unavailable})=>({name,description,version:version??null,sourceKind:sourceKind??'selected',hash,disabledModelInvocation,path:'skill:'+name+'/SKILL.md',executionPath:'/resources/'+name+'/SKILL.md',unavailable:unavailable?.map(x=>({reason:x.reason})),resourceMode:'on-demand'}));}
+function readFrozenResource(record,relativePath){
+  const digest=record.files[relativePath];
+  try{
+    const {bytes}=stableRead(record.root,relativePath);
+    if(hash(bytes)!==digest)throw Error('Hash mismatch');
+    return {bytes,record,path:join(record.root,relativePath),relativePath,hash:digest};
+  }catch(error){throw problem('SKILL_CHANGED','Frozen resource unavailable or changed: '+record.name+'/'+relativePath+'; '+error.message);}
+}
 /** Narrow model-facing reader; arbitrary source aliases remain internal to managed read. */
 export function readFrozenSkill(task,args,{actor,stageId,toolCallId,explicit=false}={}) {
  if(task.signal?.aborted||task.record.status!=='running')throw problem('TASK_ENDED','Skill reading requires a running task');
- if(!args||typeof args.name!=='string'||!safeRelative(args.name)||args.name.includes('/')||!safeRelative(args.path??'SKILL.md'))throw problem('SKILL_RESOURCE','Use a selected skill name and relative resource path');
+ if(!safeRelative(args?.name)||args.name.includes('/'))throw problem('SKILL_RESOURCE','Use a selected skill name');
+ const requestedPath=args.path??'SKILL.md',prefix='skill:'+args.name+'/';
+ const relativePath=typeof requestedPath==='string'&&requestedPath.startsWith(prefix)?requestedPath.slice(prefix.length):requestedPath;
+ if(!safeRelative(relativePath)||/^(?:skill:|[a-z]:|[a-z][a-z\d+.-]*:\/)/i.test(relativePath)){
+  throw problem('SKILL_RESOURCE','Invalid skill resource path. Use a relative path or a skill URI matching the selected name');
+ }
  const offset=args.offset??0,limit=args.limit??16000;
  if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>32000)throw problem('SKILL_RESOURCE','Invalid skill read page');
- let resource;try{resource=readTaskSkillResource(task,'skill:'+args.name+'/'+(args.path??'SKILL.md'));}catch{throw problem('SKILL_CHANGED','Frozen skill resource missing or changed: '+args.name);}
- if(!resource)throw problem('SKILL_RESOURCE','Skill resource is not available in this task');
+ const record=getTaskSkillResources(task).find(skill=>skill.name===args.name);
+ if(!record)throw problem('SKILL_RESOURCE','Skill is not selected for this task: '+args.name);
+ if(!Object.hasOwn(record.files,relativePath))throw problem('SKILL_RESOURCE','Resource was not selected in the task freeze: '+relativePath);
+ let resource;
+ try{resource=readFrozenResource(record,relativePath);}
+ catch{throw problem('SKILL_CHANGED','Frozen skill resource missing or changed: '+args.name+'/'+relativePath);}
  const text=resource.bytes.toString('utf8'),content=text.slice(offset,offset+limit),nextOffset=offset+content.length;
  (task.record.tools??=[]).push({kind:'skill_resource_read',name:explicit?'skill_expansion':'read_skill',toolCallId,actor,stageId,resourceName:resource.record.name,resourcePath:resource.relativePath,resourceHash:resource.hash,skillHash:resource.record.hash,offset,characters:content.length,explicit,status:'completed'});task.save();
  return {name:resource.record.name,path:resource.relativePath,skillHash:resource.record.hash,resourceHash:resource.hash,offset,nextOffset,eof:nextOffset>=text.length,content};
@@ -121,9 +138,8 @@ export function readTaskSkillResource(task,path){
     for(const base of [r.root,r.sourceDirectory])for(const candidate of requestedPaths){
       const rel=(candidate===r.sourcePath?'SKILL.md':relative(base,candidate)).replaceAll('\\','/');
       if(!rel||!inside(base,candidate))continue;
-      if(!r.files[rel]){if(base===r.root)throw problem('SKILL_RESOURCE','Resource was not selected in the task freeze: '+rel);continue;}
-      try{const {bytes}=stableRead(r.root,rel);if(hash(bytes)!==r.files[rel])throw Error('Hash mismatch');return {bytes,record:r,path:join(r.root,rel),relativePath:rel,hash:r.files[rel]};}
-      catch(error){throw problem('SKILL_CHANGED','Frozen resource unavailable or changed: '+r.name+'/'+rel+'; '+error.message);}
+      if(!Object.hasOwn(r.files,rel)){if(base===r.root)throw problem('SKILL_RESOURCE','Resource was not selected in the task freeze: '+rel);continue;}
+      return readFrozenResource(r,rel);
     }
   }
   return null;

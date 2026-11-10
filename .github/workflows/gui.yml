@@ -76,7 +76,7 @@ jobs:
         env:
           COTHINK_TEST_PACKAGE_ROOT: ${{ runner.temp }}/CoThink GUI 中文 prefix/node_modules/cothink-v2
           COTHINK_TEST_CLI: ${{ runner.temp }}/CoThink GUI 中文 prefix/node_modules/cothink-v2/bin/cothink.js
-        run: node --test test/pi-kimi.test.js test/agent-sync-dispatch.test.js test/agent-sync-dispatch-docker.test.js test/gui-integration.test.js test/gui-history.test.js test/gui-partial.test.js
+        run: node --test test/pi-kimi.test.js test/agent-sync-dispatch.test.js test/agent-sync-dispatch-supervision.test.js test/agent-sync-dispatch-docker.test.js test/gui-integration.test.js test/gui-integration-docker.test.js test/gui-history.test.js test/gui-history-view.test.js test/gui-partial.test.js
       - name: Prepare and exercise the installed PROJECT plugin runtime offline
         env:
           COTHINK_TEST_PACKAGE_ROOT: ${{ runner.temp }}/CoThink GUI 中文 prefix/node_modules/cothink-v2
@@ -84,7 +84,7 @@ jobs:
         run: |
           runtime="$RUNNER_TEMP/cothink-project-runtime-installed"
           node "$COTHINK_TEST_PACKAGE_ROOT/scripts/prepare-project-plugin-runtime.mjs" "$runtime"
-          COTHINK_TEST_PLUGIN_RUNTIME="$runtime" node --test --test-concurrency=1 test/agent-sync-project-plugins.test.js test/agent-sync-project-native.test.js
+          COTHINK_TEST_PLUGIN_RUNTIME="$runtime" node --test --test-concurrency=1 test/agent-sync-project-plugins.test.js test/agent-sync-project-native.test.js test/agent-sync-project-native-formal.test.js
       - uses: actions/upload-artifact@v4
         with:
           name: unified-linux-arm64-candidate
@@ -121,7 +121,7 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node --test test/ci-candidate.test.js
       - run: npm run test:windows
-      - run: node --test test/pi-updates.test.js test/gui-updates.test.js test/gui-view.test.js test/gui-projection.test.js test/gui-components.test.js test/final-display.test.js test/gui-package.test.js
+      - run: node --test test/pi-updates.test.js test/gui-updates.test.js test/gui-view.test.js test/gui-projection.test.js test/gui-components.test.js test/gui-components-team-navigation.test.js test/final-display.test.js test/gui-package.test.js
       - name: Build and pack on Windows
         shell: pwsh
         run: |
@@ -145,9 +145,9 @@ jobs:
           "COTHINK_TEST_PACKAGE_ROOT=$packageRoot" >> $env:GITHUB_ENV
           "COTHINK_TEST_CLI=$packageRoot/bin/cothink.js" >> $env:GITHUB_ENV
       - name: Exercise installed portable dispatch and observe worker exit
-        run: node --test test/agent-sync-dispatch.test.js
+        run: node --test test/agent-sync-dispatch.test.js test/agent-sync-dispatch-supervision.test.js
       - name: Exercise installed real HTTP history and partial results
-        run: node --test test/pi-kimi.test.js test/gui-history.test.js test/gui-partial.test.js
+        run: node --test test/pi-kimi.test.js test/gui-history.test.js test/gui-history-view.test.js test/gui-partial.test.js
       - uses: actions/setup-python@v5
         if: matrix.arch == 'x64'
         with:

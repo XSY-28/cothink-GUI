@@ -7,6 +7,8 @@ import { setImmediate } from "node:timers/promises";
 import { CredentialSynchronizationError } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveConfig } from "../src/config.js";
 import * as settings from "../src/gui-settings.js";
+import {fixture} from "./helpers/pi-fixture.js";
+import {controller,finished,fixtureConversation,prepareSubmit} from "./helpers/gui-controller-fixture.js";
 
 const next = async (manager, id, status) => {
   for (let i = 0; i < 20; i++) {
@@ -218,4 +220,16 @@ test("Pi may request the same installation identity on subsequent OAuth operatio
   }
   assert.match(received[0],/^[a-f0-9-]{36}$/);
   assert.equal(received[0],received[1]);
+});
+
+
+test("a missing project directory preserves builtin settings and permits a simple main answer",async t=>{
+  const f=await fixture(t,()=>({text:"The conversation still works."}));
+  const project=temporaryHome(t);
+  const c=await controller(t,f,{piResources:{builtinSkills:{disabled:["doc-maintenance"]}}});
+  const session=await fixtureConversation(t,c,{project});
+  rmSync(session.project,{recursive:true});
+  const result=await c.action("task.submit",await prepareSubmit(c,{sessionId:session.id,input:"What is SVG?"}));
+  assert.equal((await finished(c,result.taskId)).status,"completed");
+  assert.equal(f.calls.length,1);
 });

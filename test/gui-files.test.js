@@ -20,9 +20,9 @@ async function prepared(t){
     const edits=[];
     for(const [path,content] of Object.entries(contents)) {const old=await v.read({changeId:c.changeId,path});edits.push({path,oldHash:old.contentHash,contentBase64:content===null?null:Buffer.from(content).toString('base64'),...(modes[path]?{mode:modes[path]}:{})});}
     await v.edit(c.changeId,{requestId:randomUUID(),expectedVersion:c.privateVersion,edits});
-    const p=await v.prepareChange(c.changeId,{requestId:randomUUID()});const a=await v.acceptChange({requestId:randomUUID(),changeId:c.changeId,candidateVersion:p.candidateVersion});
+    const p=await v.prepareChange(c.changeId,{requestId:randomUUID()}),requestId=randomUUID();const a=await v.acceptChange({requestId,changeId:c.changeId,candidateVersion:p.candidateVersion});
     const result=await v.beginChange({requestId:randomUUID(),actor:'result',intent:'read only final result',scope:[],readScope:['.'],readOnly:true});
-    return {id:randomUUID(),work:{root:f.project,backend:'agent-sync',toolHome:v.toolHome,startVersion:start,version:a.acceptedVersion,resultWorkspace:result.workspace,resultChangeId:result.changeId}};
+    return {id:randomUUID(),work:{root:f.project,backend:'agent-sync',toolHome:v.toolHome,startVersion:start,version:a.acceptedVersion,resultWorkspace:result.workspace,resultChangeId:result.changeId,acceptance:[{requestId,status:a.status,acceptedVersion:a.acceptedVersion}]}};
   }
   return {...f,v,publish};
 }
@@ -118,6 +118,19 @@ test('file reads reject traversal, changed bytes, links, unavailable results and
   await assert.rejects(guiFile(f.home,r,ref(r,'dir/a.txt')),{code:'FILE_PATH_INVALID'});
   await assert.rejects(guiFile(f.home,{...r,work:{...r.work,resultChangeId:null}},ref(r,'a.txt')),{code:'FILE_UNAVAILABLE'});
   await assert.rejects(guiFile(f.home,r,ref(r,'a.txt'),{purpose:'arbitrary'}),{code:'FILE_PURPOSE_INVALID'});
+});
+
+test('accepted partial file can be read from its immutable object before a result directory exists',async t=>{
+  const f=await prepared(t), published=await f.publish({'a.txt':'accepted partial\n'});
+  const partial={...published,status:'partial',project:{id:'project',stepId:'main'},work:{...published.work,resultWorkspace:null,resultChangeId:null}};
+  await f.publish({'a.txt':'a later accepted file\n'});
+  writeFileSync(join(f.project,'a.txt'),'uncommitted local change\n');
+  const {items}=await guiFiles(f.home,partial);
+  assert.equal(items[0].readable,true);
+  assert.equal((await guiFile(f.home,partial,items[0].ref)).bytes.toString(),'accepted partial\n');
+  const notAccepted={...partial,work:{...partial.work,acceptance:[]}};
+  assert.deepEqual((await guiFiles(f.home,notAccepted)).items,[]);
+  await assert.rejects(guiFile(f.home,notAccepted,items[0].ref),{code:'FILE_UNAVAILABLE'});
 });
 
 test('static preview closes over verified relative images and CSS; raw download remains unchanged and unsafe structures fall back',async t=>{

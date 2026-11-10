@@ -4,21 +4,17 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { fixtureConversation, teamId } from "./helpers/gui-controller-fixture.js";
 import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { chooseRailCreation, railButton } from "./helpers/gui-rail.js";
-const packageRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL("..",import.meta.url)));
-const load=path=>import(pathToFileURL(join(packageRoot,path)));
-const {saveConfig}=await load("src/config.js");
-const {createTeamConfig}=await load("src/teams.js");
-const {startGuiServer}=await load("src/gui-server.js");
+import { createTeamConfig, load, saveConfig, startGuiServer } from "./gui-navigation.fixture.js";
 
 test("search failures and rejected renames stay actionable in their dialogs", async t => {
   const f = await fixture(t);
   saveConfig(f.home, createTeamConfig({formatVersion:2,...f.models}, "UI fixture", "7c8094cd-3476-4bfa-8f53-055d87972896"));
   const {createGuiController} = await load("src/gui-controller.js");
   const controller = await createGuiController({home:f.home,suggestedProject:null});
-  const {id} = await controller.action("session.create",{sessionId:crypto.randomUUID(),workspaceId:null});
+  const {id} = await fixtureConversation(t,controller);
   await controller.action("session.name",{sessionId:id,title:"检索重命名测试"});
   const host = await startGuiServer({controller,open:false});
   t.after(()=>host.close());
@@ -144,6 +140,7 @@ test('compact sidebar keeps three Teams and project conversations separate witho
     await dialog.getByText('手动输入路径',{exact:true}).click();
     await dialog.getByLabel('项目绝对路径').fill(folder);
     await dialog.getByRole('button',{name:'只读检查目录'}).click();
+    await dialog.getByRole('combobox',{name:'默认阵容',exact:true}).selectOption(teamId);
     await dialog.getByRole('button',{name:'创建',exact:true}).click();
     await dialog.waitFor({state:'hidden'});
     await fillDraft(name+' 第一份草稿');

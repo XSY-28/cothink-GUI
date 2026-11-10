@@ -4,15 +4,15 @@ import { CredentialSynchronizationError, SettingsManager } from "@earendil-works
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createModelRuntime } from "./pi-runtime.js";
-import { loadConfig, updateConfig, positiveInteger } from "./config.js";
+import { createModelRuntime, projectModelFacts } from "./pi-runtime.js";
+import { loadConfig, updateConfig, positiveInteger, validateConfig } from "./config.js";
 import {
   addTeam,
   createTeamConfig,
   normalizeTeamName,
   removeTeam,
 } from "./teams.js";
-import { validateModelRefs, selectModelRef } from "./setup.js";
+import { selectModelRef } from "./setup.js";
 import { acquireSessionWriter, privateDirectory, writePrivateJson } from "./storage.js";
 import { validateModelThinking } from "./thinking.js";
 export { saveGuiBuiltinSkills, saveGuiLocalSkills } from "./gui-skills.js";
@@ -25,10 +25,12 @@ export async function saveGuiTeam(home, { name, main, secondary }) {
     secondary,
   };
   const runtime = await createModelRuntime(home);
-  // Every saved seat must be usable; turn execution still consumes only its needed seats.
-  await validateModelRefs({ formatVersion: 2, main, secondary }, runtime);
-  for (const ref of secondary.slice(1))
-    await validateModelRefs({ formatVersion: 2, main: ref, secondary: [] }, runtime, { singleModel: true });
+  validateConfig({formatVersion:2,main,secondary});
+  if (!secondary.length) throw Error("请配置至少一个副模型。");
+  for (const ref of [main,...secondary]) {
+    const model=await projectModelFacts(runtime,ref);
+    if (!model.available) throw Object.assign(Error(model.unavailableReason),{code:model.unavailableCode});
+  }
   updateConfig(home, (current) =>
     current?.formatVersion === 3
       ? addTeam(current, team)
@@ -52,9 +54,9 @@ export function saveGuiWork(home, work) {
     !work ||
     typeof work !== "object" ||
     Array.isArray(work) ||
-    Object.keys(work).some((k) => !["checks", "execution"].includes(k))
+    Object.keys(work).some((k) => !["checks", "execution", "maxConcurrentRequests"].includes(k))
   )
-    throw Error("工作设置只接受 checks 与 execution。");
+    throw Error("工作设置只接受检查、执行环境和项目并发上限。");
   return updateConfig(home, (c) => {
     if (!c) throw Error("请先保存 Team。");
     return { ...c, work: structuredClone(work) };

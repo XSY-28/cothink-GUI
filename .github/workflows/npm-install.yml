@@ -126,7 +126,7 @@ jobs:
           export COTHINK_EXPECT_VERSION="$(node -p "require('./package.json').version")"
           node test/helpers/npm-installed.mjs "$COTHINK_INSTALLED_PACKAGE"
           export COTHINK_TEST_PACKAGE_ROOT="$COTHINK_INSTALLED_PACKAGE"
-          node --test test/pi-kimi.test.js test/agent-sync-dispatch.test.js test/pi-session.test.js
+          node --test test/pi-kimi.test.js test/agent-sync-dispatch.test.js test/agent-sync-dispatch-supervision.test.js test/pi-session.test.js
           node test/helpers/pi-manual-terminal.mjs --smoke
       - name: Installed Windows native clipboard
         if: runner.os == 'Windows'

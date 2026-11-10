@@ -1,10 +1,10 @@
-import {defaultTurnOptions,editorReadPaths} from "../../src/gui-turn-options.js";
+import {defaultTurnOptions,editorReadPaths,retiredReviewOption} from "../../src/gui-turn-options.js";
 import {materialExtensions} from "../../src/gui-material-types.js";
 import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import {Icon} from "./Icon.js";
 import {shouldSubmit} from "./view.js";
 const h=React.createElement;
-export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,onOpenTurnLimits,homeReady=false,creating=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onChooseSkill,selectedSkill,onRemoveSkill}) {
+export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,onOpenTurnLimits,homeReady=false,creating=false,homeCreationPending=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onChooseSkill,selectedSkill,onRemoveSkill}) {
   const composing=useRef(false), input=useRef(null), fileInput=useRef(null), addTrigger=useRef(null), menuPanel=useRef(null), importing=useRef(new Map());
   const [addingFor,setAddingFor]=useState(), [importError,setImportError]=useState(null), [,showImportState]=useState(0), team=session?.team;
   const scope=editorKey??session?.id??null, importScope=session?.id??null;
@@ -37,14 +37,15 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     return()=>{observer?.disconnect();window.removeEventListener("resize",grow);};
   },[]);
   const options=turnOptions??defaultTurnOptions();
-  const {readPaths,readOnly,delegate,review,maxCalls}=options;
+  const {readPaths,readOnly,delegate,maxCalls}=options;
+  const needsReviewUpdate=retiredReviewOption(options);
   const readAllowed=options.readAllowed&&options.readProject===session?.project&&options.readWorkspaceId===(session?.workspaceId??null);
   const disabled=(!session && !homeReady) || session?.navigation?.archived || !!session?.navigationError || !!session?.readOnly || !!session?.selectionError;
   const localCommand=/^\/(?:team|models|settings|help)$/.test(draft.trim());
   const localTeam=/^\/(?:team|models)$/.test(draft.trim());
   const incomplete=!!importing.current.get(importScope)||materials.some(item=>item.status!=="ready");
   const blocks=boot.protocol?.unified!==1 || disabled || draftConflict || (!draft.trim()&&!materials.length) ||
-    (creating || !localCommand && (busy || submitting || pending || incomplete || !team && !homeReady));
+    (creating || homeCreationPending || !localCommand && (busy || submitting || pending || incomplete || needsReviewUpdate || !team && !homeReady));
   const send=async()=>{if(!blocks&&(localCommand||!importing.current.get(importScope)))await onSubmit();};
   const optionDisabled=disabled||submitting||pending||creating||session?.contextOrganizing;
   const importFiles=async files=>{
@@ -70,8 +71,7 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
   ].filter(Boolean);
   const chips=[
     readOnly&&["read-only","只分析",()=>onTurnOptions?.({readOnly:false}),onOpenTurnLimits],
-    delegate!==true&&["dispatch",delegate===false&&!review?"禁止派工及按需评审（旧限制）":"禁止派工",()=>onTurnOptions?.({delegate:true}),onOpenTurnLimits],
-    review&&["review","独立评审",()=>onTurnOptions?.({review:false}),onOpenTurnLimits],
+    delegate!==true&&["dispatch","禁止派工",needsReviewUpdate?null:()=>onTurnOptions?.({delegate:true}),onOpenTurnLimits],
     maxCalls!==""&&["max-calls",`最多 ${maxCalls} 次请求`,()=>onTurnOptions?.({maxCalls:""}),onOpenTurnLimits],
     options.readAllowed&&["read-scope",readAllowed?`读取已保存版本：${editorReadPaths(readPaths).join("、")||"未选范围"}`:"项目读取范围需重新确认",()=>onTurnOptions?.({readAllowed:false,readPaths:[]})],
     selectedSkill&&["skill",`技能：${typeof selectedSkill==="string"?selectedSkill:selectedSkill.name}`,onRemoveSkill],
@@ -102,12 +102,18 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
   draftConflict && h("div",{className:"composer-notice",role:"alert"},"保存稿已变化；当前本机输入保留。",
     h("button",{type:"button",onClick:()=>onResolveDraft?.("saved")},"读取保存稿"),
     h("button",{type:"button",onClick:()=>onResolveDraft?.("local")},"以本机稿再保存")),
+  needsReviewUpdate && h("div",{className:"composer-notice",role:"status"},
+    "此草稿使用了已退役的普通对话评审选项。采用现行规则后，项目仍可按成果需要安排审查。",
+    delegate!==true && "本条仍禁止新派工，可在确认后修改。",
+    h("button",{type:"button",disabled:optionDisabled||!!draftConflict,onClick:()=>{
+      onTurnOptions?.({review:false,delegate:delegate===true});input.current?.focus();
+    }},"采用现行规则")),
   session && !team && !session.workspaceError && h("div",{className:"composer-notice"},
     session.rosterRequired || "发送前请选择阵容。",
     h("button",{type:"button",onClick:onSettings},"选择阵容")),
   session?.navigationError && h("p",{className:"error-text",role:"alert"},session.navigationError),
   session?.navigation?.archived && h("p",{className:"composer-notice"},"已归档；请先恢复对话再编辑或发送。"),
-  session?.readOnly && !session?.selectionError && !session?.workspaceError && !session?.workspaceArchived && !session?.navigation?.archived && h("p",{className:"composer-notice"},"此会话当前只读。若被其他 CLI 或窗口占用，请先在该入口结束并关闭，再重新读取；不会强制接管。"),
+  session?.readOnly && session.workspaceId!==null && !session?.selectionError && !session?.workspaceError && !session?.workspaceArchived && !session?.navigation?.archived && h("p",{className:"composer-notice"},"此会话当前只读。若被其他 CLI 或窗口占用，请先在该入口结束并关闭，再重新读取；不会强制接管。"),
   (materialError || !materials.some(item=>item.error)&&importError?.scope===importScope&&importError.message) && h("p",{className:"error-text",role:"alert"},materialError || importError.message),
   importing.current.get(importScope)>0&&!materials.some(item=>item.status==="uploading")&&h("p",{className:"composer-notice",role:"status"},"正在核对并保存材料…"),
   materials.length>0 && h("ul",{className:"composer-materials","aria-label":"本次材料"},...materials.map((item,index)=>{
@@ -131,7 +137,7 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     onChange:e=>{const files=Array.from(e.target.files??[]);e.target.value="";importFiles(files);input.current?.focus();},
     onCancel:()=>input.current?.focus()}),
   h("label",{className:"sr-only",htmlFor:"message-input"},"输入问题"),
-  h("textarea",{id:"message-input",ref:input,rows:2,value:draft,disabled,
+  h("textarea",{id:"message-input",ref:input,rows:2,value:draft,disabled:disabled||homeReady&&creating,
     placeholder:busy ? "任务进行中，可以继续写草稿……" : "描述任务，或继续讨论……",
     onPaste:e=>{
       const files=Array.from(e.clipboardData?.files??[]).filter(file=>file.type.startsWith("image/"));

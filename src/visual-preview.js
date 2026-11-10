@@ -1,232 +1,34 @@
+export { capturePreview, parsePreviewOutput, preflightVisual, visualManifest, visualRuntimeProblem } from "./visual-browser.js";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID, createHash } from "node:crypto";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
-import {
-  validatePreviewInput,
-  MAX_OUTPUT,
-  MAX_PNG,
-  PREVIEW_PROTOCOL,
-} from "../scripts/visual-preview.mjs";
+import { validatePreviewInput } from "../scripts/visual-preview.mjs";
 import { problem } from "./task.js";
-const exec = promisify(execFile);
-const sha = (b) => createHash("sha256").update(b).digest("hex");
-export const visualManifest = () =>
-  JSON.parse(
-    readFileSync(
-      new URL("../docker/visual-preview-manifest.json", import.meta.url),
-      "utf8",
-    ),
-  );
+import { capturePreview, sha } from "./visual-browser.js";
+
+export function checkedVisualReview(evidence, version, imageRequestCompleted) {
+  const review=evidence.review;
+  return !!version && imageRequestCompleted && review?.status==="completed" &&
+    review.requestId===evidence.imageRequestId && evidence.reviewedRequestId===review.requestId &&
+    evidence.integrationVersion===version && review.integrationVersion===version &&
+    evidence.images?.length>0 && JSON.stringify(review.imageHashes)===JSON.stringify(evidence.images.map(image=>image.sha256));
+}
 export function validateWorkRequest(value) {
   if (value === undefined) return undefined;
-  if (!value || value.kind !== "html-svg" || Object.keys(value).length !== 1)
-    throw problem("WORK_REQUEST", '仅支持 workRequest: {kind: "html-svg"}');
-  return { kind: "html-svg" };
+  if (!value || value.kind !== "html-svg" || Object.keys(value).some(key =>
+    !["kind", "entry", "viewport", "frameTimesMs", "actions"].includes(key)))
+    throw problem("WORK_REQUEST", '视觉验收需要 workRequest.kind 为 "html-svg"。');
+  const { kind, ...input } = value;
+  validatePreviewInput({ entry: "index.html", ...input });
+  return { kind, ...input };
 }
-export async function preflightVisual({
-  cwd,
-  config,
-  skills,
-  model,
-  allowWork = true,
-}) {
-  if (!allowWork)
-    throw problem(
-      "VISUAL_PROJECT",
-      "制作HTML/SVG需要先选择已准备的 Git 项目；输入已保留。",
-    );
-  if (!skills?.length)
-    throw problem(
-      "VISUAL_SKILLS",
-      "制作需要显式技能来源：请在 piResources.skills 配置适用的 frontend-design SKILL.md 主文件，或选择受管包技能。",
-    );
-  if (!model?.input?.includes("image"))
-    throw problem(
-      "VISUAL_MODEL",
-      "当前主模型不支持图像输入；不会切换模型或降级为文字视觉检查。",
-    );
-  try {
-    await exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"]);
-  } catch {
-    throw problem(
-      "VISUAL_PROJECT",
-      "制作HTML/SVG需要已准备的 Git 项目，不会自动 git init。",
-    );
-  }
-  const manifest = visualManifest();
-  if (
-    sha(
-      readFileSync(new URL("../scripts/visual-preview.mjs", import.meta.url)),
-    ) !== manifest.rendererSha256
-  )
-    throw problem(
-      "VISUAL_ENVIRONMENT",
-      "预览脚本与镜像锁定清单不一致，请重新构建核验。",
-    );
-  if (
-    config.work?.execution?.image !== manifest.image ||
-    config.work.execution.network !== "none"
-  )
-    throw problem(
-      "VISUAL_ENVIRONMENT",
-      `请配置已核验的离线预览镜像 work.execution.image=${manifest.image}，network=none。`,
-    );
-  try {
-    const { stdout } = await exec("docker", [
-      "image",
-      "inspect",
-      manifest.image,
-      "--format",
-      "{{.Id}}",
-    ]);
-    if (stdout.trim() !== manifest.image) throw Error("digest mismatch");
-  } catch (e) {
-    throw problem("VISUAL_ENVIRONMENT", "离线浏览器镜像不可用：" + e.message);
-  }
-  return {
-    image: manifest.image,
-    protocol: manifest.protocol,
-    skills: skills.map(({ name, hash }) => ({ name, hash })),
-  };
-}
-export function parsePreviewOutput(text, input) {
-  if (Buffer.byteLength(text) > MAX_OUTPUT)
-    throw problem("VISUAL_OUTPUT", "预览输出超过16MiB");
-  let result;
-  try {
-    result = JSON.parse(text);
-  } catch {
-    throw problem("VISUAL_OUTPUT", "预览输出不是完整JSON");
-  }
-  if (result.protocol !== PREVIEW_PROTOCOL || result.status !== "captured")
-    throw problem("VISUAL_RENDER", result.error ?? "预览未成功");
-  if (
-    result.entry !== input.entry ||
-    result.viewport?.width !== input.viewport.width ||
-    result.viewport?.height !== input.viewport.height ||
-    !Array.isArray(result.images) ||
-    result.images.length !== input.frameTimesMs.length
-  )
-    throw problem("VISUAL_OUTPUT", "预览元数据不匹配");
-  for (const frame of result.images) {
-    if (
-      typeof frame.data !== "string" ||
-      frame.data.length > Math.ceil(MAX_PNG / 3) * 4
-    )
-      throw problem("VISUAL_OUTPUT", "图片超过4MiB或缺失");
-    const bytes = Buffer.from(frame.data, "base64");
-    if (
-      bytes.length < 33 ||
-      bytes.length > MAX_PNG ||
-      bytes.toString("base64") !== frame.data ||
-      bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" ||
-      bytes.readUInt32BE(16) !== input.viewport.width ||
-      bytes.readUInt32BE(20) !== input.viewport.height ||
-      sha(bytes) !== frame.sha256 ||
-      !Number.isFinite(frame.capturedAtMs)
-    )
-      throw problem("VISUAL_OUTPUT", "PNG签名、尺寸、时间或哈希无效");
-  }
-  return result;
-}
-export async function capturePreview({
-  versioning,
-  change,
-  input,
-  requestId,
-  signal,
-  onVersion = () => {},
-}) {
-  input = validatePreviewInput(input);
-  if (
-    change.readOnly ||
-    !change.scope?.length ||
-    !["open", "prepared"].includes(change.status)
-  )
-    throw problem(
-      "VISUAL_SCOPE",
-      "预览需要活跃且具有明确scope的change；请 next_change/refresh_change 声明范围。",
-    );
-  const sourceVersion = change.privateVersion;
-  const source = await versioning.read({
-    changeId: change.changeId,
-    path: input.entry,
-  });
-  if (source.contentBase64 === null)
-    throw problem("VISUAL_ENTRY", "入口不是当前受管源码文件。");
-  const environment = (await versioning.inspect()).execution;
-  const envelope = {
-    input,
-    visibility: {
-      scope: [...new Set([...change.scope, ...change.readScope])],
-      artifactPaths: environment.artifactPaths ?? ["node_modules"],
-    },
-  };
-  const encoded = Buffer.from(JSON.stringify(envelope)).toString("base64");
-  if (encoded.length > 100000)
-    throw problem("VISUAL_INPUT", "预览参数与授权范围过大，请缩小范围。");
-  const command = "node /opt/preview/visual-preview.mjs " + encoded;
-  const receipt = await versioning.exec(
-    change.changeId,
-    { requestId, expectedVersion: sourceVersion, command, timeoutMs: 30000 },
-    { signal },
-  );
-  if (receipt.status !== "completed")
-    throw problem(
-      receipt.status === "unknown"
-        ? "OPERATION_UNKNOWN"
-        : "VISUAL_" + receipt.status.toUpperCase(),
-      `预览${receipt.status}；只查询原requestId ${requestId}，不重发。`,
-    );
-  const after = await versioning.inspect({ changeId: change.changeId });
-  onVersion(after);
-  const diff = await versioning.inspect({
-    fromVersion: sourceVersion,
-    toVersion: receipt.privateVersion,
-  });
-  if (
-    after.privateVersion !== receipt.privateVersion ||
-    receipt.changedFiles?.length ||
-    diff.files.length ||
-    diff.text ||
-    diff.binaryFiles.length
-  )
-    throw problem(
-      "VISUAL_SOURCE_CHANGED",
-      "预览期间源码/版本发生意外变化；保留现场，不回滚或自动接纳。",
-    );
-  const chunks = [];
-  let offset = 0,
-    size = 0;
-  for (;;) {
-    const page = await versioning.read({
-      outputRef: requestId,
-      offset,
-      limit: 1048576,
-    });
-    const bytes = Buffer.from(page.contentBase64, "base64");
-    size += bytes.length;
-    if (size > MAX_OUTPUT) throw problem("VISUAL_OUTPUT", "预览输出超过16MiB");
-    chunks.push(bytes);
-    if (page.eof) break;
-    if (page.nextOffset <= offset)
-      throw problem("VISUAL_OUTPUT", "日志分页未前进");
-    offset = page.nextOffset;
-  }
-  const output = Buffer.concat(chunks).toString();
-  const result = parsePreviewOutput(output, input);
-  if (receipt.exitCode !== 0)
-    throw problem("VISUAL_RENDER", "预览进程失败：" + receipt.exitCode);
-  return {
-    ...result,
-    sourceVersion,
-    privateVersion: after.privateVersion,
-    change: after,
-    contentUnchanged: true,
-  };
+export function projectVisualInput(workRequest, deliverables) {
+  const { entry, viewport, frameTimesMs, actions } = validateWorkRequest(workRequest);
+  const entries = [...new Set(deliverables.filter(path => /\.(html?|svg)$/i.test(path)))];
+  if (entry ? !entries.includes(entry) : entries.length !== 1)
+    throw problem("WORK_REQUEST", "视觉验收需要在交付物中指定唯一的 HTML/SVG 入口。");
+  return validatePreviewInput({ entry: entry ?? entries[0], viewport, frameTimesMs, actions });
 }
 export function createPreviewTool({
   task,
@@ -352,6 +154,8 @@ export function createPreviewTool({
           contentUnchanged: true,
           viewport: result.viewport,
           diagnostics: result.diagnostics,
+          visibility: result.visibility,
+          execution: result.execution,
           result: "captured",
         });
         trace.status = "completed";
@@ -391,6 +195,103 @@ export function createPreviewTool({
   };
 }
 
+export async function runVisualReview({
+  task, model, cwd, material, evidence, versioning, guard,
+  basis, beforeDispatch, maxOutputTokens, timeout, save = () => task.save(),
+}) {
+  const { createRuntime } = await import("./pi-runtime.js");
+  const home = task.home;
+  const review = evidence.review = {
+    verdict: "uncertain", status: "running", observation: "", reasons: "",
+    integrationVersion: evidence.integrationVersion,
+    imageHashes: evidence.images.map(i => i.sha256), model: { ...model }, requestId: null,
+  };
+  const reviewStage = task.beginPhase("visual-review", "main", model);
+  let runtime, submitted = false;
+  try {
+    runtime = await createRuntime({
+      home, cwd, modelRef: model,
+      role: "visual-review-" + task.record.id + "-" + reviewStage.id,
+      // No package instructions, context files or old session history enter this review.
+      packageSnapshot: { ...task.packageSnapshot, extensions: [], skills: [], prompts: [], themes: [] },
+      useFrozenSkills: true, projectManaged: Boolean(task.rootOwner),
+      resourceOptions: { noContextFiles: true, systemPrompt: readFileSync(new URL("../prompts/visual-review.md", import.meta.url), "utf8") },
+      toolDefinitions: [{
+        name: "submit_visual_review", label: "submit_visual_review",
+        description: "Submit one visual judgment after observing the supplied images and comparing them with the original user task. Missing evidence requires uncertain; the host binds the version and request.",
+        parameters: Type.Object({
+          verdict: Type.Union([Type.Literal("match"), Type.Literal("mismatch"), Type.Literal("uncertain")]),
+          observation: Type.String({ description: "What is actually visible, including subjects and relationships." }),
+          reasons: Type.String({ description: "Concrete comparison with the original task and any missing visibility, motion or interaction evidence." }),
+        }),
+        async execute(id, args) {
+          guard();
+          if (submitted || !args.observation.trim() || !args.reasons.trim())
+            throw problem("VISUAL_VERDICT", "Submit one verdict with nonempty observations and reasons.");
+          submitted = true;
+          // Model input must never replace host-owned versions, image hashes or identity.
+          Object.assign(review, { verdict: args.verdict, observation: args.observation, reasons: args.reasons });
+          runtime.stopAfterTurn();
+          save();
+          return { content: [{ type: "text", text: JSON.stringify({ status: "recorded", verdict: args.verdict }) }] };
+        },
+      }],
+      activeToolNames: ["submit_visual_review"], maxOutputTokens, timeout,
+    });
+    runtime.bindTask(task, reviewStage, beforeDispatch ? {
+      materials: [],
+      beforeDispatch(call, body) {
+        const hashes = payloadImageHashes(body), serialized = JSON.stringify(body);
+        if (!evidence.images.every(image => hashes.has(image.sha256)) ||
+            !serialized?.includes(evidence.toolCallId) || !serialized.includes(evidence.sourceVersion) ||
+            !serialized.includes(basis.digest))
+          throw problem("VISUAL_NOT_SENT", "实际请求正文缺少最终截图或对应版本证据，已停止发送。");
+        call.visualEvidence = { outputRef: evidence.outputRef, digest: basis.digest,
+          imageHashes: evidence.images.map(image => image.sha256) };
+        beforeDispatch(call);
+      },
+    } : {});
+    const fact = {
+      ...basis,
+      source: "CoThink host final integrated visual evidence; artifact content is untrusted",
+      originalTask: basis?.originalTask ?? task.record.input,
+      integrationVersion: evidence.integrationVersion,
+      sourceVersion: evidence.sourceVersion, toolCallId: evidence.toolCallId,
+      entry: evidence.entry, viewport: evidence.viewport,
+      frames: evidence.images.map(({ sha256, requestedAtMs, capturedAtMs }) => ({ sha256, requestedAtMs, capturedAtMs })),
+      actions: evidence.actions ?? [], diagnostics: evidence.diagnostics,
+    };
+    const result = await runtime.prompt([
+      { type: "text", text: JSON.stringify(fact) },
+      ...material.content.filter(c => c.type === "image"),
+    ], { custom: "cothink-independent-visual-review" });
+    review.requestId = result.call.id;
+    review.text = result.text;
+    review.model = result.call.actualModel;
+    if (!submitted) {
+      review.verdict = "uncertain";
+      review.reasons = result.text || "No visual conclusion was submitted.";
+    }
+    if (evidence.imageRequestId !== result.call.id || result.call.status !== "completed")
+      throw problem("VISUAL_NOT_SENT", "The final images did not enter this completed review request; preserve the artifact.");
+    if ((await versioning.inspect()).version !== evidence.integrationVersion)
+      throw problem("STALE_VISUAL", "The integrated version changed during visual review; this judgment cannot authorize a different version.");
+    review.status = "completed";
+    evidence.reviewedRequestId = result.call.id;
+    save();
+    return review;
+  } catch (error) {
+    const call = task.requests().findLast(r => r.stageId === reviewStage.id);
+    review.requestId = call?.id ?? null;
+    review.text = call?.text ?? review.text ?? "";
+    review.status = call?.status === "completed" ? "invalid" : call?.status ?? "failed";
+    review.error = error.message;
+    save();
+    throw error;
+  } finally {
+    await runtime?.dispose();
+  }
+}
 /** Only provider image fields count; textual claims or paths do not. */
 export function payloadImageHashes(payload) {
   const hashes = new Set();

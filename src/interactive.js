@@ -19,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import { createRuntime, createModelRuntime, selectedResources, assertCleanProjectProcess } from "./pi-runtime.js";
 import { runTurn } from "./discussion.js";
 import { DEFAULT_THINKING_LEVEL } from "./thinking.js";
-import { cothinkExtension } from "./extensions/cothink.js";
+import { cothinkExtension, mainSystemPrompt } from "./extensions/cothink.js";
 import { createClipboardWriter } from "./clipboard.js";
 import { loadConfig, updateConfig, switchMainModel } from "./config.js";
 import { addTeam, removeTeam, snapshotTeam, resolveTeamConfig, readSessionTeam, normalizeTeamName } from "./teams.js";
@@ -587,10 +587,7 @@ export async function runInteractive({
         ...selectedResources(effective, targetCwd),
         ...resourceOptions,
         ...(project === null ? {noContextFiles: true} : {}),
-        systemPrompt: readFileSync(
-          new URL("../prompts/main.md", import.meta.url),
-          "utf8",
-        ),
+        systemPrompt: mainSystemPrompt(),
       },
       maxOutputTokens,
       timeout,

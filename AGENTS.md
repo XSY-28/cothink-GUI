@@ -1,6 +1,9 @@
 # CoThink 维护约定
 
-开始项目工作前完整阅读 [DESIGN_BASELINE.md](DESIGN_BASELINE.md)。行为和验收以当前基线为准，历史夹具不构成运行规格。
+开始项目工作前完整阅读 [DESIGN_BASELINE.md](DESIGN_BASELINE.md)，优先按 2026-11-10 的[现行目标](DESIGN_BASELINE.md#目标与最小路径)判断行为和验收。日期条目、旧计划、已安装构建和历史夹具用于核对各自的事实。
+
+- 项目 Team 包含多条对话，每条对话选择一主、至少一副的阵容。主模型是用户对话的项目经理，简单任务直接答复，复杂任务按能力与工作需要组队。模型与岗位分别记录，同一模型可以同时承担独立岗位。各岗位按授权使用技能，主模型负责最终交付。
+- 普通对话固定“初稿 → 副模型审查 → 修订”及对应强制评审入口已退出当前设计。项目审查按需要针对确定成果，协作经 agent-sync 管理范围、版本、检查和接纳。
 
 - 从用户当前需要出发；新增对象、配置或模块前，说明没有它用户哪件具体事情做不了。
 - 修改运行行为时沿用唯一 Pi 调用路径与独立 agent-sync 内核边界；保留原始失败、部分结果和未知费用。
@@ -14,7 +17,7 @@
 
 For the 2026-11-09 project-Team navigation correction, read docs/gui/TEAM_NAVIGATION_REFINEMENT_PLAN.md. The user authorized implementation, then on 2026-11-09 requested resolving remaining GUI failures, completing cross-Team file-search validation, pushing verified source to the private GitHub repository and installing the local App. Its navigation requirements supersede the recent-conversation sidebar and visible model label `team` in the earlier compact UI revision; runtime and persistence contracts remain unchanged.
 
-For the next desktop/unified-conversation iteration, read docs/gui/DESKTOP_UNIFIED_IMPLEMENTATION_PLAN.md. The 2026-11-08 follow-up authorizes implementing that plan and local validation, including an isolated desktop candidate. Paid-model validation, global installation replacement and publication still require separate authorization.
+For the desktop/unified-conversation implementation history, read docs/gui/DESKTOP_UNIFIED_IMPLEMENTATION_PLAN.md. Use the current design baseline for conversation routing and staffing. The 2026-11-08 follow-up authorizes implementing that plan and local validation, including an isolated desktop candidate. Paid-model validation, global installation replacement and publication still require separate authorization.
 
 For project-Team GUI work, read docs/gui/TEAM_WORKSPACE_DESIGN.md and docs/gui/TEAM_WORKSPACE_IMPLEMENTATION_PLAN.md. The user approved local implementation and validation of this iteration on 2026-11-07. REDESIGN_PROPOSAL.md / REDESIGN_IMPLEMENTATION_PLAN.md retain the preceding iteration; DESIGN.md / IMPLEMENTATION_PLAN.md / ACCEPTANCE.md retain the first iteration. Current implementation evidence is in VALIDATION.md.
 Keep one Pi model path and the existing agent-sync boundary. The current baseline permits installed agent plugins; preserve parent ownership, resource selection and agent-sync acceptance. No new automatic retries or unrecorded model calls.

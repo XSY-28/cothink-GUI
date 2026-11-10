@@ -2,75 +2,27 @@ import React, {forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useR
 import {switchModelRoles} from "../../../../src/model-roster.js";
 import {modelName} from "../../view.js";
 import styles from "./TeamPanel.module.css";
+import { ModelEditor, catalogModel, identity, matchesSearch, outputLimitRequired } from "./ModelEditor.jsx";
 
-const identity = ref => JSON.stringify([ref?.provider, ref?.modelId]);
 const emptyRef = () => ({provider:"",modelId:""});
-const matchesSearch = (query, values) => {
-  const text=values.filter(Boolean).join(" ").toLowerCase();
-  return query.trim().toLowerCase().split(/\s+/).every(word=>text.includes(word));
-};
-const catalogModel = (models, ref) => models.find(m => identity(m) === identity(ref));
 // Model refs have four allowed fields. Compare their values, not object key order.
 const rosterParameters = team => JSON.stringify([team.main,...team.secondary].map(r=>[r.provider,r.modelId,r.thinkingLevel ?? null,r.maxOutputTokens ?? null]));
 const rosterText = team => `主：${modelName(team.main)}；副：${team.secondary.map(modelName).join("、")}`;
 function parameterText(ref) {
   return `${modelName(ref)} · 思考 ${ref.thinkingLevel ?? "默认"} · ${ref.maxOutputTokens == null ? "未设输出额度" : ref.maxOutputTokens+" tokens"}`;
 }
-function rosterIssue(team, models, providers) {
-  for (const ref of [team.main, ...team.secondary]) {
-    const model = catalogModel(models, ref);
-    if (!model) return `${modelName(ref)}：目录不可用`;
-    if (!providers.find(provider => provider.id === ref.provider)?.configured) {
-      return `${ref.provider} 缺少认证（${modelName(ref)}）`;
-    }
-    if (ref.thinkingLevel != null && !model.thinkingLevels?.includes(ref.thinkingLevel)) {
-      return `${modelName(ref)} 不支持思考档位 ${ref.thinkingLevel}`;
-    }
-    if (model.api === "anthropic-messages" && ref.maxOutputTokens == null) {
-      return `${modelName(ref)} 需要设置输出额度`;
-    }
-  }
+function routeIssue(ref, models, providers) {
+  const model = catalogModel(models, ref);
+  if (!model) return `${modelName(ref)}：目录不可用`;
+  if (model.transport === "unsupported") return `${modelName(ref)}：当前协议不可用于统一会话`;
+  if (!(model.auth ? model.auth === "configured" : providers.find(provider => provider.id === ref.provider)?.configured))
+    return `${ref.provider} 缺少认证（${modelName(ref)}）`;
+  const thinking = ref.thinkingLevel ?? model.thinkingLevel;
+  if (thinking != null && !model.thinkingLevels?.includes(thinking))
+    return `${modelName(ref)} 不支持思考档位 ${thinking}`;
+  if (outputLimitRequired(model) && ref.maxOutputTokens == null)
+    return `${modelName(ref)} 需要设置输出额度`;
   return "";
-}
-function ModelEditor({label, value, models, providers, used, onIdentity, onParameters}) {
-  const [search,setSearch]=useState("");
-  const model = catalogModel(models,value);
-  const options=models.filter(m=>matchesSearch(search,[m.name,m.provider,m.modelId]));
-  return <section className={styles.model}>
-    <label>搜索{label}<input type="search" aria-label={`搜索${label}`} value={search}
-      placeholder="名称、服务商或模型 ID" onChange={e=>setSearch(e.target.value)}
-      onKeyDown={e=>{if(e.key==="Enter" && !e.nativeEvent.isComposing)e.preventDefault();}}/></label>
-    <label>{label}<select required aria-label={label} value={value.modelId ? identity(value) : ""}
-      onChange={e=>{const [provider,modelId]=JSON.parse(e.target.value);onIdentity({provider,modelId});setSearch("");}}>
-      <option value="" disabled>选择模型</option>
-      {value.modelId && !model && <option value={identity(value)} disabled>{modelName(value)}（目录不可用）</option>}
-      {(model && !options.includes(model) ? [model,...options] : options).map(m=>{
-        const duplicate=used?.has(identity(m));
-        const auth=providers.find(provider=>provider.id===m.provider);
-        return <option key={identity(m)} value={identity(m)} disabled={duplicate}>
-          {m.name} · {m.provider} / {m.modelId}{duplicate ? "（已占用其他席位）" : ""}{!auth?.configured ? "（缺少认证）" : ""}
-        </option>;
-      })}
-    </select></label>
-    {search.trim() && !options.length && <p className="field-note" role="status">没有匹配的模型。</p>}
-    {value.modelId && !model && <p className="field-note">所选模型已不在当前目录中，请选择可用的模型。</p>}
-    <details className={styles.parameters}><summary>思考与输出额度</summary>
-      <div className="form-grid">
-        <label>思考档位<select aria-label={`${label}思考档位`} value={value.thinkingLevel ?? ""}
-          disabled={!model?.thinkingLevels?.length} onChange={e=>{const next={...value};if(e.target.value)next.thinkingLevel=e.target.value;else delete next.thinkingLevel;onParameters(next);}}>
-          <option value="">{model?.reasoning ? "默认 high" : "默认 off（不启用思考）"}</option>
-          {value.thinkingLevel && !model?.thinkingLevels?.includes(value.thinkingLevel) && <option value={value.thinkingLevel} disabled>{value.thinkingLevel}（当前模型不支持）</option>}
-          {model?.thinkingLevels?.map(level=><option key={level}>{level}</option>)}
-        </select></label>
-        <label>输出额度{model?.api === "anthropic-messages" ? "（协议必填）" : "（可留空）"}
-          <input aria-label={`${label}输出额度`} type="number" min="1" step="1" required={model?.api === "anthropic-messages"}
-            value={value.maxOutputTokens ?? ""} placeholder="不设本地上限"
-            onChange={e=>{const next={...value};if(e.target.value)next.maxOutputTokens=Number(e.target.value);else delete next.maxOutputTokens;onParameters(next);}}/>
-        </label>
-      </div>
-      {model && <p className="field-note">协议 {model.api} · 目录上下文 {model.contextWindow ?? "未知"} tokens；目录能力不是已设置的额度。</p>}
-    </details>
-  </section>;
 }
 
 /** Feature-local edits; the caller owns the modal and focus restoration. */
@@ -256,7 +208,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
               onIdentity={next=>setDraft(d=>({...d,secondary:d.secondary.map((r,i)=>i===index ? next : r)}))}
               onParameters={next=>setDraft(d=>({...d,secondary:d.secondary.map((r,i)=>i===index ? next : r)}))}/>
             <div className={styles.actions}>
-              <small>{index===0 ? "普通问答的评审模型" : "项目工作可参与"}</small>
+              <small>协作候选</small>
               <button type="button" aria-label={`上移副模型 ${index+1}`} disabled={index===0} onClick={()=>setDraft(d=>{const rows=[...d.secondary];[rows[index-1],rows[index]]=[rows[index],rows[index-1]];return {...d,secondary:rows};})}>上移</button>
               <button type="button" aria-label={`下移副模型 ${index+1}`} disabled={index===draft.secondary.length-1} onClick={()=>setDraft(d=>{const rows=[...d.secondary];[rows[index+1],rows[index]]=[rows[index],rows[index+1]];return {...d,secondary:rows};})}>下移</button>
               <button type="button" aria-label={`移除副模型 ${index+1}`} disabled={draft.secondary.length===1} onClick={()=>setDraft({...draft,secondary:draft.secondary.filter((_,i)=>i!==index)})}>移除</button>
@@ -300,7 +252,8 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
       <div className={styles.list}>{matchingTeams.map(team=>{
         const selected=team.id===current?.id;
         const differsFromCurrent=selected && rosterParameters(team)!==rosterParameters(current);
-        const issue=rosterIssue(team,models,providers);
+        const mainIssue=routeIssue(team.main,models,providers);
+        const issue=mainIssue || team.secondary.map(ref=>routeIssue(ref,models,providers)).find(Boolean);
         const reason=selected ? "当前对话正在使用，请先切换" : teams.length<=1 ? "至少保留一个阵容" : !writable ? "当前对话不可管理" : "";
         const isOpen=menu===team.id;
         const isDefault=workspace?.defaultRosterId===team.id;

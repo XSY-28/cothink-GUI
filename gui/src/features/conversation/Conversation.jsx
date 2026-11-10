@@ -1,11 +1,12 @@
 import {OutcomeFiles} from "../files/FilePanel.jsx";
-import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
+import React, {useEffect,useRef,useState} from "react";
 import { Composer } from "../../Composer.js";
 import {Icon} from "../../Icon.js";
 import { Markdown } from "../../Markdown.js";
 import { ReplyHeading } from "./ReplyHeading.jsx";
 import { ConversationHeading } from "./ConversationMenu.jsx";
 import { ReplyActions, StopButton, UserMessage, WorkProposal } from "./ReplyActions.jsx";
+import { useConversationReading } from "./useConversationReading.js";
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
@@ -16,6 +17,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   const replyTeamId = session?.workspaceId && !session.workspaceError &&
     session.id === state.selectedSessionId && workspace?.id === session.workspaceId
     ? session.workspaceId : null;
+  const [targetTeam,setTargetTeam]=useState("");
   const [now,setNow]=useState(Date.now());
   const timing = session?.turns.some(turn=>["running","preparing","cancelling"].includes(turn.status));
   useEffect(()=>{if(!timing)return;setNow(Date.now());const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[timing,session?.id]);
@@ -38,78 +40,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
     }
     return result;
   };
-  const scroll = useRef(null);
-  const reading = useRef({position:null,following:true,seen:new Set()});
-  const anchorTimer = useRef(null), writeView = useRef(commands.recordView);
-  writeView.current = commands.recordView;
-  function recordVisible() {
-    const root = scroll.current;
-    if (!root || !session || inert || document.visibilityState !== "visible" || root.closest("[inert]") || !root.clientHeight) return;
-    const viewport = root.getBoundingClientRect();
-    for (const node of root.querySelectorAll("[data-result-revision]")) {
-      const box = node.getBoundingClientRect();
-      if (box.bottom <= viewport.top || box.top >= viewport.bottom || box.height === 0) continue;
-      const {taskId,resultRevision} = node.dataset;
-      const key = taskId + resultRevision;
-      if (session.view?.seenResults[taskId] === resultRevision || reading.current.seen.has(key)) continue;
-      reading.current.seen.add(key);
-      void writeView.current(session.id,{seen:{taskId,resultRevision}});
-    }
-  }
-  function onScroll() {
-    const root = scroll.current;
-    if (!root || !session || inert || document.visibilityState !== "visible") return;
-    reading.current.following = root.scrollHeight - root.clientHeight - root.scrollTop <= 36;
-    recordVisible();
-    const top = root.getBoundingClientRect().top;
-    const region = [...root.querySelectorAll("[data-reading-part]")].find(node=>node.getBoundingClientRect().bottom > top);
-    if (!region) return;
-    const {taskId,readingPart:part} = region.dataset;
-    const rect = region.getBoundingClientRect();
-    const offsetPx = Math.round(Math.max(0,Math.min(top-rect.top,rect.height,2048)));
-    if (anchorTimer.current) clearTimeout(anchorTimer.current.timer);
-    const save = () => {void writeView.current(session.id,{anchor:{taskId,part,offsetPx}});};
-    anchorTimer.current = {save,timer:setTimeout(()=>{
-      anchorTimer.current=null;
-      save();
-    },250)};
-  }
-  useLayoutEffect(()=>{
-    const root = scroll.current, position = state.readingPosition;
-    if (!root || !session || position?.sessionId !== session.id) return;
-    if (reading.current.position !== position) {
-      const target = position.target;
-      const node = target && [...root.querySelectorAll("[data-reading-part]")].find(node=>
-        node.dataset.taskId === target.taskId && node.dataset.readingPart === target.part);
-      if (target && !node) return;
-      reading.current = {position,following:!target,seen:new Set()};
-      root.scrollTop = node ? node.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop + target.offsetPx : root.scrollHeight;
-      if (node && position.jump) node.focus({preventScroll:true});
-    } else if (reading.current.following) root.scrollTop = root.scrollHeight;
-  },[session?.id,session?.turns,state.readingPosition]);
-  useLayoutEffect(()=>()=>{
-    const queued=anchorTimer.current;
-    if (!queued) return;
-    clearTimeout(queued.timer);
-    anchorTimer.current=null;
-    queued.save();
-  },[session?.id,state.readingPosition]);
-  useEffect(()=>{
-    if (!session || !scroll.current) return;
-    const root=scroll.current;
-    const frame=window.requestAnimationFrame(recordVisible);
-    const observer=typeof ResizeObserver !== "undefined" ? new ResizeObserver(()=>{
-      if (reading.current.following && reading.current.position === state.readingPosition) root.scrollTop=root.scrollHeight;
-      recordVisible();
-    }) : null;
-    if (root.firstElementChild) observer?.observe(root.firstElementChild);
-    document.addEventListener("visibilitychange",recordVisible);
-    return ()=>{
-      window.cancelAnimationFrame(frame);
-      observer?.disconnect();
-      document.removeEventListener("visibilitychange",recordVisible);
-    };
-  },[session?.id,session?.turns,session?.view,inert,state.readingPosition]);
+  const {scroll,onScroll} = useConversationReading({session,inert,readingPosition:state.readingPosition,recordView:commands.recordView});
   return (
       <main className="main-workspace" inert={inert}>
         <header className="topbar" data-desktop={globalThis.window?.cothinkDesktop ? "true" : undefined}>
@@ -248,6 +179,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                       {canStop && stop}
                     </ReplyHeading>
                     {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。请核对已保存的执行记录。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。" : turn.status === "cancelled" ? "已停止。已完成的内容保留，停止不等于回滚；可查看此条执行记录后继续说明下一步。" : "本次未完整完成。请核对已有内容和执行记录；若有成果，文件入口会列在下方。"}</p>}
+                    {!turn.proposalRef&&!inProgress&&(turn.error || (task?.id===turn.taskId && task.error))&&<p className="error-text">{turn.error || task.error}</p>}
                     {turn.proposalRef ? <WorkProposal turn={turn} disabled={!!boot.active||!!pending||session.readOnly}
                       onConfirm={()=>safely(commands.confirmWork(turn))} /> : turn.finalText ? (
                       <div className="prose">
@@ -256,12 +188,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     ) : !inProgress && (
                       <div className={styles.incompleteAnswer}>
                         <p>这轮没有完整最终稿。执行记录保留已取得的内容；可交付文件以本条文件清单为准。</p>
-                        {task?.id === turn.taskId && task.error && (
-                          <p className="error-text">{task.error}</p>
-                        )}
                       </div>
                     )}
-                    {turn.hasWork && <OutcomeFiles taskId={turn.taskId} status={turn.status} commands={commands} onOpen={onOpenFile}/>}
+                    {turn.hasWork && <OutcomeFiles taskId={turn.taskId} status={turn.status} resultRevision={turn.resultRevision} commands={commands} onOpen={onOpenFile}/>}
                     <ReplyActions turn={turn} forkDisabled={!!boot.active || !!pending || session.readOnly || !!session.selectionError || !turn.canFork}
                       showChanges={turn.hasWork || task?.id === turn.taskId && task.work}
                       onDetails={onOpenDetails} onCopy={onCopy} onFork={taskId=>safely(onFork(taskId))} />
@@ -278,6 +207,20 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             {boot.extensionUI?.notifications.filter(n => n.sessionId === session?.id).slice(-4).map(n =>
               <p key={n.id} role={n.type === "error" ? "alert" : "status"}>{n.message}</p>)}
           </div>
+          {session?.workspaceId===null && <p role="status">
+            未分组历史可查阅和复制。要继续，请在 Team 内新建对话，再带入需要的内容。
+            {session.draft && <button type="button" onClick={()=>onCopy(session.draft)}>复制原草稿</button>}
+            <button type="button" onClick={onCreateTeam}>新建 Team</button>
+          </p>}
+          {!state.homeReady && state.homeDraft && <p role="status"><button type="button" onClick={commands.showHome}>返回首页草稿</button></p>}
+          {state.homeReady && state.homeDraft && !state.homeDraft.pendingCreateSessionId && (boot.workspaces??[]).some(row=>row.project&&!row.archived) &&
+            <p>
+              <select aria-label="草稿目标 Team" value={targetTeam} onChange={event=>setTargetTeam(event.target.value)} disabled={state.creating}>
+                <option value="">选择 Team</option>
+                {(boot.workspaces??[]).filter(row=>row.project&&!row.archived).map(row=><option key={row.id} value={row.id}>{row.name}</option>)}
+              </select>{" "}
+              <button type="button" disabled={!targetTeam||state.creating} onClick={()=>safely(commands.transferHome({workspaceId:targetTeam}))}>把草稿带到新对话</button>
+            </p>}
           {state.creating && <p role="status">正在确认新对话，当前草稿保留…</p>}
           {(state.creationNotice || state.homeReady && state.homeDraft?.pendingCreateSessionId) && <p role="status">
             创建待确认 · {state.creationNotice?.sessionId ?? state.homeDraft?.pendingCreateSessionId}{" "}
@@ -287,7 +230,8 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
           <Composer
             session={session}
             homeReady={state.homeReady}
-            creating={state.creating || !!(state.homeReady && state.homeDraft?.pendingCreateSessionId)}
+            creating={state.creating}
+            homeCreationPending={!!(state.homeReady && state.homeDraft?.pendingCreateSessionId)}
             boot={boot}
             draft={draft}
             draftConflict={state.draftConflict}

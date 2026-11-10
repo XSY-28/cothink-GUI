@@ -5,18 +5,18 @@ import {Window} from 'happy-dom';
 import {fixture} from './helpers/pi-fixture.js';
 import {createGuiController} from '../src/gui-controller.js';
 import {saveConfig} from '../src/config.js';
+import {fixtureConversation, teamId} from './helpers/gui-controller-fixture.js';
 import {createTeamConfig} from '../src/teams.js';
 import {SessionManager} from '@earendil-works/pi-coding-agent';
 import {readdirSync} from 'node:fs';
 import {join} from 'node:path';
-import {randomUUID} from 'node:crypto';
 import {useGuiWorkspace} from '../gui/src/useGuiWorkspace.js';
 import {Composer} from '../gui/src/Composer.js';
 
 test('GUI organizer flushes complete options, keeps new input, and recovers a lost receipt without replay',async t=>{
  let release;const hold=new Promise(r=>release=r),f=await fixture(t,async()=>{await hold;return {text:'summary'};});t.after(()=>release());
- saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Fixture',randomUUID()));
- let controller=await createGuiController({home:f.home,cwd:f.cwd}),s=await controller.action('session.create',{project:null});await controller.close();
+ saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Fixture',teamId));
+ let controller=await createGuiController({home:f.home,cwd:f.cwd}),s=await fixtureConversation(t, controller);await controller.close();
  const path=join(f.home,'pi/sessions/main',readdirSync(join(f.home,'pi/sessions/main')).find(n=>n.endsWith('.jsonl'))),manager=SessionManager.open(path);
  for(let i=0;i<14;i++){manager.appendMessage({role:'user',content:'User request '+i+'. '+'material '.repeat(650),timestamp:Date.now()});manager.appendMessage({role:'assistant',api:'openai-completions',provider:'fixture',model:'main',content:[{type:'text',text:'Response '+i+'. '+'evidence '.repeat(650)}],stopReason:'stop',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},timestamp:Date.now()});}
  controller=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>controller.close());

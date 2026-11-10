@@ -135,6 +135,19 @@ test("unknown action response never retries and remains distinguishable from a r
     (e) => e.unknown === false && /Team missing/.test(e.message),
   );
 });
+test("both JSON actions and binary material writes advertise the current input contract", async () => {
+  const writes = [];
+  const client = api.createApi("token", async (url, options) => {
+    writes.push([url, options.method, new Headers(options.headers).get("x-cothink-gui-input")]);
+    return Response.json({});
+  });
+  await client.action("session.draft", {sessionId:"room",text:"Keep me"});
+  await client.uploadMaterial("room","upload",new Uint8Array([1]));
+  assert.deepEqual(writes, [
+    ["/api/action","POST","3"],
+    ["/api/materials?ownerId=room&uploadId=upload","POST","3"],
+  ]);
+});
 test("startup token is removed from address and kept only in the current tab", () => {
   assert.equal(typeof api.consumeToken, "function");
   const win = new Window({ url: "http://127.0.0.1:9000/#token=secret" });

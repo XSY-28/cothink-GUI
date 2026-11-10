@@ -2,39 +2,11 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { fixture } from "./helpers/pi-fixture.js";
 import { repository, git } from "./helpers/git-fixture.js";
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import { randomUUID } from "node:crypto";
 import { execution } from "./helpers/agent-sync-fixture.js";
-const { runTurn } = await import(process.env.COTHINK_TEST_PACKAGE_ROOT
-  ? pathToFileURL(resolve(process.env.COTHINK_TEST_PACKAGE_ROOT, "src/discussion.js")).href
-  : new URL("../src/discussion.js", import.meta.url).href);
-const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
-function outputs(body) {
-  return body.messages
-    .filter((m) => m.role === "tool")
-    .flatMap((m) => {
-      try {
-        return [JSON.parse(m.content)];
-      } catch {
-        return [];
-      }
-    });
-}
-function isPreparation(body) {
-  const user = body.messages.findLast(m => m.role === 'user');
-  return JSON.stringify(user?.content).includes('Independent task preparation');
-}
-function memberExecutionInfo(body) {
-  const content = body.messages.findLast((m) => m.role === "user").content;
-  const text = typeof content === "string"
-    ? content
-    : content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-  const material = JSON.parse(text);
-  return { ...material.execution, reason: material.reason?.text };
+import { isPreparation, latest, memberExecutionInfo, outputs, projectDispatch, runTurn, tool } from "./dispatch.fixture.js";
 
-}
 test("A02/A06 known scope /one goes read/edit/automatic accept with no mandatory prepare call", async (t) => {
   const repo = repository(t),
     f = await fixture(t, (_, n) =>
@@ -195,9 +167,6 @@ test("A02/A03 leader with dirty independent draft collects third configured mode
       ),
   );
 });
-function latest(body, predicate) {
-  return outputs(body).findLast(predicate);
-}
 function workerReply(call, oldText, newText, path = "a.txt") {
   const last = call.body.messages.findLastIndex((m) => m.role === "user"),
     count = call.body.messages
@@ -1039,26 +1008,6 @@ test('fidelity: a forged preparation write cannot modify the source projection',
   assert.equal(task.record.members[0].noChange,true);
   assert.ok(!task.record.tools?.some(x=>x.name==='write'&&x.status==='completed'));
 });
-
-async function projectDispatch(t, repo, f, {secondary=f.models.secondary, staffRows, scope=["a.txt"], workExecution, ...options} = {}) {
-  const {createProjectStaff} = await import("../src/project-staff.js");
-  const {createProjectPolicy} = await import("../src/project-policy.js");
-  const taskId = randomUUID(), projectId = randomUUID();
-  const binding = {projectId, stepId:"reader", revision:1, taskId, startVersion:repo.baseVersion};
-  const state = {id:projectId, scope, status:"active",
-    steps:[{id:"reader", revision:1, status:"running", scope, checks:[], attempts:[{taskId}]}],
-    staff:staffRows ?? [
-    {id:"compat", supervisorId:"root", canDelegate:true, subgoal:"Read old records", responsibility:"Coordinate compatibility", models:["fixture/r1","fixture/r2"], scope:["a.txt"], readScope:["."], status:"active"},
-    {id:"reader", supervisorId:"compat", canDelegate:false, responsibility:"Repair reader", models:["fixture/r2"], scope:["a.txt"], readScope:["."], status:"active"},
-  ]};
-  const host = {read:()=>state, update:fn=>fn(state), assertOwned(){}};
-  const staff = createProjectStaff(host);
-  const projectPolicy = createProjectPolicy({host, binding, staff, home:f.home});
-  const task = await runTurn({home:f.home,cwd:repo.project,input:"Repair the compatibility reader",
-    id:taskId, submissionId:randomUUID(), project:{...binding,goal:"Open old records",subgoal:"Repair reader"},
-    projectPolicy,config:{formatVersion:2,...f.models,secondary,work:{checks:[],execution:workExecution}},...options});
-  return {task,state};
-}
 test("project duplicate dispatch of the frozen primary model returns one employee session", async t => {
   const repo = repository(t);
   const dispatch = {staffId:"reader", model:"fixture/main", assignment:"Inspect the reader",
@@ -1143,38 +1092,6 @@ test("project supervisor dispatches and corrects its employee directly, root rev
   assert.ok(task.record.work.capacity.every(c=>c.active>=0 && c.active<=2));
   assert.equal(task.record.work.capacity.at(-1).active,0);
   assert.ok(f.calls.filter(c=>c.body.model==="r2").every(c=>!c.body.tools.some(t=>["delegate","accept_change"].includes(t.function.name))));
-});
-
-test("project cancellation during supervisor collect releases both seats and preserves the in-flight employee", { timeout:60000 }, async t => {
-  const repo = repository(t), controller = new AbortController();
-  let root = 0, supervisor = 0, current, managerId, employeeEntered = false, waitingAtCancel = false;
-  const f = await fixture(t, async ({body}) => {
-    if (body.model === "r2") {
-      employeeEntered = true;
-      // Wait for both the transport and the supervisor's saved handoff; no provider retry.
-      while (!controller.signal.aborted && !current.record.members[0].waitingFor)
-        await new Promise(resolve => setImmediate(resolve));
-      waitingAtCancel = !!current.record.members[0].waitingFor;
-      controller.abort();
-      return null;
-    }
-    if (isPreparation(body)) return {text:"I understand the original goal."};
-    if (body.model === "main") {
-      if (++root === 1) return tool("delegate",{staffId:"compat",model:"fixture/r1",assignment:"Coordinate reader",reason:"Legacy data",readOnly:true});
-      managerId = latest(body,r=>r.memberId)?.memberId;
-      return tool("collect",{memberId:managerId});
-    }
-    if (++supervisor === 1) return tool("delegate",{staffId:"reader",model:"fixture/r2",assignment:"Inspect reader",reason:"Data formats",readOnly:true});
-    return tool("collect");
-  });
-  const {task} = await projectDispatch(t,repo,f,{signal:controller.signal,onProgress:({task})=>{current=task;}});
-  assert.ok(employeeEntered && waitingAtCancel);
-  assert.ok(task.signal.aborted);
-  const employee = task.record.members.find(m=>m.staffId==="reader");
-  assert.ok(employee && ["cancelled","outcome_unknown"].includes(employee.status));
-  assert.equal(f.calls.filter(c=>c.body.model==="r2").length,1);
-  assert.ok(task.record.work.capacity.every(c=>c.active>=0 && c.active<=2));
-  assert.equal(task.record.work.capacity.at(-1).active,0);
 });
 
 test("project supervisor cannot redispatch its own claimed writing work to an employee", { timeout:60000 }, async t => {

@@ -5,96 +5,31 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/e
 import { redact } from "./storage.js";
 import { problem } from "./task.js";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
-import { materialImageHash, materialText, prepareMaterialImages } from "./context.js";
+import { applyMaterials, textOf } from "./request-materials.js";
+
 // These pinned Pi adapters pass options.fetch to their actual HTTP client.
 // Codex Responses is pinned to SSE in projects because WebSocket skips the fetch fence.
 const projectHttpApis = new Set(["openai-completions","openai-responses","openai-codex-responses",
   "anthropic-messages","azure-openai-responses","mistral-conversations","pi-messages"]);
+export function assertFencedModelTransport(model,client) {
+  if(!projectHttpApis.has(model?.api)||client)
+    throw problem("PROJECT_TRANSPORT","Selected Pi adapter has no project-controlled HTTP dispatch fence: "+(model?.api??"unknown"));
+}
 const optionalApis = new Set([
   "openai-completions",
   "openai-responses",
   "openai-codex-responses",
   "google-generative-ai",
 ]);
-const textOf = (m) =>
-  m?.content
-    ?.filter((c) => c.type === "text")
-    .map((c) => c.text)
-    .join("\n") ?? "";
+export const requiresModelOutputLimit = model => model?.api ? !optionalApis.has(model.api) : null;
 export { textOf };
-async function applyMaterials(binding, context, model, autoResize) {
-  const materials=binding.task.materialContext??[];
-  if(!materials.length||binding.stage.phase==="project-effect")return {context,images:[]};
-  const required=binding.requiredPromptImages??[];
-  if(required.length){
-    const user=context.messages.findLast(message=>message.role==="user"&&Array.isArray(message.content)&&
-      message.content.some(block=>block.type==="text"&&required.every(image=>block.text.includes(`materialId=${image.id};`))));
-    const actual=user?.content.filter(block=>block.type==="image").map(materialImageHash)??[];
-    for(const image of required){
-      const index=actual.indexOf(image.payloadSha256);
-      if(index<0)throw problem("MATERIAL_IMAGE_OMITTED","Pi 预处理后缺少已选图片。未发送模型请求。");
-      actual.splice(index,1);
-    }
-  }
-  const modelKey=JSON.stringify([model.provider,model.id,model.inputLimits?.images?.resize,autoResize]);
-  if(binding.materialModelKey!==modelKey){
-    binding.materialModelKey=modelKey;
-    binding.preparedMaterials=prepareMaterialImages(materials,model,autoResize);
-  }
-  const prepared=await binding.preparedMaterials;
-  const knownImages=new Set();
-  const messages=context.messages.map(message=>{
-    if(!Array.isArray(message.content)||!message.content.some(part=>part.type==="image"))return message;
-    const candidates=message.role==="user"?prepared.filter(({evidence})=>
-      message.cothinkInputMaterials?.some(ref=>ref.id===evidence.id)||
-      message.content.some(part=>part.type==="text"&&part.text.includes(`materialId=${evidence.id};`))):[];
-    let changed=false;
-    const content=message.content.map(part=>{
-      if(part.type!=="image")return part;
-      const hash=materialImageHash(part);
-      const replacement=candidates.some(({evidence})=>evidence.payloadSha256===hash)?undefined:
-        candidates.find(({evidence,previousSha256})=>evidence.originalSha256===hash||previousSha256===hash);
-      knownImages.add(replacement?.evidence.payloadSha256??hash);
-      if(!replacement)return part;
-      changed=true;
-      return replacement.block;
-    });
-    return changed?{...message,content}:message;
-  });
-  context={...context,messages};
-  const texts=context.messages.map(message=>typeof message.content==="string"?message.content:
-    Array.isArray(message.content)?message.content.filter(block=>block.type==="text").map(block=>block.text).join("\n"):"");
-  const included=new Set(),additional=[];
-  for(const material of materials){
-    const text=materialText(material);
-    if(included.has(material.manifest.id))continue;
-    included.add(material.manifest.id);
-    if(!texts.some(value=>value.includes(text)))additional.push({type:"text",text});
-  }
-  const images=prepared.map(({block,evidence})=>{
-    if(knownImages.has(evidence.payloadSha256))return evidence;
-    additional.push(block);
-    knownImages.add(evidence.payloadSha256);
-    return evidence;
-  });
-  if(additional.length){
-    const messages=[...context.messages];
-    const index=messages.findLastIndex(message=>message.role==="user");
-    messages.splice(Math.max(0,index),0,{role:"user",content:additional,timestamp:messages[index]?.timestamp??0});
-    context={...context,messages};
-  }
-  const estimate=context.messages.reduce((sum,message)=>sum+estimateTokens(message),0)+Math.ceil((context.systemPrompt?.length??0)/4);
-  if(model.contextWindow>0&&estimate>=model.contextWindow)
-    throw problem("MATERIAL_CONTEXT_LIMIT","材料及对话超出模型上下文估算上限。请减少材料或手动整理上下文。");
-  return {context,images};
-}
 export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAutoResize = () => true }) {
   return {
     stream(model, context, options, send) {
       const output = createAssistantMessageEventStream();
       queueMicrotask(async () => {
         const binding = getBinding();
-        let call, task, stage, removeAbortListener, fenced;
+        let call, task, stage, removeAbortListener, releaseProjectSeat, fenced;
         const failure = (error) => ({
           role: "assistant",
           api: model.api,
@@ -123,11 +58,16 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
           if (task.ioError) throw task.ioError;
           if (task.signal.aborted) throw task.signal.reason;
           fenced = Boolean(task.projectPolicy || task.rootOwner);
-          if (fenced && (!projectHttpApis.has(model.api) || options?.client))
-            throw problem("PROJECT_TRANSPORT", "Selected Pi adapter has no project-controlled HTTP dispatch fence: " + model.api);
+          if(fenced)assertFencedModelTransport(model,options?.client);
           const sendIntent = task.projectPolicy?.locateSend({ task, stage, context, model });
+          if (stage.phase === "process-check") context = {...context, messages:[context.messages.at(-1)]};
           const materialContext=await applyMaterials(binding,context,model,imageAutoResize());
           context=materialContext.context;
+          if((fenced||binding.task.materialContext?.length)&&model.contextWindow>0){
+            const estimate=context.messages.reduce((sum,message)=>sum+estimateTokens(message),0)+Math.ceil((context.systemPrompt?.length??0)/4);
+            if(estimate>=model.contextWindow)
+              throw problem("MATERIAL_CONTEXT_LIMIT","对话及材料超出模型上下文估算上限。请减少材料或手动整理上下文。");
+          }
           const expectedMaterialImages=materialContext.images;
           const secrets = await getSecrets(model);
           const clean = (v) => redact(v, secrets);
@@ -169,6 +109,7 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
           stage.callIds.push(call.id);
           task.writeRequest(call);
           task.save();
+          if (stage.phase === "process-check") task.rootOwner?.processCheck.recordRequest(stage, call.id);
           const signal = options?.signal
             ? AbortSignal.any([options.signal, task.signal])
             : task.signal;
@@ -192,14 +133,22 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
               binding.maxOutputTokens ?? binding.modelRef?.maxOutputTokens ?? options?.maxTokens,
             fetch: async (url, init) => {
               if (signal.aborted) throw signal.reason;
+              const seats=task.rootOwner?.acquireRequestSeat ? task.rootOwner : task.projectPolicy;
+              if (seats?.acquireRequestSeat) {
+                if (releaseProjectSeat) throw problem('PROJECT_REPLAY','Repeated physical request transport');
+                releaseProjectSeat = await seats.acquireRequestSeat(signal,stage);
+                signal.throwIfAborted();
+              }
               let response;
-              if(expectedMaterialImages.length){
-                let body;
+              let body;
+              if(expectedMaterialImages.length || binding.beforeDispatch){
                 try {
                   if(typeof init?.body==="string")body=JSON.parse(init.body);
                   else if(init?.body instanceof Uint8Array)body=JSON.parse(Buffer.from(init.body).toString("utf8"));
                   else if(url instanceof Request)body=await url.clone().json();
                 } catch {}
+              }
+              if(expectedMaterialImages.length){
                 const hashes=payloadImageHashes(body);
                 if(!call.materialImages||expectedMaterialImages.some(image=>!hashes.has(image.payloadSha256))){
                   binding.error=problem("MATERIAL_IMAGE_OMITTED","实际 HTTP 正文缺少可核验的材料图片。未发送模型请求。");
@@ -219,7 +168,9 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
                   if(task.ioError) throw task.ioError;
                   if(task.record.status!=="running") throw problem("TASK_ENDED","Task ended before dispatch");
                   task.rootOwner?.reserveRequest({requestId:call.id,taskId:task.record.id,sessionId:stage.sessionId??task.record.sessionId,stageId:stage.id,model:call.actualModel,cause:sendIntent?.cause??stage.phase});
+                  binding.beforeDispatch?.(call, body);
                   task.projectPolicy?.admit("send", sendIntent);
+                  task.rootOwner?.processCheck.consume(task.record.id, stage.role);
                 } catch (error) {
                   // Some provider SDKs replace local fetch errors with "Connection error".
                   binding.error = error;
@@ -234,6 +185,7 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
                 task.save();
               }
               try {
+                call.transport.dispatchedAt = new Date().toISOString();
                 response = await (options?.fetch ?? globalThis.fetch)(url,
                   fenced ? { ...init, redirect: "error" } : init);
               } catch (error) {
@@ -268,7 +220,7 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
                   if (key in body) body[key] = outputCap;
                 }
                 if (body.generationConfig) body.generationConfig.maxOutputTokens = outputCap;
-              } else if (optionalApis.has(actual.api)) {
+              } else if (requiresModelOutputLimit(actual) === false) {
                 delete body.max_tokens;
                 delete body.max_completion_tokens;
                 delete body.max_output_tokens;
@@ -413,6 +365,7 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
             try {task.rootOwner.settleRequest({requestId:call.id,taskId:task.record.id,status:call.status,notSent:call.sent===false && !call.transport?.projectDispatched,usage:call.usage});}
             catch(error){task.ioError=error;binding.error=error;}
           }
+          releaseProjectSeat?.();
           removeAbortListener?.();
         }
       });

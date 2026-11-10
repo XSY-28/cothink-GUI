@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { GUI_MATERIAL_CAPABILITIES } from "./gui-materials.js";
 import { createGuiController } from "./gui-controller.js";
+import { GUI_INPUT_VERSION } from "./gui-turn-options.js";
 
 const maxBodyBytes = 1024 * 1024;
 const actions = new Set([
@@ -85,9 +86,9 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
       const codes = ["HOST_SHUTTING_DOWN", "SHUTDOWN_UNSETTLED", "SESSION_STATE_CONFLICT", "SESSION_BUSY", "SESSION_NOT_PERSISTED", "SESSION_STATE_UNAVAILABLE", "CURSOR_EXPIRED", "WORKSPACE_CONFLICT", "WORKSPACE_UNAVAILABLE", "WORKSPACE_ARCHIVED", "DRAFT_CONFLICT", "VIEW_CONFLICT"];
       const fileCodes = ["FILE_UNSUPPORTED", "FILE_UNAVAILABLE", "FILE_PATH_INVALID", "FILE_IDENTITY_MISMATCH", "FILE_TOO_LARGE", "FILE_ENCODING_UNSUPPORTED", "FILE_TYPE_MISMATCH", "FILE_DIFF_UNSUPPORTED", "FILE_VERSION_MISMATCH", "FILE_NOT_FOUND", "FILE_DELETED", "FILE_PREVIEW_UNSUPPORTED", "FILE_PURPOSE_INVALID", "STATIC_PREVIEW_UNSUPPORTED"];
       const pluginCodes = ["EXTENSION_COMMAND", "EXTENSION_UI_UNSUPPORTED", "COMMAND_UNAVAILABLE", "UNADAPTED_PLUGIN"];
-      const extraCodes=["SUBMISSION_CONFLICT","CONTEXT_BUSY","READ_SCOPE","READ_VERSION","PROJECT_SCOPE","PROJECT_PREPARATION_CHANGED","PROJECT_NOT_PREPARED","PROJECT_EXECUTION_REQUIRED","NETWORK_POLICY","PROPOSAL_BLOCKED"];
+      const extraCodes=["SUBMISSION_CONFLICT","CONTEXT_BUSY","READ_SCOPE","READ_VERSION","PROJECT_SCOPE","PROJECT_PREPARATION_CHANGED","PROJECT_NOT_PREPARED","PROJECT_EXECUTION_REQUIRED","NETWORK_POLICY","PROPOSAL_BLOCKED","GUI_INPUT_UPGRADE","TURN_CONSTRAINTS"];
       const code = [...codes,...fileCodes,...pluginCodes,...extraCodes].includes(error.code) || /^MATERIAL_[A-Z_]+$/.test(error.code??"") ? error.code : undefined;
-      throw Object.assign(fail(["FILE_TOO_LARGE","MATERIAL_LIMIT"].includes(code) ? 413 : code==="MATERIAL_UNKNOWN" ? 503 : code==="MATERIAL_NOT_FOUND" ? 404 : codes.includes(code)||["SUBMISSION_CONFLICT","MATERIAL_CONFLICT","MATERIAL_PENDING","READ_VERSION"].includes(code) ? 409 : 400, String(error.message).replaceAll(token, "[REDACTED]")), {code, ...(code?.startsWith("WORKSPACE_") && error.workspace && {workspace:error.workspace})});
+      throw Object.assign(fail(["FILE_TOO_LARGE","MATERIAL_LIMIT"].includes(code) ? 413 : code==="MATERIAL_UNKNOWN" ? 503 : code==="MATERIAL_NOT_FOUND" ? 404 : codes.includes(code)||["SUBMISSION_CONFLICT","MATERIAL_CONFLICT","MATERIAL_PENDING","READ_VERSION","GUI_INPUT_UPGRADE"].includes(code) ? 409 : 400, String(error.message).replaceAll(token, "[REDACTED]")), {code, ...(code?.startsWith("WORKSPACE_") && error.workspace && {workspace:error.workspace})});
     }
   };
   const headers = {
@@ -113,7 +114,7 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
         if(url.pathname==="/api/materials"){
           if(req.method==="POST"){
             query(url,["ownerId","uploadId"]);
-            if(req.headers["x-cothink-gui-input"]!=="2")
+            if(req.headers["x-cothink-gui-input"]!==GUI_INPUT_VERSION)
               throw Object.assign(fail(409,"需要新版 CoThink 界面。"),{code:"GUI_INPUT_UPGRADE"});
             if(req.headers["content-type"]!=="application/octet-stream")throw fail(415,"材料上传需要二进制请求。");
             const length=req.headers["content-length"];
@@ -149,9 +150,10 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
               Object.keys(body).some((k) => !["action", "args"].includes(k)) ||
               !actions.has(body.action) || !body.args || typeof body.args !== "object" || Array.isArray(body.args))
             throw fail(400, "操作或参数无效。");
-          if (body.action !== "project.inspect" && req.headers["x-cothink-gui-input"] !== "2")
+          const receiptOnly=req.headers["x-cothink-gui-input"]!==GUI_INPUT_VERSION;
+          if (body.action !== "project.inspect" && body.action !== "task.submit" && receiptOnly)
             throw Object.assign(fail(409,"需要新版 CoThink 界面。请重新打开应用；已保存草稿和历史保留。"),{code:"GUI_INPUT_UPGRADE"});
-          return send(res, 200, await call("action", body.action, body.args));
+          return send(res, 200, await call("action", body.action, body.args,{receiptOnly}));
         }
         if (url.pathname === "/api/events") {
           query(url, []);

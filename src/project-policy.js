@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { workModelIdentity } from "./workers.js";
 import { readTask, readRequest, readRequests, problem } from "./task.js";
 import { createVersioning, inScope, projectScopesOverlap, validProjectPath } from "./versioning.js";
+import { validateProjectBudget } from "./project-request-accounting.js";
+export { projectUsage, reconcileProjectCalls, validateProjectBudget } from "./project-request-accounting.js";
 
 const fail = (code, message) => {
   throw problem(code, message);
@@ -12,23 +14,6 @@ const stamp = () => new Date().toISOString();
 function ranges(paths, allowed) {
   if (!Array.isArray(paths) || paths.some((path) => !validProjectPath(path, true) || !inScope(path, allowed)))
     fail("PROJECT_SCOPE", "Requested paths exceed the project's authorized scope");
-}
-
-export function validateProjectBudget(budget = {}) {
-  if (
-    !budget ||
-    typeof budget !== "object" ||
-    Array.isArray(budget) ||
-    Object.keys(budget).some((k) => !["maxCalls", "maxCost"].includes(k))
-  )
-    fail("PROJECT_BUDGET", "Budget accepts maxCalls and maxCost only");
-  const { maxCalls = null, maxCost = null } = budget;
-  if (
-    (maxCalls !== null && (!Number.isSafeInteger(maxCalls) || maxCalls < 0)) ||
-    (maxCost !== null && (!Number.isFinite(maxCost) || maxCost < 0))
-  )
-    fail("PROJECT_BUDGET", "Budget limits must be non-negative numbers (whole calls) or null");
-  return { maxCalls, maxCost };
 }
 
 function live(state, binding) {
@@ -230,6 +215,7 @@ export async function runProjectRoute({ host, home, action, input, versioning })
 export function createProjectPolicy({ host, binding, staff, home }) {
   const pendingEffects = new Map();
   const issuedSends = new WeakMap();
+  const processStages = new WeakMap();
   const pluginCapabilities = new WeakMap();
   const nativeCapabilities=new WeakMap(),nativeStages=new WeakMap(),nativeByLaunch=new Map();
   const mcpCapabilities = new WeakMap();
@@ -681,6 +667,30 @@ export function createProjectPolicy({ host, binding, staff, home }) {
 
   // The cause comes from the host-created stage or the recorded provider response
   // whose tool results Pi is now consuming. A new transport UUID is never a new turn.
+  function assertProcessBudget(needed, state = host.read()) {
+    host.assertOwned();
+    checkBinding(state, binding);
+    const {maxCalls, maxCost} = validateProjectBudget(state.budget);
+    if (maxCost !== null || (maxCalls !== null && (state.callIntents ?? []).filter(claim =>
+      claim.kind !== "external" && !claim.notSent).length + needed > maxCalls))
+      fail("PROJECT_BUDGET", "Project call budget exhausted or reserved for required process checking");
+  }
+
+  function bindProcessObservation(task, stage, observation, body) {
+    host.assertOwned();
+    checkBinding(host.read(), binding);
+    const root = task.rootOwner?.rootTask.record;
+    const digest = createHash("sha256").update(body).digest("hex");
+    if (!binding.rootTaskId || root?.id !== binding.rootTaskId || task.record.id !== binding.taskId ||
+        !root.processCheck?.observations.includes(observation) || processStages.has(stage) ||
+        stage.phase !== "process-check" || stage.role !== "process-check" || observation.taskId !== binding.taskId ||
+        observation.commandId !== binding.commandId || observation.revision !== binding.revision ||
+        observation.stageId !== stage.id || observation.sessionId !== stage.sessionId ||
+        !isDeepStrictEqual(observation.model, stage.modelRef) || observation.snapshotDigest !== digest)
+      fail("PROCESS_UNBOUND", "A process check requires the live root's exact host observation");
+    processStages.set(stage, {observation, body});
+  }
+
   function locateSend({ task, stage, context, model }) {
     host.assertOwned();
     const state = host.read();
@@ -688,9 +698,17 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     if (task.record.id !== binding.taskId || !task.record.stages.includes(stage) || !stage.sessionId)
       fail("PROJECT_STALE", "Request has no project-owned stage/session");
     const native=nativeStages.get(stage);
+    const process = processStages.get(stage);
+    if (stage.phase === "process-check" || stage.role === "process-check") {
+      const last = context.messages?.at(-1);
+      const body = typeof last?.content === "string" ? last.content :
+        last?.content?.length === 1 && last.content[0].type === "text" ? last.content[0].text : null;
+      if (!process || last?.role !== "user" || body !== process.body || context.tools?.length)
+        fail("PROCESS_UNBOUND", "Checker cannot send outside its tool-free host observation");
+    }
     if(stage.role.startsWith('helper:')&&!native)fail('PROJECT_NATIVE_UNBOUND','A helper role string is not a native session grant');
     if(native)checkNative(native,'model');
-    const assignment = assignmentOf(state, native?.creatorRole??stage.role);
+    const assignment = process ? null : assignmentOf(state, native?.creatorRole??stage.role);
     const member = task.record.members?.find((m) => "member:" + m.memberId === (native?.creatorRole??stage.role));
     const sessionId = stage.sessionId;
     if (model.provider !== stage.modelRef.provider || model.id !== stage.modelRef.modelId)
@@ -702,7 +720,8 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     const messages = context.messages ?? [];
     const last = messages.at(-1);
     let cause = "initial";
-    if (last?.role === "toolResult") {
+    if (process) cause = "observe:" + process.observation.id;
+    else if (last?.role === "toolResult") {
       const assistant = messages.findLast((m) => m.role === "assistant");
       const parent = assistant?.cothinkMessageId && calls.find((r) =>
         r.displayId === assistant.cothinkMessageId && r.role === stage.role && r.status === "completed" &&
@@ -741,14 +760,14 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     if (claims.some((c) => c.sessionId === sessionId && c.role !== detail.role ||
         c.role === detail.role && !separate(stage.phase) && !separate(c.phase) && c.sessionId !== sessionId))
       fail("PROJECT_STALE", "Pi session is not the session bound to this project role");
-    if(!native)staff?.checkIdentity?.({ ...detail, taskId: binding.taskId }, state);
+    if(!native&&!process)staff?.checkIdentity?.({ ...detail, taskId: binding.taskId }, state);
     if (stage.phase === "project-effect") {
       const work = (step.works ?? []).find((w) => w.id === stage.effectWorkId);
       if (!work?.effect || cause !== "initial" || (assignment && work.id !== assignment.workId))
         fail("PROJECT_EFFECT_HELD", "A frozen effect permits one tool-free request for the claimed work");
       detail.effect = work.effect;
     }
-    issuedSends.set(detail, {task, stage, member,native});
+    issuedSends.set(detail, {task, stage, member,native,process});
     return Object.freeze(detail);
   }
 
@@ -756,7 +775,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     const state = host.read();
     checkBinding(state, binding);
     const native=issuedSends.get(detail)?.native;
-    if(native)checkNative(native,'model');else staff?.checkIdentity?.(detail, state);
+    if(native)checkNative(native,'model');else if(!issuedSends.get(detail)?.process)staff?.checkIdentity?.(detail, state);
     const own = task.requests().find((r) => r.id === detail.requestId);
     const prior = state.callIntents?.find((c) => c.id === detail.requestId && !c.notSent);
     if (!own && !prior) return;
@@ -859,8 +878,8 @@ export function createProjectPolicy({ host, binding, staff, home }) {
   }
 
   function checkUnresolved(state, step, detail) {
-    const native=issuedSends.get(detail)?.native;
-    const current = assignmentOf(state, native?.creatorRole??detail.role);
+    const {native, process} = issuedSends.get(detail);
+    const current = process ? null : assignmentOf(state, native?.creatorRole??detail.role);
     const localCalls = new Map(issuedSends.get(detail).task.requests().map((call) => [call.id, call]));
     const currentWork = detail.workId && (step.works ?? []).find((w) => w.id === detail.workId);
     for (const prior of state.callIntents ?? []) {
@@ -893,12 +912,15 @@ export function createProjectPolicy({ host, binding, staff, home }) {
   function authorizeSend(state, detail, dispatch = false) {
     const liveSend = issuedSends.get(detail);
     if (!liveSend) fail("PROJECT_STALE", "Missing host-issued Pi send identity");
-    const { task, stage, member,native } = liveSend;
+    const { task, stage, member,native,process } = liveSend;
     if(native)checkNative(native,'model');
     if (stage.sessionId !== detail.sessionId || (member?.feedback?.length ?? 0) !== detail.feedback ||
         (task.record.status && task.record.status !== "running") || task.signal?.aborted)
       fail("PROJECT_STALE", "Session, task or corrective feedback changed before dispatch");
     const step = checkBinding(state, binding);
+    if (process && (process.observation.status !== "preparing" ||
+      detail.cause !== "observe:" + process.observation.id || !task.rootOwner?.rootTask.record.processCheck?.observations.includes(process.observation)))
+      fail("PROCESS_UNBOUND", "Original observation is no longer authorized for dispatch");
     const route = step.route?.revision === step.revision ? step.route : null;
     const judgment = route?.status === "paused" && route.kind !== "checkpoint" && !step.review &&
       !route.judgmentCall && route.taskId === binding.taskId && detail.role === "main" && detail.phase === "work";
@@ -907,13 +929,13 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     if (route?.status === "repair" && detail.role !== "main" && detail.role !== route.actor &&
         detail.role !== route.coordination?.role)
       routeError("Only the diagnosed change owner or root reviewer may continue this repair");
-    const assignment = assignmentOf(state, native?.creatorRole??detail.role);
+    const assignment = process ? null : assignmentOf(state, native?.creatorRole??detail.role);
     const rootClaim = !assignment && detail.workId &&
       state.rootWorkClaims?.some((c) => c.taskId === binding.taskId && c.workId === detail.workId);
     if (!detail.sessionId || !detail.cause || (assignment?.dispatchId ?? null) !== detail.dispatchId ||
         (!native&&!rootClaim && (assignment?.workId ?? null) !== detail.workId))
       fail("PROJECT_STALE", "Send no longer matches its authorized project session or work");
-    if(!native)staff?.checkIdentity?.({ ...detail, taskId: binding.taskId }, state);
+    if(!native&&!process)staff?.checkIdentity?.({ ...detail, taskId: binding.taskId }, state);
     const { maxCalls, maxCost } = validateProjectBudget(state.budget);
     if (maxCost !== null) fail("PROJECT_BUDGET",
       "No provider-enforced per-request price bound or authoritative bill is available; hard cost cap prevents sending");
@@ -923,8 +945,9 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     const owner = effectOwner(state, detail);
     if (owner) fail("PROJECT_EFFECT_HELD", "Inspect or wait for the original effect request " + owner.id + "; no replay.");
     checkUnresolved(state, step, detail);
-    if (maxCalls !== null && claimed.filter((c) => c.kind !== "external" && !c.notSent).length >= maxCalls)
-      fail("PROJECT_BUDGET", "Project call budget exhausted (includes unresolved sends)");
+    if (maxCalls !== null && claimed.filter((c) => c.kind !== "external" && !c.notSent).length +
+        (task.rootOwner?.processCheck.reserved(binding.taskId, stage.role) ?? 0) >= maxCalls)
+      fail("PROJECT_BUDGET", "Project call budget exhausted or reserved for required process checking");
     if (!dispatch) return;
     if (judgment) step.route.judgmentCall = detail.requestId;
     const claim = { id: detail.requestId, taskId: binding.taskId, role: detail.role,
@@ -1070,77 +1093,16 @@ export function createProjectPolicy({ host, binding, staff, home }) {
       });
     });
   }
-  return { staff, issueNativeHelper,bindNativeHelperSession,admitNativeHelper,closeNativeHelper,admitNativeCleanup,checkOriginalPluginCapability,
+  return { staff, assertProcessBudget, bindProcessObservation, issueNativeHelper,bindNativeHelperSession,admitNativeHelper,closeNativeHelper,admitNativeCleanup,checkOriginalPluginCapability,
+    budgetStatus() {
+      host.assertOwned();
+      const state = host.read();
+      checkBinding(state, binding);
+      const {maxCalls,maxCost} = validateProjectBudget(state.budget);
+      const used = (state.callIntents ?? []).filter(call=>call.kind !== "external" && !call.notSent).length;
+      return {maxCost, remainingCalls:maxCalls === null ? null : Math.max(0,maxCalls-used)};
+    },
     unresolvedMcpClaims:actor=>(host.read().callIntents??[]).filter(c=>c.kind==='external'&&c.taskId===binding.taskId&&(!actor||c.role===actor)&&!c.notSent&&c.status!=='completed').map(c=>structuredClone(c)),
     registerMcpRecovery:(actor,recover)=>mcpRecoveries.set(actor,recover),
     recoverMcp:(id,action)=>{const claim=host.read().callIntents?.find(c=>c.kind==="external"&&c.id===id&&c.taskId===binding.taskId);const recover=claim&&mcpRecoveries.get(claim.role);if(!recover)fail("PROJECT_MCP_RECOVERY","Original live handle is unavailable");return recover(id,action);}, admit, issueMcpCapability, issueMcpRecoveryCapability, admitMcp, claimMcpEffect, observeMcpRequest, issuePluginCapability, locateSend, originalResult, prepareEffect, observeCheck, observeRefresh, autoReviewScope, judgeLive, environmentFailure };
-}
-
-// Called by the exclusive recovering host. The adapter never dispatches until
-// the original request's sent marker was written. Keep the ID even when reclaimed.
-export function reconcileProjectCalls(state, task, requests) {
-  // A task intent is durable before the project claim/transport receipt. A crash
-  // in that interval cannot turn an unresolved original effect into a fresh one.
-  for(const trace of task.tools??[])if(trace.kind==='project_mcp_call'&&['intent','pending','outcome_unknown'].includes(trace.status)&&trace.requestId) {
-    if((state.callIntents??[]).some(c=>c.id===trace.requestId))continue;
-    const step=state.steps.find(s=>s.attempts.some(a=>a.taskId===task.id));
-    const work=[...(step?.works??[]),...(step?.subworks??[])].find(w=>w.id===trace.workId);
-    (state.callIntents??=[]).push({kind:'external',id:trace.requestId,taskId:task.id,role:trace.parentActorId,sessionId:trace.sessionId,
-      server:trace.server,sourceDigest:trace.sourceDigest,workId:trace.workId,scope:trace.scope??work?.scope??step?.scope,
-      tool:trace.tool,args:trace.args??null,payloadDigest:trace.payloadDigest,...(trace.effect?{effect:trace.effect}:{}),
-      ...(trace.containerProofDigest?{containerProofDigest:trace.containerProofDigest}:{}),
-      status:'outcome_unknown',sent:trace.sent??null,costBound:null,actualCost:null,recoveredFromTaskIntent:true});
-  }
-  for (const claim of (state.callIntents ?? []).filter((c) => c.kind !== "external" && c.taskId === task.id)) {
-    const request = requests.find((r) => r.id === claim.id);
-    if (request?.sent === false && !request.transport?.projectDispatched) claim.notSent = true;
-  }
-}
-export function projectUsage(state, home) {
-  const known = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  const observed = new Set();
-  let unknownCalls = 0,
-    unknownTasks = 0,
-    knownEstimate = 0,
-    unknownEstimates = 0,
-    helpers = 0;
-  function addUsage(usage, estimate) {
-    if (usage) for (const key of Object.keys(known)) known[key] += usage[key] ?? 0;
-    else unknownCalls++;
-    if (Number.isFinite(estimate)) knownEstimate += estimate;
-    else unknownEstimates++;
-  }
-  for (const step of state.steps)
-    for (const attempt of step.attempts) {
-      try {
-        const task = readTask(home, attempt.taskId);
-        for (const call of readRequests(home, task))
-          if (call.sent) {
-            observed.add(call.id);
-            addUsage(call.usage, call.estimatedCost);
-          }
-        for (const h of task.work?.helpers ?? [])
-          if (h.native || h.process) {
-            helpers++;
-            if(!h.native?.projectManaged&&!task.stages?.some(s=>s.nativeLaunchId===h.helperId))addUsage(h.usage, h.usage?.cost);
-          }
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-        unknownTasks++;
-      }
-    }
-  const unconfirmed = (state.callIntents ?? []).filter((c) => c.kind !== "external" && !c.notSent && !observed.has(c.id)).length;
-  return {
-    calls: observed.size,
-    externalOperations: (state.callIntents ?? []).filter(c=>c.kind==="external"&&!c.notSent).length,
-    unresolvedExternal: (state.callIntents ?? []).filter(c=>c.kind==="external"&&!c.notSent&&c.status!=="completed").map(c=>c.id),
-    helpers,
-    known,
-    unknownCalls,
-    unknownTasks,
-    unconfirmed,
-    knownCatalogEstimate: knownEstimate,
-    unknownEstimates,
-    actualCost: observed.size || helpers || unconfirmed || unknownTasks || (state.callIntents??[]).some(c=>c.kind==="external"&&!c.notSent) ? null : 0,
-  };
 }

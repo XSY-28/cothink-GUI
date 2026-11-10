@@ -1,46 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createProjectStaff } from "../src/project-staff.js";
-
-function roster() {
-  const state = {
-    scope: ["src"],
-    status: "running",
-    staff: [],
-    staffAssignments: {},
-  };
-  const staff = createProjectStaff({
-    read: () => state,
-    update(fn) {
-      const copy = structuredClone(state);
-      const result = fn(copy);
-      Object.assign(state, copy);
-      return result;
-    },
-  });
-  const appoint = (id, options = {}) =>
-    staff.change("appoint", {
-      id,
-      responsibility: id,
-      scope: ["src"],
-      ...options,
-    });
-  const assign = (id, options = {}) =>
-    staff.begin({
-      staffId: id,
-      dispatchId: id + "-run",
-      identity: id,
-      model: "local/" + id,
-      role: "member:" + id + "-run",
-      taskId: "task-1",
-      actor: "root",
-      scope: [],
-      readScope: ["."],
-      readOnly: true,
-      ...options,
-    });
-  return { state, staff, appoint, assign };
-}
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fixture } from "./helpers/pi-fixture.js";
+import { repository } from "./helpers/git-fixture.js";
+import { invoke } from "./helpers/cli-fixture.js";
+import { execution } from "./helpers/agent-sync-fixture.js";
+import { saveConfig } from "../src/config.js";
+import { readTask } from "../src/task.js";
+import { roster } from "./staff.fixture.js";
 
 test("transfer freezes new work; uncertain sent request survives renaming and task restart", () => {
   const { staff, appoint, assign } = roster();
@@ -124,14 +92,6 @@ test("independent review rejects decision participant, alias and write scope", (
   staff.update("reviewer-run", { status: "disposed" });
   assert.throws(() => staff.change("retain", { id: "reviewer", reason: "cheaper than handover" }));
 });
-
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { fixture } from "./helpers/pi-fixture.js";
-import { repository } from "./helpers/git-fixture.js";
-import { invoke } from "./helpers/cli-fixture.js";
-import { execution } from "./helpers/agent-sync-fixture.js";
-import { saveConfig } from "../src/config.js";
 
 test("project CLI reuses its temporary employee in two tasks, then retains, promotes, transfers and retires it", async (t) => {
   const repo = repository(t);
@@ -251,6 +211,8 @@ test("project CLI reuses its temporary employee in two tasks, then retains, prom
 test("ordinary project review observes the candidate before comparing the proposed conclusion", async (t) => {
   const repo = repository(t),
     goal = "Deliver a checked export marker.";
+  const skillName = "review-method", skillPath = "skill:review-method/SKILL.md";
+  const skillBody = "Inspect the exact candidate for the frozen marker.";
   const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
   const counts = { main: 0, r1: 0, r2: 0 };
   let authorId, reviewerId;
@@ -260,16 +222,20 @@ test("ordinary project review observes the candidate before comparing the propos
   const f = await fixture(t, ({ body }) => {
     const n = ++counts[body.model];
     if (body.model === "r1") {
-      if (n === 2)
+      if (n === 1) return tool("read_skill", { name: skillName, path: skillPath });
+      if (n === 3)
         return tool("write", {
           path: "export.txt",
           content: "verified-marker\n",
         });
       return {
-        text: n === 1 ? "I understand the original export task." : "The export marker is ready for review.",
+        text: n === 2 ? "I understand the original export task." : "The export marker is ready for review.",
       };
     }
-    if (body.model === "r2") return { text: "The candidate contains the export marker." };
+    if (body.model === "r2") {
+      if (n === 1) return tool("read_skill", { name: skillName, path: skillPath });
+      return { text: "The candidate contains the export marker." };
+    }
     switch (n) {
       case 1:
         return tool("project_staff", {
@@ -327,7 +293,10 @@ test("ordinary project review observes the candidate before comparing the propos
         return { text: "The reviewed export is complete." };
     }
   });
-  saveConfig(f.home, { formatVersion: 2, ...f.models, work: { execution } });
+  const skillDirectory = join(f.home, skillName);
+  mkdirSync(skillDirectory);
+  writeFileSync(join(skillDirectory, "SKILL.md"), `---\nname: ${skillName}\ndescription: Export review guidance\n---\n${skillBody}\n`);
+  saveConfig(f.home, { formatVersion: 2, ...f.models, work: { execution }, piResources: { skills: [skillDirectory] } });
   const file = join(repo.root, "review.json");
   writeFileSync(
     file,
@@ -371,15 +340,23 @@ test("ordinary project review observes the candidate before comparing the propos
   const state = JSON.parse(run.stdout);
   assert.equal(state.status, "completed", state.blocker);
   const seen = f.calls.filter((c) => c.body.model === "r2").map((c) => JSON.stringify(c.body.messages));
-  assert.equal(seen.length, 2);
+  assert.equal(seen.length, 3);
   const author = state.staffAssignments[authorId];
   assert.ok(author.candidate && author.baseVersion);
   assert.ok(
     seen[0].includes(goal) && seen[0].includes(author.candidate) && seen[0].includes("verified-marker"),
   );
   assert.ok(seen[0].includes("Record your own observations") && !seen[0].includes("WITHHELD_REVIEW_OPINION"));
-  assert.ok(seen[1].includes("The candidate contains the export marker.") && seen[1].includes("WITHHELD_REVIEW_OPINION"));
-  assert.ok(seen[1].includes("Compare your recorded observations"));
+  assert.ok(seen[0].includes(skillPath) && !seen[0].includes(skillBody));
+  assert.ok(seen[1].includes(skillBody) && !seen[1].includes("WITHHELD_REVIEW_OPINION"));
+  assert.ok(seen[2].includes("The candidate contains the export marker.") && seen[2].includes("WITHHELD_REVIEW_OPINION"));
+  assert.ok(seen[2].includes("Compare your recorded observations"));
+  const task = readTask(f.home, state.steps[0].attempts[0].taskId);
+  const skillHash = task.skillResources.find(skill => skill.name === skillName).hash;
+  const skillReads = task.tools.filter(entry => entry.kind === "skill_resource_read");
+  assert.deepEqual(skillReads.map(entry => [entry.actor, entry.skillHash]), [
+    ["member:" + authorId, skillHash], ["member:" + reviewerId, skillHash],
+  ]);
   assert.equal(state.staffAssignments[reviewerId].reviewOf, authorId);
   assert.equal(state.staffAssignments[reviewerId].status, "disposed");
 });
@@ -688,33 +665,6 @@ test("missing kernel receipt stays unknown until the original journal proves the
   staff.reconcile(record, [], [{ requestId: "original", status: "not_sent" }]);
   assert.equal(staff.assignment("reader-run").outcome, "not_sent");
   assert.equal(staff.assignment("reader-run").status, "disposed");
-});
-
-test("the writer claims work and position separately, reuses lost replies, and keeps root edits bound", () => {
-  const {state, staff, appoint} = roster();
-  state.steps = [{id:"delivery", attempts:[{taskId:"task"}], scope:["src"], works:[
-    {id:"front",scope:["src/ui"]}, {id:"math",scope:["src/math"]},
-  ]}];
-  for (const id of ["first", "second", "third"]) appoint(id);
-  const claim = (id, work, changes = {}) => staff.begin({
-    taskId:"task", staffId:id, actor:"root", actorRole:"main", model:"local/A", identity:"a",
-    assignment:"Implement " + work, workId:work, scope:[work === "front" ? "src/ui" : "src/math"],
-    readScope:["."], ...changes,
-  });
-  const front = claim("first", "front");
-  assert.equal(claim("first", "front").dispatchId, front.dispatchId);
-  assert.equal(claim("first", "front").reused, true);
-  assert.throws(() => claim("second","front", {assignment:"renamed"}));
-  assert.throws(() => claim("first","math"));
-  staff.update(front.dispatchId, {status:"unknown", requestId:"pending"});
-  const math = claim("second","math");
-  assert.notEqual(math.dispatchId,front.dispatchId);
-  assert.equal(Object.keys(state.staffAssignments).length,2);
-  assert.throws(() => staff.claimWrite({role:"main",taskId:"task",scope:["src/ui/code"]}));
-  assert.throws(() => staff.claimWrite({role:math.role,taskId:"task",scope:["src/ui/code"]}));
-  assert.doesNotThrow(() => staff.claimWrite({role:math.role,taskId:"task",scope:["src/math/code"]}));
-  assert.throws(() => staff.checkIdentity({taskId:"task",role:math.role,model:{provider:"other",id:"A"}}));
-  assert.throws(() => staff.begin({...front, dispatchId:undefined, staffId:"third", actorRole:math.role}));
 });
 
 test("legacy uncertain work is recovered from original task scope and cannot be renamed or reassigned", () => {

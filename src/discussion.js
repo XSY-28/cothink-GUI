@@ -1,3 +1,4 @@
+import { attachManagerFinal } from "./project-manager-report.js";
 import {createContextAccess} from './context-management.js';
 import {freezeTaskSkillResources,taskSkillDirectory,getTaskSkillResources,verifyTaskSkillResources} from "./skill-resources.js";
 import { validateWorkRequest, preflightVisual } from "./visual-preview.js";
@@ -12,9 +13,11 @@ import {
 import {
   createRuntime,
   createModelRuntime,
+  projectModelFacts,
   selectedResources,
 } from "./pi-runtime.js";
 import { createTask, problem } from "./task.js";
+import { recordCollaborationResult } from "./project-collaboration-evidence.js";
 import { conversationMaterialRefs } from "./conversation.js";
 import {
   validateModelRefs,
@@ -22,7 +25,7 @@ import {
   singleLineCommand,
   isGenerationCommand,
 } from "./setup.js";
-import { cothinkExtension } from "./extensions/cothink.js";
+import { cothinkExtension, mainSystemPrompt } from "./extensions/cothink.js";
 import { snapshotTeam, readSessionTeam } from "./teams.js";
 import { validateConfig } from "./config.js";
 import { DEFAULT_THINKING_LEVEL } from "./thinking.js";
@@ -90,9 +93,14 @@ export async function runTurn({
       main: frozen.main,
       secondary: frozen.secondary,
     });
-  await validateModelRefs(frozen, catalog, { singleModel: unified || Boolean(rootOwner) || singleModel });
-  if(allMaterials.some(m=>materialImage(m.manifest))){
-    const reviewPossible=unified?constraints.allowedSubtasks.includes("review"):!singleModel&&!project;
+  const projectRoutes = (unified || rootOwner) && !confirmedOperation
+    ? await Promise.all([frozen.main, ...frozen.secondary].map(ref=>projectModelFacts(catalog,ref))) : null;
+  if (projectRoutes) {
+    const [mainRoute] = projectRoutes;
+    if (!mainRoute.available) throw problem(mainRoute.unavailableCode, mainRoute.unavailableReason);
+  } else await validateModelRefs(frozen, catalog, { singleModel: unified || Boolean(rootOwner) || singleModel });
+  if(!confirmedOperation&&allMaterials.some(m=>materialImage(m.manifest))){
+    const reviewPossible=!unified&&!singleModel&&!project;
     for(const ref of [frozen.main,...(reviewPossible?frozen.secondary.slice(0,1):[])])
       requireMaterialImageModel(catalog.getModel(ref.provider,ref.modelId),ref);
   }
@@ -119,7 +127,7 @@ export async function runTurn({
         ...configuredResources,
         ...options.resourceOptions,
         ...(!allowWork || unified ? {noContextFiles: true} : {}),
-        systemPrompt: prompt("main"),
+        systemPrompt: mainSystemPrompt({unified}),
       },
     });
   let answerSkills, visualPreflight;
@@ -144,7 +152,7 @@ export async function runTurn({
     if (own) await rt.dispose();
     throw error;
   }
-  if (workRequest) {
+  if (workRequest && !rootOwner) {
     try { visualPreflight = await preflightVisual({cwd,config:frozen,skills:answerSkills,model:catalog.getModel(frozen.main.provider,frozen.main.modelId),allowWork}); }
     catch(e) { if(own) await rt.dispose(); throw e; }
   }
@@ -171,7 +179,7 @@ export async function runTurn({
       materials:currentMaterials.map(m=>materialReference(m.manifest)),
       models: {
         main: frozen.main,
-        secondary: singleModel ? [] : frozen.secondary.slice(0, 1),
+        secondary: singleModel ? [] : unified ? frozen.secondary : frozen.secondary.slice(0, 1),
       },
       singleModel, flow, constraints, budget, workspace, readAuthorization, frozenConfig:frozen, rootOwner, rootTaskId,
       ...(confirmedOperation?.source ? {confirmationSource:confirmedOperation.reservation.proposalRef,budgetSource:confirmedOperation.reservation.budgetSource}:{}),
@@ -197,6 +205,7 @@ export async function runTurn({
   // Selected skills and other data resources stay available. Native JS can run at import
   // time, before a tool or a request can be checked against project authority.
   task.packageSnapshot = rt.packageSnapshot;
+  task.projectRoutes = projectRoutes;
   if(unified)task.record.packageSnapshot=structuredClone(rt.packageSnapshot);
   task.extensionUI=rt.extensionUI;
   task.extensionMode=rt.extensionMode;
@@ -209,13 +218,14 @@ export async function runTurn({
   };
   signal?.addEventListener("abort", cancel, { once: true });
   if (signal?.aborted) await task.cancel();
+  if (unified) attachManagerFinal(task,{home,cwd,main:frozen.main,rt,manager,onProgress,maxOutputTokens:options.maxOutputTokens,timeout:options.timeout});
   let priorToolNames;
   try {
     task.frozenSkills = answerSkills;
     if(project || unified){freezeTaskSkillResources({task,skills:answerSkills});task.answerSkills=taskSkillDirectory(task);}
     else task.answerSkills = answerSkills;
     task.record.visualPreflight=visualPreflight;
-    task.preflightVisual = async () => {task.record.visualPreflight=await preflightVisual({cwd,config:frozen,skills:answerSkills,model:catalog.getModel(frozen.main.provider,frozen.main.modelId),allowWork});task.save();return task.record.visualPreflight;};
+    task.preflightVisual = async ({projectCwd=cwd}={}) => {task.record.visualPreflight=await preflightVisual({cwd:projectCwd,config:frozen,skills:answerSkills,model:catalog.getModel(frozen.main.provider,frozen.main.modelId),allowWork});task.save();return task.record.visualPreflight;};
     task.record.answerSkills = answerSkills.map(
       ({ body, ...summary }) => summary,
     );
@@ -250,12 +260,16 @@ export async function runTurn({
       const userMessage={role:"user",content:[{type:"text",text:input}],timestamp:Date.now()};
       manager.appendMessage(userMessage);rt.session.agent.state.messages=[...rt.session.agent.state.messages,userMessage];
     } else {
-      if (unified && (!workspace?.project || constraints.readOnly)) {
+      if (unified) {
+        task.readonlyLifecycle?.bind(rt);
         priorToolNames = rt.session.getActiveToolNames();
-        rt.setToolNames(priorToolNames.filter(name => name !== "start_work"));
+        const enabled=name=>(name!=="start_work"||allowWork&&!constraints.readOnly)&&
+          (!["delegate","collect","feedback","pause_member"].includes(name)||task.readonlyLifecycle?.available());
+        rt.setToolNames(priorToolNames.filter(enabled));
       }
       const draftStage=task.beginPhase("draft","main",frozen.main);rt.bindTask(task,draftStage);draft=await rt.prompt(input,{inputMaterials:currentMaterials});
     }
+    const readonlyResult=await task.readonlyLifecycle?.close({finalCall:draft?.call});
     if(unified&&task.record.projectPreparationBlocked){
       task.finish("blocked","目录尚未准备为文件工作。请先完成本地准备，再明确继续原任务。");
       return task;
@@ -282,21 +296,19 @@ export async function runTurn({
       task.finish("completed");
       return task;
     }
-    if (unified && task.record.routeIntent?.kind === "request_review") draft={...draft,text:task.record.routeIntent.args.draft};
-    const needsReview=unified ? Boolean(task.record.routeIntent?.kind === "request_review" || constraints.requireDifferentModelReview) : !singleModel;
-    if (!needsReview) {
+    if (unified || singleModel) {
       task.record.finalCallId = draft.call.id;
-      task.finish("completed");
+      const collaborationGap=unified&&recordCollaborationResult(task,{candidates:readonlyResult?.candidates});
+      if(readonlyResult?.unknown)task.finish("outcome_unknown",readonlyResult.gap);
+      else if(unified&&(task.record.turnIntent?.fileRequired||collaborationGap||readonlyResult?.gap))
+        task.finish(task.requests().some(call=>call.text?.trim())?"partial":"failed",
+          [task.record.turnIntent?.fileRequired&&"未交付可核验的文件。",collaborationGap,readonlyResult?.gap,task.record.workPlanError?.message].filter(Boolean).join(" "));
+      else if(unified&&task.record.workPlanError&&!draft.text?.trim())
+        task.finish("failed",task.record.workPlanError.message);
+      else task.finish("completed");
       return task;
     }
     const ref = task.record.models.secondary[0];
-    if(unified){
-      if(!constraints.allowedSubtasks.includes("review"))throw Error("本条禁止委派与必需评审冲突；请明确允许评审。");
-      await validateModelRefs(frozen,catalog);
-      const {workModelIdentity}=await import("./workers.js");
-      if(!ref || workModelIdentity(ref)===workModelIdentity(frozen.main))throw Error("需要合法的不同实际型号独立评审。");
-      task.record.reviewDraft={text:draft.text,callId:task.record.routeIntent?.callId??draft.call.id};task.save();
-    }
     const stage = task.beginPhase("review", "reviewer-1", ref);
     onProgress({ type: "phase", stage, task });
     const reviewer = await createRuntime({
@@ -304,8 +316,6 @@ export async function runTurn({
       cwd,
       modelRef: ref,
       role: `review-${task.record.id}`,
-      projectManaged:unified,
-      useFrozenSkills:unified,
       packageSnapshot: rt.packageSnapshot,
       ...options,
       resourceOptions: {
@@ -324,7 +334,7 @@ export async function runTurn({
           history: frozenHistory,
           draft: draft.text,
           author: frozen.main,
-          answerSkills:unified?task.answerSkills:answerSkills,
+          answerSkills,
           expandedInput: (() => {
             const c = draft.call.context.messages.findLast(
               (m) => m.role === "user",
@@ -341,12 +351,6 @@ export async function runTurn({
     } finally {
       await reviewer.dispose();
     }
-    if(unified && constraints.requireDifferentModelReview){
-      const {observedIdentity}=await import('./project-review.js');
-      const author=observedIdentity(draft.call),critic=observedIdentity(review.call);
-      if(!author||!critic||author===critic)throw Error('无法核实不同实际型号的评审证据；已有初稿和评审保留，不标为完成。');
-      task.record.reviewEvidence={draftCallId:draft.call.id,reviewCallId:review.call.id,author,critic};task.save();
-    }
     if (task.signal.aborted) throw task.signal.reason;
     const revisionStage = task.beginPhase("revision", "main", frozen.main);
     rt.bindTask(task, revisionStage);
@@ -358,7 +362,7 @@ export async function runTurn({
           { author: ref, text: review.text, callId: review.call.id },
         ]) +
         "\n\n" +
-        renderAnswerSkills(unified?task.answerSkills:answerSkills),
+        renderAnswerSkills(answerSkills),
       { custom: true },
     );
     task.record.finalCallId = result.call.id;
@@ -366,6 +370,7 @@ export async function runTurn({
     return task;
   } catch (error) {
     if(task.cancelPromise)await task.cancelPromise;
+    else await task.readonlyLifecycle?.close({cancel:true}).catch(()=>{});
     try {
       task.finish(
         task.record.cancelRequestedAt
@@ -407,6 +412,8 @@ export async function runTurn({
       }
     }
     task.answerSkills = [];
+    delete task.synthesizeManagerFinal;
+    delete task.persistManagerFinal;
     host.task = undefined;
     rt.hostContext?.(undefined);
     signal?.removeEventListener("abort", cancel);

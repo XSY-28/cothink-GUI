@@ -1,10 +1,11 @@
 import React, {useEffect, useRef, useState} from "react";
 import {Modal} from "./Modal.jsx";
 
-export function ProjectDialog({commands, workspace, projects = [], defaultRoster, onSaved, onOpenExisting, onClose}) {
+export function ProjectDialog({commands, workspace, projects = [], rosters = [], recentRosterId, onSaved, onOpenExisting, onClose}) {
   const binding = !!workspace;
   const title = workspace?.project ? "更换项目目录" : binding ? "关联项目目录" : "新建 Team";
   const [name, setName] = useState(""), [path, setPath] = useState("");
+  const [defaultRosterId,setDefaultRosterId]=useState("");
   const [result, setResult] = useState(null), [busy, setBusy] = useState(false), [saving, setSaving] = useState(false);
   const [error, setError] = useState(""), [existing, setExisting] = useState(null), [uncertain, setUncertain] = useState(null);
   const [browser, setBrowser] = useState(null), [folderName,setFolderName] = useState("");
@@ -98,7 +99,7 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
     saveBusy.current = true; setSaving(true); setError(""); setExisting(null);
     try {
       const saved = binding ? await commands.bindWorkspace(workspace,result.canonicalPath??result.path)
-        : await commands.createWorkspace({name:name.trim(),project:result.canonicalPath??result.path,defaultRosterId:defaultRoster?.id??null});
+        : await commands.createWorkspace({name:name.trim(),project:result.canonicalPath??result.path,defaultRosterId:defaultRosterId||null});
       if (saved) onSaved(saved);
     } catch (e) {
       setError(e.message);
@@ -161,7 +162,11 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
         <datalist id="recent-projects">{projects.map(project=><option key={project} value={project}/>)}</datalist>
         {path.trim() && <button type="button" disabled={busy || saving || !!uncertain} onClick={()=>inspect()}>{busy ? "正在检查…" : "只读检查目录"}</button>}
       </details>
-      {!binding && <p className="field-note">{defaultRoster ? "默认阵容：" + defaultRoster.name : "暂无默认阵容，可以先保存，稍后配置。"}</p>}
+      {!binding && <label>默认阵容<select value={defaultRosterId} disabled={saving || !!uncertain}
+        onChange={event=>setDefaultRosterId(event.target.value)}>
+        <option value="">不设默认，每条对话单独选择</option>
+        {rosters.map(roster=><option key={roster.id} value={roster.id}>{roster.name}{roster.id===recentRosterId?"（最近）":""}</option>)}
+      </select></label>}
       {result && <div className="project-inspection">
         <p>{validDirectory ? "可以使用这个文件夹。" : "无法关联此目录。"}</p>
         {(result.reason??result.error) && <p role="alert" className="error-text">{result.reason??result.error}</p>}

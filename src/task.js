@@ -92,11 +92,11 @@ export function createTask({
     signal: controller.signal,
     save,
     runtimes,
-    beginPhase(phase, role, modelRef) {
+    beginPhase(phase, role, modelRef, { roleOnly = false, assignment, stageId = randomUUID() } = {}) {
       if (controller.signal.aborted || terminal.has(record.status))
         throw problem("CANCELLED", "任务已停止");
       const stage = {
-        id: randomUUID(),
+        id: stageId,
         displayId: randomUUID(),
         phase,
         role,
@@ -104,7 +104,8 @@ export function createTask({
         status: "running",
         callIds: [],
       };
-      record.phase = phase;
+      if (assignment) stage.assignment = assignment;
+      if (!roleOnly) record.phase = phase;
       record.stages.push(stage);
       save();
       return stage;
@@ -155,6 +156,14 @@ export function createTask({
         controller.abort(error);
         throw error;
       }
+    },
+    processRequestFacts(role, feedback = 0) {
+      return [...requests.values()].filter(request => request.role === role && request.sent &&
+        (request.projectSend?.feedback ?? 0) === feedback).map(request => ({
+          id: request.id, stageId: request.stageId, phase: request.phase, status: request.status,
+          at: request.transport?.dispatchedAt ?? request.transport?.startedAt ?? request.createdAt,
+          endedAt: request.endedAt ?? null,
+        }));
     },
     requests() {
       return [...requests.values()].map((r) => {
@@ -245,6 +254,7 @@ export function createTask({
       if(stopped.some(result=>result.status==='rejected')) record.cancelStopError='One or more runtime aborts did not confirm stop';
       try {await helperStop;}catch(error){record.cancelStopError=error.message;}
       try {await executionStop;}catch(error){record.cancelStopError=error.message;}
+      try {await task.readonlyLifecycle?.close({cancel:true});}catch(error){record.cancelStopError=error.message;}
       try {await task.contextLifecycle;}catch(error){record.cancelStopError=error.message;}
       if (!record.cancelStopError) record.cancelSettledAt=new Date().toISOString();
       closeJournals();
@@ -267,6 +277,27 @@ export function readTask(home, id) {
   if (record.status === "running") {
     record.status = "outcome_unknown";
     record.error = "进程可能已中断或仍在运行；不自动重发。";
+  }
+  if (record.processCheck?.status === "running") {
+    const unsettled = record.processCheck.observations.filter(observation => observation.status === "preparing");
+    for (const observation of unsettled) {
+      try {
+        const original = readRequest(home, observation.taskId, observation.requestId);
+        if (original.phase !== "process-check" || original.stageId !== observation.stageId)
+          throw problem("PROCESS_UNBOUND", "Observation and request ownership differ");
+        observation.status = original.sent ? original.status === "completed" ? "unverified" : original.status : "not_sent";
+        observation.usage = original.usage ?? null;
+      } catch {
+        observation.status = observation.requestId ? "outcome_unknown" : "not_sent";
+      }
+    }
+    record.processCheck.status = unsettled.some(observation => observation.status === "outcome_unknown") ? "outcome_unknown" : "unverified";
+  }
+  for(const stage of record.stages) {
+    if(stage.assignment&&!stage.assignment.settledAt){
+      stage.status=stage.assignment.status="outcome_unknown";
+      stage.assignment.error={message:"Assignment settlement is unconfirmed; query its original requests without replay."};
+    }
   }
   for(const helper of record.work?.helpers ?? []) {
     if(["queued","starting","running"].includes(helper.status)) {

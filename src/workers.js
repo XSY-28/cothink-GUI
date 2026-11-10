@@ -1,4 +1,7 @@
-import { createPreviewTool } from "./visual-preview.js";
+import { formalProcessSource } from "./process-check.js";
+import { createWorkChanges } from "./work-changes.js";
+import { createMemberControls } from "./work-member-controls.js";
+import { createPreviewTool, runVisualReview } from "./visual-preview.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -6,23 +9,15 @@ import { Type } from "typebox";
 import { createVersioning, inScope, withChangeQueue } from "./versioning.js";
 import { createPluginWork } from "./plugin-work.js";
 import { workspaceTools } from "./workspaces.js";
-import { createRuntime, selectedResources } from "./pi-runtime.js";
-import { renderAnswerSkills, buildMemberTaskMaterial } from "./context.js";
+import { createRuntime, projectRoutingBudget, selectedResources } from "./pi-runtime.js";
+import { renderAnswerSkills, buildMemberTaskMaterial, materialImage, assignedRoleMaterial, requireMaterialImageModel } from "./context.js";
+import { workModelIdentity } from "./model-roster.js";
 import { problem, readRequest, readTask } from "./task.js";
 import { DEFAULT_THINKING_LEVEL } from "./thinking.js";
 const prompt = (n) =>
   readFileSync(new URL(`../prompts/${n}.md`, import.meta.url), "utf8");
 const modelName = (m) => m.provider + "/" + m.modelId;
-// Provider identity is not model identity. Strip only recognized vendor namespaces;
-// arbitrary custom IDs/remappings remain opaque, and versions are never guessed.
-export const workModelIdentity = (m) => {
-  const id = m.modelId.replace(/^(?:openai|anthropic|deepseek|moonshotai|moonshot)\//, "");
-  if (id === "k3.1-pro") return "kimi-k3.1-pro";
-  if (id === "anthropic.claude-opus-5-5") return "claude-opus-5-5";
-  if (id === "claude-opus-5.5") return "claude-opus-5-5";
-  if (id === "deepseek-v4.1-flash1017") return "deepseek-v4.1-flash-1017";
-  return id;
-};
+export { workModelIdentity };
 const text = (data) => ({
   content: [{ type: "text", text: JSON.stringify(data) }],
 });
@@ -52,13 +47,18 @@ export async function runWork({
   )
     throw problem("MODEL_UNAVAILABLE", "工作模型允许列表必须是身份数组。");
   const staff = task.record.project && task.projectPolicy?.staff;
+  const unified = Boolean(task.rootOwner && staff);
+  const projectRoutes = new Map((task.projectRoutes??[]).map(fact=>[fact.identity,fact]));
   const roster = staff ? [config.main, ...config.secondary] : config.secondary;
   const available = (task.record.singleModel ? [] : roster).filter(
     (m) =>
       (staff || workModelIdentity(m) !== workModelIdentity(config.main)) &&
+      (!unified || projectRoutes.get(modelName(m))?.available) &&
       (task.workModelAllowlist === undefined ||
         task.workModelAllowlist.includes(modelName(m))),
   );
+  const shared = task.projectPolicy?.kernel ? task.projectPolicy : null;
+  const capacityLimit = task.projectPolicy?.maxConcurrentRequests ?? 2;
   let checks = config.work?.checks;
   if (checks === undefined) {
     try {
@@ -122,6 +122,10 @@ export async function runWork({
     for (const fn of [...listeners]) fn();
     schedule();
   }
+  const processCheck = unified ? task.rootOwner.processCheck : null;
+  const processSource = processCheck && formalProcessSource({
+    task,config,cwd,maxOutputTokens,members,getModelRuntime:()=>leader.modelRuntime,notify:()=>notify(false),
+  });
   function waitChange(seen, signal = task.signal) {
     if (revision !== seen) return Promise.resolve();
     return new Promise((resolve, reject) => {
@@ -175,9 +179,16 @@ export async function runWork({
     if (!m)
       throw problem(
         "MODEL_UNAVAILABLE",
-        "从冻结列表选择：" + available.map(modelName).join(", "),
+        [projectRoutes.get(name)?.unavailableReason,"从冻结列表选择：" + available.map(modelName).join(", ")].filter(Boolean).join(" "),
       );
     return m;
+  }
+  function roleReadScope(owner, paths) {
+    if (!unified) return paths;
+    const parent = (owner?.binding ?? mainBinding).current;
+    if (paths.some(path=>!inScope(path,[...parent.scope,...parent.readScope])))
+      throw problem("ROLE_MATERIAL", "Select readScope from the current supervisor's authorized paths.");
+    return paths;
   }
   function assertModelFree(model, self = null) {
     // Project staffing claims the work and the position together before starting a session.
@@ -201,296 +212,11 @@ export async function runWork({
         `模型已有未处理成员 memberId=${occupied.record.memberId}，status=${occupied.record.status}；collect已有成员，检查未知requestId或给出具体feedback；勿新建副本。`,
       );
   }
-  async function invoke(action, input, fn) {
-    guard();
-    const id = input.requestId ?? randomUUID();
-    let request = work.requests.find((r) => r.requestId === id);
-    if (!request) {
-      request = {
-        action,
-        requestId: id,
-        changeId: input.changeId ?? null,
-        status: "preparing",
-        ...(task.projectPolicy ? {dispatched:false} : {}),
-      };
-      work.requests.push(request);
-    }
-    request.status = "preparing";
-    request.attempts = (request.attempts ?? 0) + 1;
-    save();
-    const started = performance.now(),
-      before = observerErrors.length;
-    try {
-      const coordinated = input.changeId && ["prepareChange", "acceptChange", "refreshChange"].includes(action);
-      const execute = async () => {
-        guard();
-        const change = work.changes.find(c => c.changeId === input.changeId);
-        if (staff && coordinated && input.actor === "main" && change?.actor?.startsWith("member:"))
-          staff.checkOwner({taskId:task.record.id, actorRole:"main", dispatchId:change.actor.slice(7), rootReview:true});
-        if (task.projectPolicy && action !== "abandonChange")
-          task.projectPolicy.admit(action === "acceptChange" || action === "checkCurrent" ? "accept" : "scope", {
-            actor: input.actor ?? change?.actor ?? "main",
-            actorRole:input.actorRole,
-            scope: input.scope ?? change?.scope ?? [],
-            readScope: input.readScope ?? change?.readScope ?? [],
-            previousScope: action === "refreshChange" ? change?.scope : undefined,
-            candidate: input.candidateVersion ?? change?.candidateVersion ?? change?.privateVersion,
-            changeId: change?.changeId, privateVersion:change?.privateVersion, requestId: id,
-          });
-        if (coordinated) await pluginWork?.assertHandled(input.changeId);
-        if (task.projectPolicy && !request.dispatched) {
-          request.dispatched = true;
-          save();
-        }
-        return fn(id);
-      };
-      let result = coordinated ? await withChangeQueue(v, input.changeId, execute) : await execute();
-      if (observerErrors.length > before && action === "acceptChange")
-        result = {
-          status: "unknown",
-          requestId: id,
-          changeId: input.changeId,
-          error: observerErrors.at(-1),
-        };
-      request.status = result.status ?? "completed";
-      save();
-      if (action === "refreshChange")
-        await task.projectPolicy?.observeRefresh?.({requestId:id, result, versioning:v});
-      return result;
-    } catch (e) {
-      request.status = "rejected";
-      request.error = { code: e.code ?? "ERROR", message: e.message };
-      save();
-      if (["prepareChange","acceptChange","checkCurrent"].includes(action) &&
-          ["EXECUTOR_UNAVAILABLE","EXECUTOR_CONFIG","EXECUTION_UNKNOWN"].includes(e.code))
-        task.projectPolicy?.environmentFailure?.({
-          candidate:input.candidateVersion ?? work.changes.find(c=>c.changeId===input.changeId)?.privateVersion ?? work.version,
-          requestId:id, code:e.code, message:e.message,
-        });
-      throw e;
-    } finally {
-      request.durationMs =
-        (request.durationMs ?? 0) + (performance.now() - started);
-      save();
-    }
-  }
-  async function begin(
-    actor,
-    scope,
-    readScope,
-    intent,
-    readOnly = false,
-    options = {},
-  ) {
-    const input = {
-      requestId: options.requestId ?? randomUUID(),
-      actor,
-      ...(actor === "result" ? {actorRole:"main"} : {}),
-      scope: readOnly ? [] : scope,
-      readScope: readScope ?? (task.record.rootTaskId ? task.record.project.readScope : ["."]),
-      intent,
-      readOnly,
-      wait: options.wait ?? false,
-    };
-    const c = await invoke("beginChange", input, (id) =>
-      v.beginChange(
-        { ...input, requestId: id },
-        { signal: options.signal ?? task.signal },
-      ),
-    );
-    if (c.status === "blocked") return c;
-    if (c.status === "unknown")
-      throw Object.assign(
-        problem("OPERATION_UNKNOWN", "授权结果未知：" + input.requestId),
-        { requestId: input.requestId },
-      );
-    return syncChange(c);
-  }
-  async function abandon(c, reason, { queueHeld = false } = {}) {
-    const perform=async()=>{
-      guard();
-      const actor=mainBinding?.current.changeId===c.changeId?mainBinding:[...members.values()].find(m=>m.binding?.current.changeId===c.changeId)?.binding;
-      if(c.status==="outcome_unknown"||actor?.unknownOperation)throw problem("OPERATION_UNKNOWN","Resolve the original operation ID before abandoning this change");
-      await pluginWork?.assertHandled(c.changeId);
-      const result = await invoke(
-      "abandonChange",
-      { changeId: c.changeId },
-      (id) => v.abandonChange(c.changeId, { requestId: id }),
-    );
-    Object.assign(c, await v.inspect({ changeId: c.changeId }), {
-      abandonReason: reason,
-    });
-    if (staff && c.actor === "main" && c.status === "abandoned") {
-      const receipt = work.requests.findLast(r => r.action === "abandonChange" && r.changeId === c.changeId && r.status === "abandoned");
-      if (receipt) staff.abandonedRoot({taskId:task.record.id, changeId:c.changeId, requestId:receipt.requestId, reason});
-    }
-    notify(true);
-      return result;
-    };
-    return queueHeld?perform():withChangeQueue(v,c.changeId,perform);
-  }
-  function currentRequest(actor) {
-    return task.requests().findLast((r) => r.role === actor.role && r.sent);
-  }
-  function receivedVersion(role, deliveredBy, version) {
-    const requests = task.requests();
-    const announced = requests.findIndex(r => r.id === deliveredBy);
-    if (announced < 0) return false;
-    const tools = requests[announced].response?.content?.filter(p => p.type === "toolCall" &&
-      ["collect", "accept_change"].includes(p.name)).map(p => p.id) ?? [];
-    return requests.slice(announced + 1).some(r => r.role === role && r.status === "completed" &&
-      r.context?.messages?.some(msg => msg.role === "toolResult" && tools.includes(msg.toolCallId) &&
-        !msg.isError && JSON.stringify(msg.content).includes(version)));
-  }
-  function refreshReady(actor) {
-    if (!actor.refreshMarker) return true;
-    const call = currentRequest(actor);
-    if (
-      call &&
-      call.status === "completed" &&
-      call.id !== actor.refreshCallId &&
-      JSON.stringify(call.context).includes(actor.refreshMarker)
-    ) {
-      actor.current.refreshRequiresRequest = false;
-      actor.refreshMarker = null;
-      actor.refreshInput = null;
-      save();
-      return true;
-    }
-    return false;
-  }
-  function markRefresh(actor, result) {
-    actor.refreshMarker = "refresh:" + randomUUID();
-    actor.refreshCallId = currentRequest(actor)?.id ?? null;
-    actor.refreshInput = {
-      previous: actor.refreshInput ?? null,
-      marker: actor.refreshMarker,
-      ...result,
-    };
-    actor.current.refreshRequiresRequest = true;
-    actor.current.refreshMarker = actor.refreshMarker;
-    save();
-    return actor.refreshInput;
-  }
-  function observationScope(actor, scope, readScope) {
-    const visible = [...(scope ?? []), ...(readScope ?? ["."])];
-    const missing = [...actor.observations.values()].filter(
-      (o) => !inScope(o.path, visible),
-    );
-    if (missing.length)
-      throw problem(
-        "SCOPE",
-        "新写授权须保留已观察依据的readScope：" +
-          JSON.stringify(missing.map((x) => x.path)),
-      );
-  }
-  async function observedDelta(actor, next) {
-    const changed = [];
-    for (const o of actor.observations.values()) {
-      const r = await v.read({
-        changeId: next.changeId,
-        path: o.path,
-        kind: o.kind,
-      });
-      const fingerprint = o.kind === "file" ? r.contentHash : r.fingerprint;
-      if (fingerprint !== o.fingerprint)
-        changed.push({
-          path: o.path,
-          kind: o.kind,
-          before: o.fingerprint,
-          after: fingerprint,
-        });
-    }
-    if (!changed.length) return null;
-    const from = actor.current.baseVersion,
-      to = next.baseVersion,
-      diff = await v.inspect({ fromVersion: from, toVersion: to });
-    const files = [];
-    for (const path of diff.files.filter((p) =>
-      inScope(p, [...next.scope, ...next.readScope]),
-    )) {
-      const a = await v.read({ version: from, path }),
-        b = await v.read({ version: to, path });
-      files.push({
-        path,
-        before:
-          a.contentBase64 === null
-            ? null
-            : Buffer.from(a.contentBase64, "base64").toString("utf8"),
-        after:
-          b.contentBase64 === null
-            ? null
-            : Buffer.from(b.contentBase64, "base64").toString("utf8"),
-      });
-    }
-    return {
-      status: "basis_changed",
-      fromVersion: from,
-      toVersion: to,
-      changed,
-      files,
-    };
-  }
-  async function ensureMainWrite(path) {
-    guard();
-    if (!refreshReady(mainBinding))
-      throw problem(
-        "REFRESH_REQUIRES_REQUEST",
-        "先让该执行者在后续模型请求收到刷新差异。",
-      );
-    if (mainBinding.unknownOperation)
-      throw problem("OPERATION_UNKNOWN", "先查询未知操作。");
-    const old = mainBinding.current;
-    if (!old.readOnly) {
-      if (path && !inScope(path, old.scope))
-        throw problem("SCOPE", "请refresh_change保留草稿后扩大实际范围。");
-      return old;
-    }
-    if (path === null)
-      throw problem(
-        "SCOPE_REQUIRED",
-        "Shell需要明确范围；使用next_change/refresh_change说明scope。",
-      );
-    await pluginWork?.assertHandled(old.changeId);
-    const c = await begin(
-      "main",
-      [path],
-      old.readScope,
-      task.record.input,
-      false,
-    );
-    if (c.status === "blocked")
-      throw problem("SCOPE_BLOCKED", JSON.stringify(c));
-    const delta = await observedDelta(mainBinding, c);
-    // ensureMainWrite is invoked by workspaceTools while this old change queue is held.
-    await abandon(old, "观察已转换为明确的单文件写意图", {queueHeld:true});
-    mainBinding.current = c;
-    if (delta) {
-      const feedback = markRefresh(mainBinding, delta);
-      throw problem("BASIS_CHANGED", JSON.stringify(feedback));
-    }
-    return c;
-  }
-  async function prepare(actor, check = false, caller = actor.role) {
-    const c = actor.current;
-    await pluginWork?.assertHandled(c.changeId);
-    if (c.status === "outcome_unknown" || actor.unknownOperation)
-      throw problem("OPERATION_UNKNOWN", "未知结果只能查询已有ID。");
-    const requestId = randomUUID();
-    const r = await invoke("prepareChange", { changeId: c.changeId, actor:caller, requestId }, (id) =>
-      v.prepareChange(c.changeId, { requestId: id, check }),
-    );
-    actor.current = syncChange(r);
-    if (check && task.projectPolicy) {
-      const candidate = r.candidates.find(p => p.candidateVersion === r.candidateVersion);
-      if (!candidate?.precheck)
-        throw problem("PROJECT_CHECK", "The fixed candidate has no precheck receipt.");
-      actor.projectRoute = await task.projectPolicy.observeCheck({kind:"precheck", candidate:candidate.candidateVersion,
-        privateVersion:candidate.privateVersion, changeId:r.changeId, versioning:v,
-        result:{...candidate.precheck, tree:candidate.tree, requestId}});
-    }
-    return actor.current;
-  }
+  const {invoke,begin,abandon,currentRequest,receivedVersion,refreshReady,markRefresh,
+    observationScope,observedDelta,ensureMainWrite,prepare}=createWorkChanges({
+    task,staff,shared,work,members,observerErrors,save,guard,notify,syncChange,
+    getVersioning:()=>v,getPluginWork:()=>pluginWork,getMainBinding:()=>mainBinding,
+  });
   function finishPromise(m) {
     m.resolve?.();
     m.resolve = null;
@@ -500,7 +226,7 @@ export async function runWork({
   }
   function schedule() {
     if (!v || task.signal.aborted || task.ioError) return;
-    while (active < 2 && seatWaiters.length) {
+    while (active < capacityLimit && seatWaiters.length) {
       const {seat, resolve} = seatWaiters.shift();
       if (!seat.held) {
         seat.held = true;
@@ -509,7 +235,7 @@ export async function runWork({
       }
       resolve();
     }
-    while (active < 2 && !seatWaiters.length) {
+    while (active < capacityLimit && !seatWaiters.length) {
       const m = [...members.values()].find(
         (m) =>
           m.record.status === "queued" ||
@@ -570,6 +296,7 @@ export async function runWork({
   async function executeMember(m, attemptEpoch) {
     let blocked = false;
     try {
+      processCheck?.assertWorkerSend("member:" + m.record.memberId);
       guardMember(m);
       if (m.transition) {
         const intent = m.transition;
@@ -695,7 +422,8 @@ export async function runWork({
       if (!m.runtime) {
         const defs = workspaceTools({
           task,
-          visualPreview: task.record.workRequest?.kind === "html-svg",
+          visualPreview: task.record.workRequest?.kind === "html-svg" &&
+            (!unified || projectRoutes.get(modelName(m.record.model))?.input?.includes("image")),
           stage: () => m.stage,
           versioning: v,
           binding: m.binding,
@@ -755,15 +483,35 @@ export async function runWork({
             return text({ status: args.resolved ? "resolution_pending_request_completion" : "task_conflict", message: args.message });
           },
         });
-        const position = projectPosition(m);
-        if (position?.canDelegate && position.supervisorId === "root" && !m.record.reviewOf) {
-          m.groupTools = ["delegate", "collect", "feedback"].map(name => groupFactories.get(name)(m));
-          m.groupTools.push(...staff.tools(position.id, detail => {
+        if (staff && !m.record.reviewOf)
+          defs.push({
+            name: "request_staff_group",
+            label: "Request another project group",
+            description: "Report a concrete blocker, suggested scope, dependencies and model-call budget to your direct supervisor. To forward a direct report's received request, supply its forwardRequestId alone.",
+            parameters: Type.Object({
+              blocker:Type.Optional(Type.String()), scope:Type.Optional(Type.Array(Type.String())),
+              dependsOn:Type.Optional(Type.Array(Type.String())), maxCalls:Type.Optional(Type.Integer({minimum:0})),
+              forwardRequestId:Type.Optional(Type.String()),
+            }),
+            async execute(_id, args, signal) {
+              signal?.throwIfAborted();
+              try { return text(requestStaffGroup(m, args)); }
+              catch (error) {
+                if (error.code !== "GROUP_REPORT") throw error;
+                return {...text({error:{code:error.code,message:error.message}}),isError:true};
+              }
+            },
+          });
+        const staffId = m.record.staffId;
+        if (staff && staff.canManage(task.record.id, staffId) && !m.record.reviewOf) {
+          m.groupTools = ["delegate", "collect", "feedback", "pause_member", "resume_candidate"].map(name => groupFactories.get(name)(m));
+          m.groupTools.push(...staff.tools(staffId, detail => {
             guardMember(m);
-            if (m.conflictHalted || m.resolvingConflict || !m.record.understandingCallId)
+            if (m.conflictHalted || m.resolvingConflict || !m.record.understandingCallId ||
+                !staff.canManage(task.record.id, staffId))
               throw problem("TASK_CONFLICT", "Staffing is unavailable during independent preparation or conflict resolution.");
             task.projectPolicy.admit("delegate", {actor:m.binding.role,...detail});
-          }, task.record.id));
+          }, task.record.id, available.map(modelName)));
           defs.push(...m.groupTools);
         }
         m.toolNames = defs.map(d => d.name);
@@ -780,7 +528,8 @@ export async function runWork({
           uiMode:task.extensionMode,
           nativeContext: await pluginWork.context({actor:"member:"+m.record.memberId,binding:m.binding,signal:m.controller.signal,assertAllowed:()=>{guardMember(m);if(m.controller.signal.aborted)throw problem("CANCELLED","Native plugin owner stopped");}}),
           resourceOptions: { ...task.resourceOptions, systemPrompt: prompt("worker") + (m.groupTools
-            ? "\nHost-authorized project supervisor. After independent preparation you can delegate to direct reports, collect their results and return concrete feedback. Use the registered work and exact authorized model route, including your own model when suitable. Report fixed candidate IDs and versions to the project leader for formal acceptance."
+            ? "\nHost-authorized project supervisor. After independent preparation you can delegate to direct reports, collect their results and return concrete feedback. Use the registered work and exact authorized model route, including your own model when suitable. Return fixed candidate IDs and versions to your direct supervisor so the project leader can review and formally accept the result." + (unified
+              ? " Choose by relevant task evidence and the frozen route and budget facts. Select only the source and attachment IDs authorized for your own assignment. Supply concrete readScope when the work needs access to files." : "")
             : "") },
           toolDefinitions: defs,
           activeToolNames: readTools,
@@ -816,15 +565,19 @@ export async function runWork({
         assignment: m.reviewArtifact ? "Review the exact candidate against the original task." : m.record.assignment,
         implementationAdvice: m.reviewArtifact && m.record.reviewKind !== "ordinary" ? "" : m.record.implementationAdvice,
         reason: m.reviewArtifact ? "Host-bound candidate review." : m.record.reason,
-        project: task.record.project,
+        project: unified ? {...task.record.project,handoffContext:preparation
+          ? {...m.materialGrant.handoff,derivedSummary:undefined} : m.materialGrant.handoff} : task.record.project,
         execution: {...executionInfo,
+          ...(unified?{turnConstraints:task.record.project.constraints}:{}),
           ...(m.effectMaterial && !preparation ? {effectMaterial:m.effectMaterial} : {}),
           ...(m.reviewArtifact ? {reviewArtifact:m.reviewArtifact, reviewKind:m.record.reviewKind,
             ...(!preparation ? {reviewInstruction:"Finish with a JSON object containing verdict (pass/reject/uncertain) and observation (specific candidate evidence or counterexample). No prose outside JSON. For rejection solely on the absence of an exact literal, specify counterexample:{kind:'missing_text',path,text}. To refute it, include refutesRequestId and evidence:{path,quote} showing that exact literal on this candidate. Other objections require repair and re-review."} : {})} : {}),
           ...(!preparation && m.routeEvidence ? {diagnosis:m.routeEvidence} : {}),
           ...(!preparation && m.groupTools ? {directReports:directReports(m), registeredWork:staff.works(task.record.id,m.binding.role),
+            ...(unified?{modelRoutes:[...projectRoutes.values()].filter(fact=>staff.list().find(position=>position.id===m.record.staffId)?.models.includes(fact.identity)),budget:projectRoutingBudget(task,m.binding.role)}:{}),
             ...(m.record.coordinatingMemberId ? {coordinationOnlyFor:m.record.coordinatingMemberId} : {})} : {})},
         tools, preparation,
+        reuseAssignment:unified && !preparation && !!m.feedback && m.assignmentRuntime === m.runtime,
         answerSkills: task.answerSkills ?? [],
         feedback: m.feedback, refresh: m.binding.refreshInput,
         taskConflict: m.record.taskConflict?.unresolved ? m.record.taskConflict : undefined,
@@ -836,7 +589,7 @@ export async function runWork({
         m.record.preparationStarted = true;
         m.stage = task.beginPhase("worker-prepare", m.binding.role, m.record.model);
         m.runtime.setToolNames(readTools);
-        m.runtime.bindTask(task, m.stage);
+        m.runtime.bindTask(task, m.stage, {materials:m.materialGrant?.attachments});
         m.record.sessionFile = m.runtime.sessionManager.getSessionFile();
         save();
         const understanding = await m.runtime.prompt(material(true, readTools), { custom: "cothink-member-preparation" });
@@ -849,7 +602,8 @@ export async function runWork({
       }
       const activeTools = m.record.coordinatingMemberId
         ? [...readTools, "collect", "feedback", "report_task_conflict"]
-        : m.binding.current.readOnly ? [...readTools, ...(m.runtime.projectToolNames ?? []), "report_task_conflict", ...(m.groupTools ?? []).map(t => t.name)] : m.toolNames;
+        : m.binding.current.readOnly ? [...readTools, ...(m.runtime.projectToolNames ?? []), "report_task_conflict",
+          ...(staff && !m.record.reviewOf ? ["request_staff_group"] : []), ...(m.groupTools ?? []).map(t => t.name)] : m.toolNames;
       m.record.tools = activeTools;
       m.conflictHalted = false;
       if (m.record.taskConflict?.unresolved) {
@@ -859,7 +613,7 @@ export async function runWork({
         m.stage = task.beginPhase("worker-conflict-resolution", m.binding.role, m.record.model);
         m.record.tools = confirmationTools;
         m.runtime.setToolNames(confirmationTools);
-        m.runtime.bindTask(task, m.stage);
+        m.runtime.bindTask(task, m.stage, {materials:m.materialGrant?.attachments});
         try {
           m.result = await m.runtime.prompt(material(false, confirmationTools), { custom: "cothink-conflict-correction" });
           guard();
@@ -881,10 +635,11 @@ export async function runWork({
       m.record.tools = activeTools;
       m.stage = task.beginPhase(m.feedback ? "worker-feedback" : "worker", m.binding.role, m.record.model);
       m.runtime.setToolNames(activeTools);
-      m.runtime.bindTask(task, m.stage);
+      m.runtime.bindTask(task, m.stage, {materials:m.materialGrant?.attachments});
       m.record.sessionFile = m.runtime.sessionManager.getSessionFile();
       save();
       m.result = await m.runtime.prompt(material(false, activeTools), { custom: "cothink-member-assignment" });
+      if (m.result.call?.sent) m.assignmentRuntime = m.runtime;
       guardMember(m);
       if (m.record.taskConflict?.unresolved)
         throw problem("TASK_CONFLICT", "The member reported an unresolved task conflict; preserve the draft and provide concrete correction or request user clarification.");
@@ -950,7 +705,6 @@ export async function runWork({
   }
   const tools = [];
   const groupFactories = new Map();
-  const projectPosition = m => staff?.list().find(p => p.id === m.record.staffId);
   const directReports = owner => staff?.list().filter(p => p.supervisorId === (owner?.record.staffId ?? "root"));
   function rememberDiagnosis(route) {
     if (route?.taskId !== task.record.id || !route.changeId) return;
@@ -979,12 +733,12 @@ export async function runWork({
       failure:m.record.error, changeId:m.record.changeId});
     m.projectStatus = status;
   }
-  function owns(owner, member, rootReview = false) {
+  function owns(owner, member, rootReview = false, allowPaused = false) {
     if (owner && (member.record.supervisorMemberId !== owner.record.memberId ||
         (owner.record.coordinatingMemberId && owner.record.coordinatingMemberId !== member.record.memberId)))
       throw problem("GROUP_OWNERSHIP", "Only a direct report of this supervisor may be collected or corrected.");
     if (staff) staff.checkOwner({taskId:task.record.id, actorRole:owner?.binding.role ?? "main",
-      dispatchId:member.record.memberId, rootReview});
+      dispatchId:member.record.memberId, rootReview, allowPaused});
     return member;
   }
   function guardMember(m) {
@@ -1006,7 +760,7 @@ export async function runWork({
           if (owner) {
             guardMember(owner);
             if (owner.conflictHalted || owner.resolvingConflict || !owner.record.understandingCallId ||
-                !projectPosition(owner)?.canDelegate)
+                !staff.canManage(task.record.id, owner.record.staffId))
               throw problem("GROUP_OWNERSHIP", "This session does not currently hold group authority.");
           }
           const result = await fn(args, id, owner);
@@ -1022,13 +776,19 @@ export async function runWork({
         }
       },
     });
-    if (["delegate", "collect", "feedback"].includes(name)) groupFactories.set(name, definition);
+    if (["delegate", "collect", "feedback", "pause_member", "resume_candidate"].includes(name)) groupFactories.set(name, definition);
     tools.push(definition(null));
   }
-  const summary = (m) => {
+  const {pauseEvidence,stopMemberRuntime,settleMemberPause,readPausedCandidate,requestStaffGroup}=createMemberControls({
+    task,staff,work,members,save,notify,syncChange,currentRequest,receivedVersion,guardMember,
+    getVersioning:()=>v,getPluginWork:()=>pluginWork,
+  });
+  const summary = (m, includeStaffGroup = false) => {
     const previews = (work.visualEvidence ?? []).filter(e => e.actor === m.binding?.role);
     const requests = task.requests();
-    return { ...m.record, result: m.result?.text ?? null,
+    const {staffGroupRequests, staffGroupRequestReceipt, ...record} = m.record;
+    return { ...record, ...(includeStaffGroup && staffGroupRequests ? {staffGroupRequests} : {}),
+      result: m.result?.text ?? null,
       capabilities: { source: "Host-registered member tools", registeredTools: m.toolNames ?? [], activeTools: m.record.tools ?? [] },
       preview: { source: "Host-recorded previews; acceptance is version storage, not semantic proof",
         successful: previews.filter(e => e.result === "captured").length,
@@ -1091,6 +851,11 @@ export async function runWork({
         readScope: Type.Optional(Type.Array(Type.String())),
         readOnly: Type.Optional(Type.Boolean()),
         dependsOn: Type.Optional(Type.Array(Type.String())),
+        ...(unified ? {
+          attachmentIds: Type.Optional(Type.Array(Type.String(),{description:"Exact frozen attachment IDs selected from your authorized materials. Omit to send no attachments."})),
+          contextSourceIds: Type.Optional(Type.Array(Type.String(),{description:"Exact sourceId values selected from your authorized history. Omit to send no history."})),
+          contextSummary: Type.Optional(Type.Object({text:Type.String(),sourceIds:Type.Array(Type.String())},{description:"Optional derived summary of your authorized source IDs. Only contextSourceIds send full source text."})),
+        } : {}),
         ...(staff ? {staffId: Type.String({description:"Authorized direct report position ID."}),
           workId: Type.Optional(Type.String({description:"Host-registered work ID. Omit only when the host can identify one authorized boundary."})),
           reviewKind: Type.Optional(Type.Union([Type.Literal("ordinary"), Type.Literal("independent")])),
@@ -1105,7 +870,10 @@ export async function runWork({
           if (owns(owner, selected(id)).record.status !== "accepted")
             throw problem("DEPENDENCY", "依赖尚未正式接纳：" + id);
         const model = choose(args.model);
-        if(task.record.workRequest && !args.readOnly && !leader.modelRuntime.getModel(model.provider,model.modelId)?.input?.includes("image")) throw problem("VISUAL_MODEL","制作执行成员必须支持图像；不降级成文字检查。");
+        const materialGrant = unified ? assignedRoleMaterial(task,args,owner) : undefined;
+        if (materialGrant?.attachments.some(material=>materialImage(material.manifest)))
+          requireMaterialImageModel(leader.modelRuntime.getModel(model.provider,model.modelId),model);
+        if(!unified && task.record.workRequest && !args.readOnly && !leader.modelRuntime.getModel(model.provider,model.modelId)?.input?.includes("image")) throw problem("VISUAL_MODEL","制作执行成员必须支持图像；不降级成文字检查。");
         assertModelFree(model);
         const record = {
           ...(staff ? {staffId: args.staffId, supervisorId: owner?.record.staffId ?? "root",
@@ -1116,19 +884,20 @@ export async function runWork({
           implementationAdvice: args.implementationAdvice ?? "",
           reason: args.reason,
           scope: args.scope ?? [],
-          readScope:
-            args.readScope ??
-            (args.readOnly && args.scope?.length ? args.scope : task.record.rootTaskId ? task.record.project.readScope : ["."]),
+          readScope: roleReadScope(owner,args.readScope ?? (args.readOnly && args.scope?.length ? args.scope : unified ? [] : ["."])),
           readOnly: args.readOnly ?? false,
           dependsOn: args.dependsOn ?? [],
           status: "queued",
           feedback: [],
+          ...(materialGrant?{materialGrant:{sources:materialGrant.handoff.materials.map(source=>source.ref),
+            attachments:materialGrant.handoff.attachmentRefs,...(materialGrant.handoff.derivedSummary?{summary:materialGrant.handoff.derivedSummary}:{})}}:{}),
         };
+        let processPermit;
         if (staff) {
           if (record.reviewKind && !record.reviewOf)
             throw problem("REVIEW_SOURCE", "A review needs a fixed candidate reference.");
           const position = directReports(owner)?.find(p => p.id === record.staffId);
-          if (!position || (position.canDelegate && owner))
+          if (!position)
             throw problem("GROUP_OWNERSHIP", "Select an authorized direct report of this group.");
           const input = assignmentInput(record);
           if (record.reviewOf) {
@@ -1137,15 +906,21 @@ export async function runWork({
             record.reviewVersion = verified.artifact.version;
           }
           task.projectPolicy.admit("delegate", input);
-          const claim = staff.begin(input);
+          let claim;
+          try { claim = staff.begin(input, () => { processPermit = processCheck?.admit(processSource); }); }
+          catch (error) { processPermit?.release(); throw error; }
           record.memberId = claim.dispatchId;
           record.workId = claim.workId;
           if (claim.reused || members.has(claim.dispatchId) || claim.taskId !== task.record.id || claim.status !== "active") {
+            processPermit?.release();
             const receipt = {memberId:claim.dispatchId, workId:claim.workId, status:claim.status, taskId:claim.taskId,
               requestId:claim.requestId, changeId:claim.changeId, candidate:claim.candidate, resultVersion:claim.version};
-            if (!["result","disposed"].includes(claim.status)) return receipt;
+            if (!unified && !["result","disposed"].includes(claim.status)) return receipt;
             const original = claim.taskId === task.record.id ? task.record : readTask(home, claim.taskId);
             const member = original.members?.find(m => m.memberId === claim.dispatchId);
+            if (unified && member && JSON.stringify(member.materialGrant) !== JSON.stringify(record.materialGrant))
+              throw problem("ROLE_MATERIAL", "The original assignment has a different material grant. Inspect its receipt or authorize a distinct work item.");
+            if (!["result","disposed"].includes(claim.status)) return receipt;
             if (member?.callId) {
               const call = claim.taskId === task.record.id ? task.requests().find(r => r.id === member.callId)
                 : readRequest(home, claim.taskId, member.callId);
@@ -1154,14 +929,15 @@ export async function runWork({
             return receipt;
           }
         }
-        const m = { record, controller: new AbortController(), retryEpoch: -1 };
+        const m = { record, materialGrant, controller: new AbortController(), retryEpoch: -1,
+          ...(staff ? {acceptController:new AbortController()} : {}) };
         m.controller.signal.addEventListener(
           "abort",
           () => {
-            void pluginWork?.stopActor?.("member:"+m.record.memberId).catch(error=>{m.record.stopError=error.message;save();});
+            void stopMemberRuntime(m);
             for (const child of members.values())
-              if (child.record.supervisorMemberId === m.record.memberId) child.controller.abort();
-            void m.runtime?.session.abort();
+              if (child.record.supervisorMemberId === m.record.memberId && (!m.record.pause || child.record.pause))
+                child.controller.abort();
             if (!m.attempt) finishPromise(m);
           },
           { once: true },
@@ -1170,8 +946,71 @@ export async function runWork({
         members.set(record.memberId, m);
         task.record.members.push(record);
         save();
+        processPermit?.commit(record.memberId);
         schedule();
         return { memberId: record.memberId, ...(staff ? {workId:record.workId} : {}), status: record.status };
+      },
+    );
+  if (staff)
+    register(
+      "pause_member",
+      "Immediately pause a direct report and its unfinished descendants. The original draft and request IDs remain available for settlement.",
+      {memberId:Type.String(), reason:Type.String()},
+      async (args, _id, owner) => {
+        const member = owns(owner, selected(args.memberId), false, true);
+        const affected = staff.pause({taskId:task.record.id, actorRole:owner?.binding.role ?? "main",
+          dispatchId:member.record.memberId, reason:args.reason}, (id) => pauseEvidence(selected(id)));
+        for (const {dispatchId, pause} of affected) {
+          const target = selected(dispatchId);
+          target.record.pause = pause;
+          if (!target.attempt && !terminal.has(target.record.status)) {
+            target.record.status = "cancelled";
+            staffUpdate(target, "result");
+          }
+        }
+        save();
+        for (const {dispatchId} of affected) {
+          const target = selected(dispatchId);
+          if (target.acceptController && !target.acceptController.signal.aborted) {
+            target.acceptController.abort();
+            target.pauseSettlement = null;
+          }
+          const prepared = !target.attempt && target.record.status === "completed" &&
+            target.binding?.current.status === "prepared" && !target.binding.unknownOperation && !unknownModel(target);
+          if (prepared) void stopMemberRuntime(target);
+          else target.controller.abort();
+          target.pauseSettlement ??= settleMemberPause(target).catch((error) => {
+            task.ioError ??= error;
+            task.stop(error);
+          });
+        }
+        notify(false);
+        return {status:member.record.pause?.status ?? "pausing", affected};
+      },
+    );
+  if (staff)
+    register(
+      "resume_candidate",
+      "Continue review of an exact prepared candidate from a known settled pause. Only the direct supervisor may authorize continuation. The root still performs acceptance.",
+      {memberId:Type.String(), candidate:Type.String(), privateVersion:Type.String(), reason:Type.String()},
+      async (args, _id, owner) => {
+        const m = owns(owner, selected(args.memberId), false, true);
+        if (!m.binding || m.record.pause?.status !== "settled" || m.record.status !== "completed")
+          throw problem("GROUP_RESUME", "Only a settled, exact prepared candidate may continue.");
+        return withChangeQueue(v, m.binding.current.changeId, async () => {
+          const current = await readPausedCandidate(m, args);
+          guard();
+          m.record.pause = staff.resumePausedCandidate({taskId:task.record.id,
+            actorRole:owner?.binding.role ?? "main", dispatchId:m.record.memberId,
+            candidate:args.candidate, privateVersion:args.privateVersion, reason:args.reason});
+          if (!m.acceptController || m.acceptController.signal.aborted) {
+            m.acceptController = new AbortController();
+            delete m.record.rootReviewedVersion;
+            delete m.record.rootReviewCallId;
+          }
+          return {status:"ready_for_root_review", memberId:m.record.memberId,
+            candidate:current.candidateVersion, privateVersion:current.privateVersion};
+        });
       },
     );
   register(
@@ -1180,8 +1019,8 @@ export async function runWork({
     { memberId: Type.Optional(Type.String()) },
     async (args, toolId, owner) => {
       const targets = args.memberId
-        ? [owns(owner, selected(args.memberId), !owner)]
-        : owner?.record.coordinatingMemberId ? [owns(owner, selected(owner.record.coordinatingMemberId))]
+        ? [owns(owner, selected(args.memberId), !owner, true)]
+        : owner?.record.coordinatingMemberId ? [owns(owner, selected(owner.record.coordinatingMemberId), false, true)]
         : [...members.values()].filter(m => !staff || m.record.supervisorMemberId === (owner?.record.memberId ?? null));
       if (owner) {
         owner.record.waitingFor = targets.map(m => m.record.memberId);
@@ -1194,9 +1033,10 @@ export async function runWork({
         for (;;) {
           guard();
           if (owner) guardMember(owner);
-          for (const m of targets) owns(owner, m, !owner);
+          for (const m of targets) owns(owner, m, !owner, true);
           const seen = revision;
           schedule();
+          const processReports = processCheck?.reports(processSource, owner?.record.memberId ?? "main") ?? [];
           const ready = targets.filter(
               (m) =>
                 hasReady(m) &&
@@ -1207,8 +1047,9 @@ export async function runWork({
             blocking = blockersFor(targets);
           if (owner && blocking.some(m => m.record.supervisorMemberId !== owner.record.memberId))
             throw problem("GROUP_BLOCKED", "A draft outside this group is blocking a direct report; ask the project leader to resolve it.");
-          if (ready.length || blocking.length)
+          if (ready.length || blocking.length || processReports.length)
             return {
+              ...(processReports.length ? { processReports } : {}),
               members: [...new Set([...ready, ...blocking])].map((m) => {
                 if (m.binding && m.record.status === "completed") {
                   if (owner) {
@@ -1224,9 +1065,12 @@ export async function runWork({
                 if (!m.record.supervisorMemberId || owner) m.record.collected = true;
                 if (m.record.collected && m.record.status === "completed" && (m.record.readOnly || m.record.noChange))
                   staffUpdate(m, "disposed");
-                return summary(m);
+                const direct = m.record.supervisorMemberId === (owner?.record.memberId ?? null);
+                if (m.record.staffGroupRequests && direct)
+                  m.record.staffGroupRequestReceipt = currentRequest(owner?.binding ?? mainBinding)?.id;
+                return summary(m, direct);
               }),
-              waiting: targets.filter((m) => !hasReady(m)).map(summary),
+              waiting: targets.filter((m) => !hasReady(m)).map((m) => summary(m)),
             };
           if (
             targets.every(
@@ -1236,7 +1080,7 @@ export async function runWork({
                   m.record.status === "completed"),
             )
           )
-            return { members: targets.map(summary), waiting: [] };
+            return { members: targets.map((m) => summary(m)), waiting: [] };
           const cycle = cycleToOwner(targets, owner);
           if (cycle)
             throw problem(
@@ -1244,6 +1088,7 @@ export async function runWork({
               "A member is waiting for the leader's write scope; handle your own draft first: " +
                 JSON.stringify(cycle),
             );
+          processCheck?.assertWorkerSend("member:");
           await waitChange(seen, owner?.controller.signal ?? task.signal);
         }
       } finally {
@@ -1467,8 +1312,14 @@ export async function runWork({
         );
       if (m?.record.noChange)
         return { status: "no_write_change", changeId: c.changeId };
-      if (m && staff) owns(null, m, true);
-      const fixed = await prepare(actor, false, "main");
+      const latestContinuation = m?.record.pause?.continuations?.at(-1);
+      const resumeCandidate = latestContinuation && !latestContinuation.revokedAt ? latestContinuation : undefined;
+      if (m && staff) {
+        if (resumeCandidate)
+          staff.checkOwner({taskId:task.record.id, actorRole:"main", dispatchId:m.record.memberId, rootReview:true, resumeCandidate});
+        else owns(null, m, true);
+      }
+      const fixed = resumeCandidate ? await readPausedCandidate(m, resumeCandidate) : await prepare(actor, false, "main");
       if (!refreshReady(actor))
         throw problem(
           "REFRESH_REQUIRES_REQUEST",
@@ -1505,9 +1356,19 @@ export async function runWork({
         };
       work.acceptance.push(pending);
       save();
-      const result = await invoke("acceptChange", {...pending, actor:"main"}, (id) =>
-        v.acceptChange({ ...pending, requestId: id }),
-      );
+      let result;
+      try {
+        const memberSignal = (m?.acceptController ?? m?.controller)?.signal;
+        result = await invoke("acceptChange", {...pending, actor:"main", resumeCandidate}, (id) =>
+          v.acceptChange({ ...pending, requestId:id }, {signal:memberSignal ? AbortSignal.any([task.signal,memberSignal]) : task.signal}),
+        );
+      } catch (error) {
+        if (!work.requests.find((r) => r.requestId === requestId)?.dispatched) {
+          pending.status = "not_sent";
+          save();
+        }
+        throw error;
+      }
       Object.assign(pending, result);
 
       work.version = (await v.inspect()).version;
@@ -1550,6 +1411,7 @@ export async function runWork({
     async (args, toolId, owner) => {
       const m = owns(owner, selected(args.memberId));
       if (!args.feedback.trim()) throw Error("需要具体反馈");
+      processCheck?.assertWorkerSend("member:" + m.record.memberId);
       if (
         !["completed", "failed", "accepted"].includes(m.record.status) ||
         unknownModel(m) ||
@@ -1557,6 +1419,9 @@ export async function runWork({
       )
         throw problem("MEMBER_BUSY", "成员必须已明确停止且无未知请求");
       const nextModel = choose(args.model ?? modelName(m.record.model));
+      if (args.readScope) roleReadScope(owner,args.readScope);
+      if (m.materialGrant?.attachments.some(material=>materialImage(material.manifest)))
+        requireMaterialImageModel(leader.modelRuntime.getModel(nextModel.provider,nextModel.modelId),nextModel);
       if (m.record.taskConflict?.unresolved && modelName(nextModel) !== modelName(m.record.model))
         throw problem("TASK_CONFLICT", "The member that reported the conflict must receive and confirm the correction; changing model cannot clear it.");
       assertModelFree(nextModel, m);
@@ -1575,7 +1440,7 @@ export async function runWork({
         if (args.coordinateMemberId) {
           const child = selected(args.coordinateMemberId);
           if (child.record.supervisorMemberId !== m.record.memberId) throw problem("GROUP_OWNERSHIP", "Coordination requires this supervisor's direct report.");
-          if (owner || !projectPosition(m)?.canDelegate || !m.record.readOnly || !m.record.collected ||
+          if (owner || !staff.canManage(task.record.id, m.record.staffId) || !m.record.readOnly || !m.record.collected ||
               m.record.status !== "completed" || draft?.status !== "abandoned" || !child.record.supervisorCollected ||
               child.record.status !== "completed" || !child.binding?.current.candidateVersion ||
               args.scope || args.readScope || modelName(nextModel) !== modelName(m.record.model))
@@ -1692,7 +1557,7 @@ export async function runWork({
           v.refreshChange(
             actor.current.changeId,
             { ...args, requestId: id },
-            { wait: false },
+            { wait: false, signal:task.signal },
           ),
       );
       if (result.status === "unknown") {
@@ -1722,9 +1587,11 @@ export async function runWork({
     "取消等待/运行并确认结束，保留全部草稿和记录。",
     { memberId: Type.String(), reason: Type.String() },
     async (args) => {
-      const m = owns(null, selected(args.memberId), true);
+      const m = owns(null, selected(args.memberId), true, true);
       if (!args.reason.trim()) throw Error("需要具体放弃理由");
       if (m.record.status === "accepted") throw Error("接纳不会回滚");
+      if (m.record.pause && m.record.pause.status !== "settled")
+        throw problem("GROUP_PAUSED", "Settle the original paused requests before abandoning this draft.");
       m.record.status = "abandoned";
       m.record.abandonReason = args.reason;
       save();
@@ -1798,88 +1665,14 @@ export async function runWork({
       return c;
     },
   );
-  async function reviewVisual(material, evidence) {
-    if (task.requests().some(r => r.sent && ["in_flight", "outcome_unknown"].includes(r.status)) ||
-        [...members.values()].some(m => m.attempt || m.binding?.unknownOperation || m.record.kernelUnknownRequestId))
-      throw problem("VISUAL_BUSY", "Independent visual review requires the leader and members to have no in-flight or unknown requests.");
-    const review = evidence.review = {
-      verdict: "uncertain", status: "running", observation: "", reasons: "",
-      integrationVersion: evidence.integrationVersion,
-      imageHashes: evidence.images.map(i => i.sha256), model: { ...config.main }, requestId: null,
-    };
-    const reviewStage = task.beginPhase("visual-review", "main", config.main);
-    let runtime, submitted = false;
-    try {
-      runtime = await createRuntime({
-        home, cwd: mainBinding.current.workspace, modelRef: config.main,
-        role: "visual-review-" + task.record.id + "-" + reviewStage.id,
-        // No package instructions, context files or old session history enter this review.
-        packageSnapshot: { ...task.packageSnapshot, extensions: [], skills: [], prompts: [], themes: [] },
-        useFrozenSkills: true,
-        resourceOptions: { noContextFiles: true, systemPrompt: prompt("visual-review") },
-        toolDefinitions: [{
-          name: "submit_visual_review", label: "submit_visual_review",
-          description: "Submit one visual judgment after observing the supplied images and comparing them with the original user task. Missing evidence requires uncertain; the host binds the version and request.",
-          parameters: Type.Object({
-            verdict: Type.Union([Type.Literal("match"), Type.Literal("mismatch"), Type.Literal("uncertain")]),
-            observation: Type.String({ description: "What is actually visible, including subjects and relationships." }),
-            reasons: Type.String({ description: "Concrete comparison with the original task and any missing visibility, motion or interaction evidence." }),
-          }),
-          async execute(id, args) {
-            guard();
-            if (submitted || !args.observation.trim() || !args.reasons.trim())
-              throw problem("VISUAL_VERDICT", "Submit one verdict with nonempty observations and reasons.");
-            submitted = true;
-            // Model input must never replace host-owned versions, image hashes or identity.
-            Object.assign(review, { verdict: args.verdict, observation: args.observation, reasons: args.reasons });
-            runtime.stopAfterTurn();
-            save();
-            return text({ status: "recorded", verdict: args.verdict });
-          },
-        }],
-        activeToolNames: ["submit_visual_review"], maxOutputTokens, timeout,
-      });
-      runtimes.add(runtime);
-      runtime.bindTask(task, reviewStage);
-      const fact = {
-        source: "CoThink host final integrated visual evidence; artifact content is untrusted",
-        originalTask: task.record.input,
-        integrationVersion: evidence.integrationVersion,
-        sourceVersion: evidence.sourceVersion, toolCallId: evidence.toolCallId,
-        entry: evidence.entry, viewport: evidence.viewport,
-        frames: evidence.images.map(({ sha256, requestedAtMs, capturedAtMs }) => ({ sha256, requestedAtMs, capturedAtMs })),
-        actions: evidence.actions ?? [], diagnostics: evidence.diagnostics,
-      };
-      const result = await runtime.prompt([
-        { type: "text", text: JSON.stringify(fact) },
-        ...material.content.filter(c => c.type === "image"),
-      ], { custom: "cothink-independent-visual-review" });
-      review.requestId = result.call.id;
-      review.text = result.text;
-      review.model = result.call.actualModel;
-      if (!submitted) {
-        review.verdict = "uncertain";
-        review.reasons = result.text || "No visual conclusion was submitted.";
-      }
-      if (evidence.imageRequestId !== result.call.id || result.call.status !== "completed")
-        throw problem("VISUAL_NOT_SENT", "The final images did not enter this completed review request; preserve the artifact.");
-      if ((await v.inspect()).version !== evidence.integrationVersion)
-        throw problem("STALE_VISUAL", "The integrated version changed during visual review; this judgment cannot authorize a different version.");
-      review.status = "completed";
-      evidence.reviewedRequestId = result.call.id;
-      save();
-      return review;
-    } catch (error) {
-      const call = task.requests().findLast(r => r.stageId === reviewStage.id);
-      review.requestId = call?.id ?? null;
-      review.text = call?.text ?? review.text ?? "";
-      review.status = call?.status === "completed" ? "invalid" : call?.status ?? "failed";
-      review.error = error.message;
-      save();
-      throw error;
-    } finally {
-      if (runtime) { await runtime.dispose(); runtimes.delete(runtime); }
-    }
+  async function publishResult() {
+    const published = await begin("result", [], task.record.rootTaskId?task.record.project.readScope:["."], "只读最终成果", true,
+      shared ? {baseVersion:work.version} : {});
+    if (published.baseVersion !== work.version)
+      throw problem("STALE_RESULT", "最终投影版本已变化");
+    work.resultWorkspace = published.workspace;
+    work.resultChangeId = published.changeId;
+    save();
   }
   const abortMembers = () => {
     for (const m of members.values()) {
@@ -1891,25 +1684,18 @@ export async function runWork({
   };
   task.signal.addEventListener("abort", abortMembers, { once: true });
   try {
-    v = await createVersioning({
-      project: cwd,
-      home,
-      checks,
-      execution: config.work?.execution,
-      signal: task.signal,
-      onOperation: (e) => {
-        work.operations.push(e);
-        try {
-          save();
-        } catch {}
-        try {
-          onProgress({ type: "git", operation: e, task });
-        } catch (error) {
-          observerErrors.push({ action: e.action, message: error.message });
-        }
-      },
+    const onOperation = e => {
+      work.operations.push(e);
+      try { save(); } catch {}
+      try { onProgress({type:'git',operation:e,task}); }
+      catch (error) { observerErrors.push({action:e.action,message:error.message}); }
+    };
+    if (shared) shared.attachOperationObserver(onOperation);
+    v = shared?.kernel ?? await createVersioning({
+      project:cwd,home,checks,execution:config.work?.execution,signal:task.signal,onOperation,
     });
     Object.assign(work, await v.inspect(), {
+      ...(shared ? {checks:structuredClone(checks)} : {}),
       toolHome: v.toolHome,
       kernelVersion: JSON.parse(
         readFileSync(
@@ -1933,7 +1719,9 @@ export async function runWork({
         intent.readScope,
         task.record.input,
         !intent.scope?.length,
+        shared ? {baseVersion:expectedStart} : {},
       );
+    shared?.initialProjectionSettled();
     work.startVersion = initial.baseVersion ?? work.startVersion;
     if (expectedStart && work.startVersion !== expectedStart)
       throw problem("PROJECT_VERSION", "Initial change is based on a different version than the approved project step.");
@@ -1957,6 +1745,8 @@ export async function runWork({
         ...(task.resourceOptions ?? selectedResources(config, cwd)),
         systemPrompt: prompt("leader") + "\n\n" + (task.record.singleModel
           ? "This task uses ONE single-model work mode at the Team layer. You are the sole Team owner; formal secondary member delegation is unavailable. Installed managed plugin helpers may assist unless the user disabled them. Review helper results and perform final checks and delivery yourself. Any host-required visual review uses this same main model."
+          : unified ? prompt("leader-project") + "\n\n" +
+            "Compare the work and its independent boundaries with the eligible frozen routes. Decide whether to handle it yourself or group work by required input modality, role tools, context, budget, user preferences and relevant recorded evidence. Label catalog costs as estimates, authentication as local configuration and uncertain capabilities as unknown. Briefly give the task-specific selection reason. Keep the project shallow when practical and use four layers only when justified. If you delegate, select relevant attachmentIds and contextSourceIds from the frozen material and exact readScope from your authorization. An omitted selection grants no optional materials. Cite authorized sources for derived summaries and preserve the original requirements. Keep an image-capable route for roles that must see an image. Resolve reported task conflicts with concrete corrections before acceptance. For changes to documented usage, configuration, interfaces or behavior, use the authorized doc-maintenance skill, assign one owner to each affected document and use its existing checker."
           : prompt("leader-cothink") + "\n\n" + (staff ? prompt("leader-project")
             : "Never delegate to yourself or a known alias. One actual model may not have parallel A+A/B+B copies. Collect or give concrete feedback to an existing unresolved member and finish it safely before reusing that model sequentially. Installed managed plugin helpers do not become Team members or independent reviewers. Each creator must explicitly treat its own helper results. Another explicitly selected configured model may continue a draft with change identity and provenance retained.")),
       },
@@ -1964,7 +1754,8 @@ export async function runWork({
       toolDefinitions: [
         ...workspaceTools({
           task,
-          visualPreview: task.record.workRequest?.kind === "html-svg",
+          visualPreview: task.record.workRequest?.kind === "html-svg" &&
+            (!unified || projectRoutes.get(modelName(config.main))?.input?.includes("image")),
           stage,
           versioning: v,
           binding: mainBinding,
@@ -1978,7 +1769,7 @@ export async function runWork({
         }),
         ...pluginWork.resourceTools({actor:"main",binding:mainBinding,assertAllowed:guard}),
         ...tools,
-        ...(staff?.tools("root", detail => { guard(); task.projectPolicy.admit("delegate", {actor:"main",...detail}); }, task.record.id) ?? []),
+        ...(staff?.tools("root", detail => { guard(); task.projectPolicy.admit("delegate", {actor:"main",...detail}); }, task.record.id, available.map(modelName)) ?? []),
         ...pluginWork.tools({actor:"main",binding:mainBinding,model:config.main,assertAllowed:guard,getModelContract:(provider,id)=>leader.modelRuntime.getModel(provider,id),getPricing:()=>leader.modelRuntime.getModel(config.main.provider,config.main.modelId)?.cost}),
       ],
       maxOutputTokens,
@@ -1987,6 +1778,7 @@ export async function runWork({
     runtimes.add(leader);
     leader.bindTask(task, stage);
     const modelFact = (m) => {
+      if (unified) return projectRoutes.get(modelName(m));
       const model = leader.modelRuntime.getModel(m.provider, m.modelId);
       return {
         identity: modelName(m),
@@ -2005,8 +1797,14 @@ export async function runWork({
       initialMaterial=initialMaterial.map(message=>Array.isArray(message.content)?
         {...message,content:message.content.filter(block=>block.type!=="image")}:message);
     }
+    const availableFacts = unified
+      ? "\nFrozen model and budget facts: " + JSON.stringify({models:[...projectRoutes.values()],
+        eligibleRoutes:available.map(modelName),budget:projectRoutingBudget(task)})
+        + (task.rootOwner.rootTask.record.proposal?.collaboration?.length
+          ? "\nConfirmed collaboration commitments: " + JSON.stringify(task.rootOwner.rootTask.record.proposal.collaboration) : "")
+      : `\nCurrent singleModel=${task.record.singleModel}; capacity=${capacityLimit}; maxCalls=null.`;
     let result = await leader.prompt(
-      `Original user task:\n${task.record.input}\nFrozen initial material: ${JSON.stringify(initialMaterial ?? [])}\nLeader identity and catalog facts: ${JSON.stringify(modelFact(config.main))}\n${staff ? "Project positions reporting to you: " + JSON.stringify(directReports(null)) + "\nRegistered project work: " + JSON.stringify(staff.works(task.record.id)) + "\nEligible frozen project model routes" : "Eligible secondary models"} (matching actualModelIdentity values are aliases of one model, not independent experts): ${JSON.stringify(available.map(modelFact))}\nCurrent singleModel=${task.record.singleModel}; capacity=2; maxCalls=null.\nInput version=${initial.baseVersion}; source projection=${initial.workspace}; readOnly=${initial.readOnly}; write scope=${JSON.stringify(initial.scope)}\nOriginal directory=${v.root} (uncommitted content is outside the formal starting version; the original directory is not automatically overwritten).\nExecution capabilities=${JSON.stringify(work.execution)}; fixed checks=${JSON.stringify(checks)}. Apply the role, authorization and execution rules in the system prompt to these current facts.\n${renderAnswerSkills(task.answerSkills ?? [])}`,
+      `Original user task:\n${task.record.input}\nFrozen initial material: ${JSON.stringify(initialMaterial ?? [])}\nLeader identity and catalog facts: ${JSON.stringify(modelFact(config.main))}\n${staff ? "Project positions reporting to you: " + JSON.stringify(directReports(null)) + "\nRegistered project work: " + JSON.stringify(staff.works(task.record.id)) + "\nEligible frozen project model routes" : "Eligible secondary models"} (matching actualModelIdentity values are aliases of one model, not independent experts): ${JSON.stringify(unified?available.map(modelName):available.map(modelFact))}${availableFacts}\nInput version=${initial.baseVersion}; source projection=${initial.workspace}; readOnly=${initial.readOnly}; write scope=${JSON.stringify(initial.scope)}\nOriginal directory=${v.root} (uncommitted content is outside the formal starting version; the original directory is not automatically overwritten).\nExecution capabilities=${JSON.stringify(work.execution)}; fixed checks=${JSON.stringify(checks)}. Apply the role, authorization and execution rules in the system prompt to these current facts.\n${renderAnswerSkills(task.answerSkills ?? [])}`,
     );
     let lastVisualVersion, lastReviewKey, lastEvidenceCount;
     for (;;) {
@@ -2033,6 +1831,16 @@ export async function runWork({
         "UNFINISHED_MEMBERS",
         "成员未收尾；请collect、接纳、反馈或明确放弃。",
       );
+    await processCheck?.cover(processSource);
+    const closingReports = processCheck?.reports(processSource, "main") ?? [];
+    if (closingReports.length) {
+      result = await leader.prompt(JSON.stringify({
+        source: "Host-bound process reports for your direct reports",
+        processReports: closingReports,
+        instruction: "Decide whether each current report requires correction, staffing, or no action. Preserve the reasons in your final response.",
+      }));
+      continue;
+    }
     for (const c of work.changes.filter(
       (c) => c.actor === "main" && !c.readOnly && c.status !== "abandoned",
     )) {
@@ -2050,12 +1858,16 @@ export async function runWork({
     }
     if (mainBinding.unknownOperation)
       throw problem("OPERATION_UNKNOWN", "领导尚有未知命令。");
-    work.finalCheck = await invoke("checkCurrent", {}, (id) =>
-      v.checkCurrent({ requestId: id }),
-    );
-    const finalProject = await v.inspect();
-    work.version = finalProject.version;
-    work.execution = finalProject.execution;
+    const checkAndSnapshot = async () => {
+      work.finalCheck = await invoke("checkCurrent", {}, (id) =>
+        v.checkCurrent({requestId:id,signal:task.signal,...(shared ? {checkPolicy:task.record.project.checkPolicy} : {})}),
+      );
+      const finalProject = await v.inspect();
+      work.version = finalProject.version;
+      work.execution = finalProject.execution;
+      if (shared && work.finalCheck.status === 'passed') await publishResult();
+    };
+    await (shared ? shared.withFormal(checkAndSnapshot) : checkAndSnapshot());
     if (task.record.project && work.finalCheck.version !== work.version)
       throw problem("PROJECT_VERSION", "The formal version changed after the final combination check.");
     await task.projectPolicy?.observeCheck?.({kind:"final", candidate:work.version, versioning:v, result:work.finalCheck});
@@ -2065,7 +1877,7 @@ export async function runWork({
         "FINAL_CHECK",
         "最新组合检查未通过：" + work.finalCheck.status,
       );
-    if(task.record.workRequest) {
+    if(task.record.workRequest && !task.record.rootTaskId) {
       if (lastVisualVersion === work.version && work.visualEvidence.length === lastEvidenceCount)
         throw problem("VISUAL_UNRESOLVED", "Visual review remains unresolved with no new version or additional captured evidence; preserve the partial artifact.");
       const tree=await v.read({version:work.version,path:'.',kind:'tree'});
@@ -2095,7 +1907,13 @@ export async function runWork({
       lastReviewKey = reviewKey;
       lastEvidenceCount = work.visualEvidence.length;
       save();
-      const review = await reviewVisual(material, evidence);
+      if (task.requests().some(r => r.sent && ["in_flight", "outcome_unknown"].includes(r.status)) ||
+          [...members.values()].some(m => m.attempt || m.binding?.unknownOperation || m.record.kernelUnknownRequestId))
+        throw problem("VISUAL_BUSY", "Independent visual review requires the leader and members to have no in-flight or unknown requests.");
+      const review = await runVisualReview({
+        task, model: config.main, cwd: mainBinding.current.workspace,
+        material, evidence, versioning: v, guard, maxOutputTokens, timeout, save,
+      });
       const d = evidence.diagnostics;
       const runtimeErrors = !!(d.pageErrors?.length || d.resourceErrors?.length || d.console?.some(x=>x.startsWith("error:")));
       if (review.verdict === "match" && !runtimeErrors) break;
@@ -2112,12 +1930,7 @@ export async function runWork({
     }
     break;
     }
-    const published = await begin("result", [], task.record.rootTaskId?task.record.project.readScope:["."], "只读最终成果", true);
-    if (published.baseVersion !== work.version)
-      throw problem("STALE_RESULT", "最终投影版本已变化");
-    work.resultWorkspace = published.workspace;
-    work.resultChangeId = published.changeId;
-    save();
+    if (!shared) await publishResult();
     return result;
   } catch (e) {
     executionError=e;
@@ -2130,6 +1943,7 @@ export async function runWork({
   } finally {
     const cleanupErrors=[];
     const cleanup=async(phase,run)=>{try{await run();}catch(error){cleanupErrors.push({phase,error});}};
+    if (processCheck) await cleanup("process-check",()=>processCheck.detach(processSource));
     if (task.signal.aborted) await cleanup("abort-members",()=>abortMembers());
     for (const m of members.values()) {
       await cleanup("cancel-member:"+m.record.memberId,()=>{m.controller.abort();if(!m.attempt)finishPromise(m);});
@@ -2138,11 +1952,20 @@ export async function runWork({
     const aborts=await Promise.allSettled([...runtimes].map(rt=>rt.session.abort()));
     aborts.forEach((result,index)=>{if(result.status==="rejected")cleanupErrors.push({phase:"abort-runtime:"+index,error:result.reason});});
     await Promise.allSettled([...members.values()].map(m=>m.promise));
+    await Promise.allSettled([...members.values()].map(m=>m.pauseSettlement));
     await cleanup("capacity",()=>releaseSeat(leaderSeat));
     // A known partial result or an unknown shutdown in one session cannot skip another session.
     for(const rt of runtimes)await cleanup("runtime:"+rt.sessionManager.getSessionId(),()=>rt.dispose());
     task.signal.removeEventListener("abort",abortMembers);
-    if(v)await cleanup("versioning",()=>v.close());
+    if (v && !shared) await cleanup("versioning",()=>v.close());
+    if (shared) for (const change of work.changes) {
+      if (change.readOnly || ['accepted','abandoned','interrupted','outcome_unknown'].includes(change.status)) continue;
+      await cleanup('versioning:'+change.changeId,async()=>{
+        const actual=await v.inspect({changeId:change.changeId});
+        if (!['accepted','abandoned','interrupted','outcome_unknown'].includes(actual.status))
+          await v.abandonChange(change.changeId);
+      });
+    }
     if(cleanupErrors.length) {
       work.cleanupErrors=cleanupErrors.map(({phase,error})=>({phase,code:error.code??null,message:error.message??String(error)}));
       try{save();}catch{}

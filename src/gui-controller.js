@@ -1,13 +1,14 @@
+import { createGuiMaterialActions } from "./gui-material-actions.js";
 import {contextToolNames,contextDigest,contextSnapshot,contextState,readContextDisk,compactContext,contextOperationView} from './context-management.js';
-import {validateEditorTurnOptions,editorTurnInput,isGuiFileTask,guiNetworkBlocker} from "./gui-turn-options.js";
+import {GUI_INPUT_VERSION,validateEditorTurnOptions,editorTurnInput,retiredReviewOption,guiTurnIntent} from "./gui-turn-options.js";
 import {resolveBuiltinSkills,validateBuiltinSkills,builtinSkillNames,capabilitySnapshot} from './builtin-skills.js';
 import {freezeAnswerSkills} from './context.js';
-import {createGuiMaterialStore,GUI_MATERIAL_CAPABILITIES,listGuiProjectMaterials,readGuiProjectMaterial} from './gui-materials.js';
+import {createGuiMaterialStore,GUI_MATERIAL_CAPABILITIES} from './gui-materials.js';
 import {taskSkillDirectory} from './skill-resources.js';
 import {resolvePackageResources} from './packages.js';
 import {
   createGuiWorkspace, importGuiWorkspaceProjects, isWorkspaceId, isWorkspaceProject,
-  readGuiWorkspaces, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError, workspaceForProject, workspaceForSession,
+  readGuiWorkspaces, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError, workspaceForSession,
 } from "./gui-workspace-state.js";
 import {persistNewGuiSession, assertNewGuiSessionId, scopeAfterTruncatedTail, freezeWorkspaceHistory} from "./gui-session-persistence.js";
 import {guiFiles, guiFile, guiFileDiff} from "./gui-files.js";
@@ -15,20 +16,22 @@ import {readSessionUiState, writeSessionUiState, writeSessionViewState, initiali
 import {createUpdateService, formatUpdateStatus, updateInstructions} from "./updates.js";
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, basename, dirname, relative, isAbsolute } from "node:path";
-import { prepareGuiProject } from "./gui-project-preparation.js";
+import { prepareGuiProject, protectedGuiProjectPath } from "./gui-project-preparation.js";
 import { randomUUID, createHash } from "node:crypto";
+import {isDeepStrictEqual} from "node:util";
 import { SessionManager, CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.js";
 import { readSessionTeam, resolveTeamConfig } from "./teams.js";
 import {
   createModelRuntime,
+  projectModelFacts,
   createRuntime,
   assertCleanProjectProcess,
   selectedResources,
   secretValues,
 } from "./pi-runtime.js";
-import {runProjectTurn,unifiedProtocol,normalizeConstraints,normalizeRootBudget,loadPreparedContinuation,freezeReadAuthorization,reserveConfirmation,confirmationState,executeConfirmed,resolveDelivery,rootUsage,assertRootOwner,createRootOwner,workConfirmationBlocker} from "./project-turn.js";
-import { cothinkExtension } from "./extensions/cothink.js";
+import {runProjectTurn,unifiedProtocol,normalizeConstraints,normalizeRootBudget,loadPreparedContinuation,freezeReadAuthorization,checkedProposal,reserveConfirmation,confirmationState,executeConfirmed,resolveOwnedTasks,rootUsage,assertRootOwner,createRootOwner,workConfirmationBlocker} from "./project-turn.js";
+import { cothinkExtension, mainSystemPrompt } from "./extensions/cothink.js";
 import { createTask,readTask, readRequests, taskDisplayStatus } from "./task.js";
 import {
   acquireSessionWriter,
@@ -39,8 +42,7 @@ import {
   markReleaseNotesSeen,
   writePrivateJson,
 } from "./storage.js";
-import { validateModelThinking } from "./thinking.js";
-import { singleLineCommand, validateModelRefs } from "./setup.js";
+import { singleLineCommand } from "./setup.js";
 import { releaseNotes } from "./presentation.js";
 import {
   appendConversationEntry,
@@ -53,15 +55,13 @@ import {
   conversationCwd,
   neutralDirectory,
   readConversationMetadata,
-  saveSessionMode,
   saveSessionTeam,
   selectConversationTeam,
   resolveConversationConfig,
   rememberRecentTeam,
   conversationTaskIds,
-  conversationMaterialRefs,
 } from "./conversation.js";
-import { publicTeam, projectGuiTask, finalGuiText, guiResultRevision } from "./gui-projection.js";
+import { publicTeam, projectGuiTask, projectGuiProcessCheck, finalGuiText, guiResultRevision, guiDeliverySummary } from "./gui-projection.js";
 import {
   saveGuiTeam,
   removeGuiTeam,
@@ -76,7 +76,7 @@ import {
   inspectGuiDirectory,
   inspectWorkspaceProject, browseProjectFolders, makeProjectFolder,
   savedDirectoryAvailable, fileWorkStatus, requireFileWork, requireGuiFileTask, workspaceDirectoryFacts,
-  createConversationFolder, discardEmptyConversationFolder, requireConversationFileWork, inspectTeamFolder,
+  createConversationFolder, discardEmptyConversationFolder, inspectConversationFileWork, requireConversationFileWork, inspectTeamFolder,
   guiDiff,
   guiOutput,
   guiArtifact,
@@ -136,133 +136,11 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         throw Error("认证已保存，但已打开会话的模型目录尚未同步。请重新打开宿主后继续。");
     }
   }
-  const materialError=(code,message)=>Object.assign(Error(message),{code});
-  const keyOf=ref=>`${ref.id}:${ref.sha256}`;
-  const matchRef=(left,right)=>left.id===right.id&&(right.sha256===undefined||left.sha256===right.sha256);
-  function materialSources(manager){
-    const inherited=conversationMaterialRefs(manager);
-    const origin=manager.getBranch().find(e=>e.type==="custom"&&e.customType==="cothink-home-origin")?.data?.draftId;
-    for(const entry of manager.getBranch()){
-      if(entry.type==="custom"&&entry.customType==="cothink-draft"&&origin&&entry.data?.homeDraftId===origin)
-        for(const ref of normalizeConversationEditor(entry.data).materials)inherited.push({...ref,ownerId:origin});
-    }
-    return inherited;
-  }
-  function materialOnBranch(receipt,manager){
-    return !manager||!receipt?.branchAnchor||manager.getBranch().some(e=>e.id===receipt.branchAnchor);
-  }
-  function resolveEditorMaterials(ownerId, refs, manager){
-    const source=new Map((manager?materialSources(manager):[]).map(ref=>[keyOf(ref),ref.ownerId]));
-    const resolved=materials.resolve({ownerId,materials:refs,ownerFor:ref=>source.get(keyOf(ref))??ownerId});
-    if(resolved.some(({manifest})=>!source.has(keyOf(manifest))&&!materialOnBranch(manifest,manager)))
-      throw materialError("MATERIAL_NOT_FOUND","材料上传不属于当前分支。");
-    return resolved;
-  }
-  function materialView(ownerId,editor,manager){
-    let list=[],error;
-    try {list=materials.list({ownerId});}catch(e){error=e.message;}
-    const selected=(editor.materials??[]).map(ref=>{
-      try{return resolveEditorMaterials(ownerId,[ref],manager)[0].manifest;}
-      catch(e){return {...ref,name:"材料不可用",status:"failed",error:e.message};}
-    });
-    const ids=new Set(selected.map(item=>item.id));
-    const outstanding=list.filter(item=>materialOnBranch(item,manager)&&!ids.has(item.id)&&
-      (item.status==="pending"||item.status==="ready"&&!item.acknowledged));
-    return {materials:selected,materialUploads:outstanding.map(item=>item.status==="ready"?
-      {...item,status:"unknown",error:"原上传已有字节，可查询原标识并恢复。"}:item),materialError:error};
-  }
-  async function materialOwner(ownerId,{writable=false}={}){
-    if(!isWorkspaceId(ownerId))throw materialError("MATERIAL_ID","材料归属无效。");
-    let draft;try{draft=readHomeDraft(home);}catch{}
-    if(draft?.draftId===ownerId)return {draft,editor:normalizeConversationEditor(draft.editor)};
-    let manager;
-    try {manager=await reader(ownerId);}
-    catch {throw materialError("MATERIAL_NOT_FOUND","材料归属不存在。");}
-    if(writable){
-      assertSessionUnarchived(ownerId);
-      await assertWorkspaceWritable(manager);
-      if(active?.origin==="context.organize"&&active.sessionId===ownerId)
-        throw materialError("CONTEXT_BUSY","该对话正在整理，请稍后添加材料。");
-    }
-    return {manager,editor:readConversationMetadata(manager).editor};
-  }
-  async function materialQuery({ownerId,uploadId}){
-    const {manager}=await materialOwner(ownerId);
-    if(!uploadId)return materials.list({ownerId}).filter(item=>materialOnBranch(item,manager));
-    const item=materials.query({ownerId,uploadId});
-    return materialOnBranch(item,manager)?item:null;
-  }
-  async function materialRead({ownerId,id,sha256,taskId}){
-    const {manager,editor}=await materialOwner(ownerId);
-    let refs=editor.materials;
-    if(taskId){
-      if(!manager||!conversationTaskIds(manager).includes(taskId))
-        throw materialError("MATERIAL_NOT_FOUND","材料来源不在当前分支。");
-      const task=rawTask(taskId).record;
-      refs=task.materials??[];
-    }
-    const ref=refs.find(item=>matchRef(item,{id,sha256}));
-    if(!ref)throw materialError("MATERIAL_NOT_FOUND","当前草稿或历史消息没有这份材料。");
-    return resolveEditorMaterials(ownerId,[ref],manager)[0];
-  }
-  async function materialUpload({ownerId,uploadId,body,signal,stop}){
-    if(shuttingDown)throw materialError("HOST_SHUTTING_DOWN","宿主正在退出。");
-    const abort=new AbortController(),request={abort,promise:null};
-    if(stop)abort.signal.addEventListener("abort",stop,{once:true});
-    uploads.add(request);
-    request.promise=(async()=>{
-      const {manager}=await materialOwner(ownerId,{writable:true});
-      if(!materialOnBranch(materials.query({ownerId,uploadId}),manager))
-        throw materialError("MATERIAL_NOT_FOUND","上传不属于当前分支。");
-      return materials.publish({ownerId,uploadId,body,signal:signal?AbortSignal.any([signal,abort.signal]):abort.signal});
-    })();
-    try{return await request.promise;}
-    finally{if(stop)abort.signal.removeEventListener("abort",stop);uploads.delete(request);emit();}
-  }
-  async function projectMaterialSource({ownerId,source,version}){
-    const {manager}=await materialOwner(ownerId);
-    const path=manager&&readSessionProject(manager);
-    if(!path)throw materialError("MATERIAL_NOT_FOUND","此对话没有绑定项目目录。");
-    const facts=inspectGuiDirectory(path);
-    if(!conversationDirectoryAvailable(manager,path,facts))throw materialError("MATERIAL_SOURCE","所选目录不可读取或已经改变。");
-    const identity=directoryIdentity(path);
-    if(!identity)throw materialError("MATERIAL_SOURCE","所选目录已不可用。");
-    if(source==="current")return {root:facts.canonicalPath,path,identity,source,scope:".",version:null};
-    if(source!=="saved")throw materialError("MATERIAL_SOURCE","请选择当前文件副本或已保存版本。");
-    const saved=await inspectGuiProject(home,path,loadConfig(home)?.work,{includeChanges:false});
-    if(!saved.executionReady||!saved.version)throw materialError("MATERIAL_SOURCE","此目录没有可核验的已保存版本。");
-    const grant=await freezeReadAuthorization({home,workspace:{project:path},sessionId:ownerId,input:{paths:[saved.relativePath]}});
-    if(grant.canonicalRepo!==saved.root)throw materialError("MATERIAL_SOURCE","项目仓库在选择时发生改变。");
-    if(version!==undefined&&grant.version!==version)throw materialError("READ_VERSION","已保存版本改变，请重新浏览并选择。");
-    return {root:grant.canonicalRepo,path,identity,source,scope:saved.relativePath,version:grant.version};
-  }
-  async function listProjectMaterials(args){
-    return listGuiProjectMaterials(await projectMaterialSource(args),args);
-  }
-  async function readProjectMaterial(args,source){
-    return readGuiProjectMaterial(source??await projectMaterialSource(args),args.path);
-  }
-  async function importProjectMaterials(args){
-    if(args.source!=="current"||!Array.isArray(args.paths)||!args.paths.length||args.paths.length>GUI_MATERIAL_CAPABILITIES.maxCount)
-      throw materialError("MATERIAL_LIMIT","请选择不超过单条上限的当前文件副本。");
-    const {manager}=await materialOwner(args.ownerId,{writable:true});
-    const source=await projectMaterialSource(args);
-    const verified=await Promise.all(args.paths.map(async row=>{
-      const result=await readProjectMaterial({...args,path:row.path},source);
-      if(row.sha256!==result.sha256||row.sourceToken!==result.sourceToken)
-        throw materialError("MATERIAL_CONFLICT","文件或目录在预览后已变化，请重新预览。");
-      return {...result,name:basename(row.path),uploadId:row.uploadId};
-    }));
-    if(verified.reduce((sum,row)=>sum+row.bytes.length,0)>GUI_MATERIAL_CAPABILITIES.totalBytes)
-      throw materialError("MATERIAL_LIMIT","选择超出材料总字节上限。");
-    const ready=[];
-    for(const row of verified){
-      const intent={ownerId:args.ownerId,uploadId:row.uploadId,name:row.name,mediaType:row.mediaType,byteLength:row.bytes.length,sha256:row.sha256,branchAnchor:manager.getLeafId()};
-      materials.begin(intent);
-      ready.push(await materialUpload({ownerId:args.ownerId,uploadId:row.uploadId,body:row.bytes}));
-    }
-    return ready;
-  }
+  const {materialError,materialOnBranch,resolveEditorMaterials,materialView,materialOwner,materialQuery,
+    materialRead,materialUpload,listProjectMaterials,readProjectMaterial,importProjectMaterials}=createGuiMaterialActions({
+    home,materials,uploads,emit,reader,rawTask,readSessionHomeOrigin,assertSessionUnarchived,assertWorkspaceWritable,
+    conversationDirectoryAvailable,directoryIdentity,getActive:()=>active,isShuttingDown:()=>shuttingDown,
+  });
   const extensionPrompts=new Map(),extensionNotifications=[],extensionStatuses=new Map();
   let extensionCommand;
   const uiError=method=>Object.assign(new Error(`EXTENSION_UI_UNSUPPORTED: ${method} requires the cothink terminal entry; native terminal components have no GUI mapping.`),{code:"EXTENSION_UI_UNSUPPORTED"});
@@ -304,7 +182,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   async function extensionRuntime(sessionId) {
     assertSessionUnarchived(sessionId);
     const holder=await owner(sessionId,{mutating:true}),config=loadConfig(home);
-    await assertWorkspaceWritable(holder.sessionManager,{forExecution:true});
+    await assertWorkspaceWritable(holder.sessionManager,{forExecution:true,requireTeam:true});
     if(config?.formatVersion!==3)throw Error("请先配置具名 Team。");
     return runtime(sessionId,holder,resolveConversationConfig(config,holder.sessionManager).config);
   }
@@ -318,9 +196,10 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   const hasFileWork = record => !!(record.work || record.deliveryRef || record.projectOperation?.childTaskIds?.length);
   async function files(id) {
     const record=rawTask(id).record;
+    if(record.flow==="unified" || record.project)return guiFiles(home,record);
     const key=JSON.stringify(record.work ?? null);
     const previous=fileListCache.get(id);
-    if(!record.deliveryRef&&previous?.key===key)return previous.value;
+    if(previous?.key===key)return previous.value;
     const value=await guiFiles(home,record);
     fileListCache.set(id,{key,value});
     return value;
@@ -346,12 +225,13 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           const record = readTask(home, id);
           if (!Array.isArray(record.requestIds) || record.requestIds.some(r=>typeof r !== "string" || !/^[0-9a-f-]{36}$/.test(r)) || typeof record.input !== "string" || typeof record.createdAt !== "string") throw Error("task summary");
           cached.requestIds = record.requestIds;
+          const delivery=guiDeliverySummary(home,record);
           cached.value = {id: record.id, sessionId: record.sessionId, submissionId: record.submissionId, editorEditId:record.editorEditId,
-            createdAt: record.createdAt, cancelSettledAt: record.cancelSettledAt ?? null, input: record.input, status: taskDisplayStatus(record),
+            createdAt: record.createdAt, cancelSettledAt: record.cancelSettledAt ?? null, input: record.input, status: delivery.status, error:delivery.error,
             origin:record.origin,sourceLeaf:record.sourceLeaf,sourceSnapshot:record.sourceSnapshot,contextResult:record.contextResult,singleModel: record.singleModel, flow:record.flow, proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,confirmationBlocker:workConfirmationBlocker(record),projectPreparationBlocked:record.projectPreparationBlocked,continuationSource:record.continuationSource,materials:record.materials,inputDigest:record.inputDigest,hasWork:hasFileWork(record), finalText: ""};
           try {
             cached.value.finalText = finalGuiText(record, readRequests(home, record),home);
-            cached.value.resultRevision = guiResultRevision(record,cached.value.finalText);
+            cached.value.resultRevision = guiResultRevision({...record,status:delivery.status,error:delivery.error},cached.value.finalText);
             cached.value.endedAt = record.endedAt ?? null;
           } catch { cached.value.historyError = "任务请求记录损坏、缺失或不可用；原文件保留。"; }
         } catch { cached.error = "任务记录损坏或版本不支持；原文件保留，未知提交不自动重发。"; }
@@ -416,11 +296,13 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (readSessionUiState(home,id).archived)
       throw sessionStateError("SESSION_STATE_UNAVAILABLE","对话已归档，请先恢复；已保存内容保留。");
   }
-  async function assertWorkspaceWritable(manager,{forExecution = false} = {}) {
+  async function assertWorkspaceWritable(manager,{forExecution = false, requireTeam = false} = {}) {
     const facts = workspaceFacts(manager);
-    // A valid generic association does not depend on the workspace directory.
     const independent = projectMembership(facts);
-    if (independent.workspaceId === null) return independent;
+    if (independent.workspaceId === null) {
+      if (requireTeam) throw workspaceError("WORKSPACE_UNAVAILABLE","请在有效 Team 中新建对话；未分组历史仍可查阅。");
+      return independent;
+    }
     if (facts.associationError || facts.marker === null)
       throw workspaceError("WORKSPACE_UNAVAILABLE", independent.workspaceError);
     const table = discoverWorkspaces(await summaries());
@@ -435,6 +317,17 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (latest.workspaceError) throw workspaceError("WORKSPACE_UNAVAILABLE",latest.workspaceError);
     if (latest.workspaceArchived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。");
     return membership;
+  }
+  function requireActiveTeam(table,id) {
+    const workspace=isWorkspaceId(id) && table.workspaces.find(row=>row.id===id);
+    if (!workspace) throw workspaceError("WORKSPACE_UNAVAILABLE","请在有效 Team 中新建对话。");
+    if (workspace.archived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。",workspace);
+    return workspace;
+  }
+  function requireTeamFolder(path) {
+    const directory=inspectTeamFolder(home,path);
+    if (!directory.directoryAvailable) throw workspaceError("WORKSPACE_UNAVAILABLE",directory.reason);
+    return directory.canonicalPath;
   }
   function conversationDirectoryAvailable(manager,path,directory) {
     const expected=readManagedDirectory(manager);
@@ -513,6 +406,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       if(!recovered.applied)throw sessionStateError('CONTEXT_STORAGE','旧整理结果未确认；只读查询原操作，禁止继续生成。');
     }
     if (readable.workspaceError) throw workspaceError("WORKSPACE_UNAVAILABLE", readable.workspaceError);
+    if (mutating && readable.workspaceId===null)
+      throw workspaceError("WORKSPACE_UNAVAILABLE","请在有效 Team 中新建对话；未分组历史仍可查阅。");
     if (mutating && readable.workspaceArchived)
       throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。");
     let holder = holders.get(id);
@@ -542,21 +437,22 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   function chatResources(manager,config) {
     const project=readSessionProject(manager), cwd=neutralDirectory(home);
     const directory=project===null?null:inspectGuiDirectory(project);
-    const projectAvailable=project!==null&&conversationDirectoryAvailable(manager,project,directory);
+    const projectAvailable=project!==null&&!protectedGuiProjectPath(project,home)&&conversationDirectoryAvailable(manager,project,directory);
     const resourceCwd=projectAvailable?directory.canonicalPath:cwd;
     const options=project!==null&&!projectAvailable&&config?.piResources ? {...config,piResources:
-      Object.fromEntries(Object.entries(config.piResources).map(([kind,paths])=>[kind,kind==="tools"?paths:paths.filter(path=>{
-        if(!isAbsolute(path))return false;
-        const rel=relative(project,path);
-        return isAbsolute(rel)||rel===".."||rel.startsWith("../")||rel.startsWith("..\\");
-      })]))} : config;
+      Object.fromEntries(Object.entries(config.piResources).map(([kind, value]) => {
+        if (!["extensions", "skills", "prompts", "themes"].includes(kind) || !Array.isArray(value)) return [kind, value];
+        return [kind, value.filter(path => {
+          if (!isAbsolute(path)) return false;
+          const rel = relative(project, path);
+          return isAbsolute(rel) || rel === ".." || rel.startsWith("../") || rel.startsWith("..\\");
+        })];
+      }))} : config;
     return {cwd,resourceCwd,projectAvailable:!!projectAvailable,options:selectedResources(options??{},resourceCwd)};
   }
   async function runtime(id, holder, effective) {
     const manager = holder.sessionManager, resources=chatResources(manager,effective);
-    const project=readSessionProject(manager);
-    const workReady=resources.projectAvailable&&project!==null&&(await fileWorkStatus(home,project)).executionReady;
-    if (holder.runtime?.packageSnapshot.project===resources.resourceCwd && holder.runtimeWorkReady===workReady) return holder.runtime;
+    if (holder.runtime?.packageSnapshot.project===resources.resourceCwd && holder.runtimeProjectAvailable===resources.projectAvailable) return holder.runtime;
     if (holder.opening) return holder.opening;
     holder.opening = (async () => {
       if(holder.runtime){
@@ -565,7 +461,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         holder.writer=acquireSessionWriter(join(home,"pi"),id);
         holder.assertOwned=holder.writer.assertOwned;
       }
-      const host = { allowWork:workReady,flow:"unified" };
+      const host = { allowWork:resources.projectAvailable,flow:"unified" };
       holder.writer.release();
       holder.writer = null;
       try {
@@ -583,10 +479,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           ],
           resourceOptions: {
             ...resources.options,
-            systemPrompt: readFileSync(
-              new URL("../prompts/main.md", import.meta.url),
-              "utf8",
-            ),
+            systemPrompt: mainSystemPrompt({unified:true}),
             noContextFiles:true,
           },
 
@@ -599,7 +492,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         rt.singleModel = readSessionMode(manager);
         rt.needsTeam = false;
         holder.runtime = rt;
-        holder.runtimeWorkReady = workReady;
+        holder.runtimeProjectAvailable = resources.projectAvailable;
         holder.assertOwned = rt.assertOwned;
         return rt;
       } catch (e) {
@@ -669,6 +562,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           record = current?.record ?? records.find((t) => t.id === taskId);
         if (!record || record.historyError) throw Error("分支引用的任务记录缺失或损坏。");
         const finalText = current ? finalGuiText(record,current.requests(),home) : record.finalText;
+        const result = current ? guiDeliverySummary(home,record) : record;
         return {
           taskId: record.id,
           flow:record.flow,proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,
@@ -680,12 +574,13 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           submissionId: record.submissionId ?? null,
           input: record.input,
           materials:(record.materials??[]).map(({ownerId,...ref})=>ref),
-          status: taskDisplayStatus(record),
-          hasWork: current ? !!current.record.work||!!current.record.deliveryRef : !!record.hasWork,
+          status: result.status,
+          error: result.error,
+          hasWork: current ? hasFileWork(record) : !!record.hasWork,
           mode: record.singleModel ? "one" : "cothink",
           finalText,
-          resultRevision: current ? guiResultRevision(record,finalText) : record.resultRevision,
-          canFork: record.status === "completed" && !!finalText && branch.some(entry =>
+          resultRevision: current ? guiResultRevision({...record,status:result.status,error:result.error},finalText) : record.resultRevision,
+          canFork: result.status === "completed" && !!finalText && branch.some(entry =>
             entry.type === "custom_message" && entry.customType === "cothink-task-status" && entry.details?.taskId === taskId),
         };
       });
@@ -738,7 +633,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         turns,
         submissions: submissions(),
         readOnly: readOnly || !!membership.workspaceError || !!navigation.navigationError ||
-          !!membership.workspaceArchived || !!navigation.navigation?.archived,
+          !!membership.workspaceArchived || membership.workspaceId===null || !!navigation.navigation?.archived,
         selectionError,
       });
     } catch {
@@ -776,8 +671,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (active && live.has(active.taskId)) {
       const task = live.get(active.taskId), record = task.record;
       const finalText = finalGuiText(record,task.requests(),home);
-      byTask.set(record.id,{...record,status:taskDisplayStatus(record),finalText,hasWork:hasFileWork(record),
-        resultRevision:guiResultRevision(record,finalText)});
+      const delivery=guiDeliverySummary(home,record);
+      byTask.set(record.id,{...record,status:delivery.status,finalText,hasWork:hasFileWork(record),
+        resultRevision:guiResultRevision({...record,status:delivery.status,error:delivery.error},finalText)});
     }
     const rows = [], workspaceRows = new Map();
     const needle = query.trim().toLocaleLowerCase();
@@ -891,6 +787,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     holder.writer?.release();
     holders.delete(id);
   }
+  function readSessionHomeOrigin(manager) {
+    return manager.getBranch().find(e=>e.type==="custom"&&e.customType==="cothink-home-origin")?.data?.draftId;
+  }
   function homeDraftSnapshot() {
     try {
       const row=readHomeDraft(home);
@@ -928,13 +827,14 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       if(name==="home.transfer"){
         assertSessionUnarchived(sessionId);
         const holder=await owner(sessionId,{mutating:true}), manager=holder.sessionManager;
-        await assertWorkspaceWritable(manager);
+        await assertWorkspaceWritable(manager,{requireTeam:true});
         writeHomeDraft(home,args,prior=>{
           if(prior?.pendingCreateSessionId!==sessionId ||
-            manager.getBranch().find(e=>e.type==="custom"&&e.customType==="cothink-home-origin")?.data?.draftId!==draftId ||
+            readSessionHomeOrigin(manager)!==draftId ||
             readSessionWorkspace(manager)!==prior.targetWorkspaceId)
             throw sessionStateError("DRAFT_CONFLICT","首页保存稿与已创建会话的身份不一致。");
           const editor=normalizeConversationEditor(prior.editor);
+          if(editor.turnOptions?.readAllowed)throw Error("项目读取授权不会随首页草稿转移，请在目标对话重新选择。");
           if(materials.list({ownerId:draftId}).some(item=>item.status==="pending"))
             throw materialError("MATERIAL_PENDING","首页还有未完成的上传，请完成或取消后再转移。");
           resolveEditorMaterials(draftId,editor.materials);
@@ -953,8 +853,18 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         emit();
         return session(sessionId);
       }
+      if(name==="home.reserve"){
+        const workspace=requireActiveTeam(readGuiWorkspaces(home),workspaceId);
+        requireTeamFolder(workspace.project);
+      }
+      // A pre-Team reservation may point to a published old conversation. Its
+      // source remains intact; release only the matching old reservation.
+      const oldCreation=name==="home.clearReservation"&&readHomeDraft(home)?.targetWorkspaceId===null
+        ? await sessionCreation(sessionId) : null;
+      const oldOrigin=oldCreation?.status==="confirmed"&&oldCreation.session.workspaceId===null
+        ? readSessionHomeOrigin(await reader(sessionId)) : null;
       let selectedMaterials=[];
-    const result=writeHomeDraft(home,args,prior=>{
+      const result=writeHomeDraft(home,args,prior=>{
         const pending=prior?.pendingCreateSessionId??null;
         const target=prior?.targetWorkspaceId??null;
         if(name==="home.draft"){
@@ -967,13 +877,15 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         }
         if(!prior)throw sessionStateError("DRAFT_CONFLICT","首页保存稿不存在。");
         if(name==="home.reserve"){
-          if(pending!==null || workspaceId!==null) throw sessionStateError("DRAFT_CONFLICT","首页已有待确认创建或目标无效。");
+          if(pending!==null) throw sessionStateError("DRAFT_CONFLICT","首页已有待确认创建。");
           return {editor:prior.editor,pendingCreateSessionId:sessionId,targetWorkspaceId:workspaceId};
         }
         if(pending!==sessionId) throw sessionStateError("DRAFT_CONFLICT","首页待创建标识已改变。");
-        assertNewGuiSessionId(directory,sessionId);
-        if(holders.has(sessionId)||sessionWriterBusy(join(home,"pi"),sessionId))
-          throw sessionStateError("DRAFT_CONFLICT","原创建仍在核对，首页保存稿保留。");
+        if (target!==null || oldOrigin!==draftId) {
+          assertNewGuiSessionId(directory,sessionId);
+          if(holders.has(sessionId)||sessionWriterBusy(join(home,"pi"),sessionId))
+            throw sessionStateError("DRAFT_CONFLICT","原创建仍在核对，首页保存稿保留。");
+        }
         return {editor:prior.editor,pendingCreateSessionId:null,targetWorkspaceId:null};
       });
       for(const {manifest} of selectedMaterials)materials.acknowledge(manifest);
@@ -999,7 +911,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     })));
     return safe({
       version: notes.version,
-      protocol:{unified:unifiedProtocol,capabilities:1,guiInput:2},
+      protocol:{unified:unifiedProtocol,capabilities:1,guiInput:Number(GUI_INPUT_VERSION)},
       ...homeDraftSnapshot(),
       materialCapabilities:GUI_MATERIAL_CAPABILITIES,oauthOperations:oauth.snapshot(),localSkillPaths:config?.piResources?.skills??[],executionConfigDigest:guiExecutionConfigDigest(config?.work),
       builtinSkills:{disabled:validateBuiltinSkills(config),names:builtinSkillNames},
@@ -1025,16 +937,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         catalog
           .getModels()
           .filter((m) => !m.type || m.type === "chat")
-          .map(async (m) => ({
-            provider: m.provider,
-            modelId: m.id,
-            name: m.name ?? m.id,
-            reasoning: !!m.reasoning,
-            thinkingLevels: await validateModelThinking(m),
-            api: m.api,
-            contextWindow: m.contextWindow,
-            maxTokens: m.maxTokens,
-          })),
+          .map(model=>projectModelFacts(catalog,{provider:model.provider,modelId:model.id})),
       ),
       sessions: page.items,
       sessionsCursor: page.nextCursor,
@@ -1072,7 +975,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     try {const cwd=resources.resourceCwd,manual=resources.options,packages=await resolvePackageResources({home,cwd,manual:{skills:manual.additionalSkillPaths,prompts:manual.additionalPromptTemplatePaths,themes:manual.additionalThemePaths}});
       skills=freezeAnswerSkills({cwd,home,paths:[...builtins.skills.map(s=>s.path),...manual.additionalSkillPaths,...packages.skills],project:true,includeRestricted:true}).map(s=>({...s,sourceKind:builtins.skills.some(b=>b.path===s.path)?'builtin':'selected'}));
     }catch {diagnostics.push({code:'SKILL_DISCOVERY',message:'选定技能存在缺失、同名冲突或包状态错误；新任务会在请求前拒绝，请核对资源选择。'});}
-    return capabilitySnapshot({skills,tools:[...contextToolNames,'read_skill','get_capabilities','request_review','start_work',...(resources.projectAvailable?['read_project_context']:[])],hasProject:!!project,executionConfigured:!!config?.work?.execution,diagnostics,context:manager?contextState(manager):null});
+    return capabilitySnapshot({skills,tools:[...contextToolNames,'read_skill','get_capabilities',...(resources.projectAvailable?['start_work','read_project_context']:[])],hasProject:resources.projectAvailable,executionConfigured:!!config?.work?.execution,diagnostics,context:manager?contextState(manager):null});
   }
   async function readContextOperation(operationId) {
     const task=rawTask(operationId),record=task.record;
@@ -1098,7 +1001,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       try {
         const prep=await writeSelection(async()=>{
           assertSessionUnarchived(sessionId);holder=await owner(sessionId,{mutating:true});const manager=holder.sessionManager;
-          const membership=await assertWorkspaceWritable(manager);
+          const membership=await assertWorkspaceWritable(manager,{requireTeam:true});
           if(manager.getLeafId()!==sourceLeaf)throw sessionStateError('CONTEXT_SOURCE_CHANGED','整理前分支已变化，请刷新；草稿保留。');
           const disk=readContextDisk(manager.getSessionFile(),sessionId);
           if(contextDigest(disk.getEntries())!==contextDigest(manager.getEntries()))throw sessionStateError('CONTEXT_STORAGE','内存与磁盘历史不一致。');
@@ -1130,7 +1033,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     })();
     return ready;
   }
-  async function submit(args,confirmation,continuation) {
+  async function submit(args,confirmation,continuation,{receiptOnly=false}={}) {
+    const upgrade=()=>sessionStateError("GUI_INPUT_UPGRADE","需要新版 CoThink 界面。请重新打开应用；已保存草稿和历史保留。");
+    if(receiptOnly && args.protocolVersion!==unifiedProtocol)throw upgrade();
     if(!confirmation && (args.protocolVersion!==unifiedProtocol||Object.keys(args).some(k=>!["sessionId","input","submissionId","protocolVersion","constraints","readAuthorization","budget","editorEditId","materials"].includes(k))))throw Error("统一会话协议不匹配，请重新打开新版界面。");
     const constraints=normalizeConstraints(confirmation?.source.proposal.constraints??continuation?.source.constraints??args.constraints);
     const budget=normalizeRootBudget(confirmation?.reservation.budgetSource.remaining??continuation?.remainingBudget??args.budget);
@@ -1146,12 +1051,19 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       throw Error("submissionId 必须是 1—200 字符。");
     const {records,errors}=taskIndex();
     const prior = records.find(t=>t.sessionId===sessionId && t.submissionId===submissionId)
-      ?? (args.editorEditId && records.find(t=>t.sessionId===sessionId && t.editorEditId===args.editorEditId));
+      ?? (!receiptOnly && args.editorEditId && records.find(t=>t.sessionId===sessionId && t.editorEditId===args.editorEditId));
     if (prior) {
+      if(receiptOnly&&!prior.inputDigest)throw upgrade();
       if(prior.inputDigest?prior.inputDigest!==inputDigest:
         prior.input!==input||refs.length||continuation&&prior.continuationSource?.taskId!==continuation.source.id)
         throw materialError("SUBMISSION_CONFLICT","同一提交标识已经绑定不同内容。");
       return { taskId: prior.id, sessionId: prior.sessionId };
+    }
+    if(receiptOnly)throw upgrade();
+    if(!confirmation&&!continuation){
+      if(!isWorkspaceId(args.editorEditId))
+        throw sessionStateError("DRAFT_CONFLICT","发送前需要保存完整草稿；请刷新后核对。");
+      if(Object.hasOwn(args.constraints??{},"requireDifferentModelReview"))throw upgrade();
     }
     if (errors.length)
       throw Error(
@@ -1192,7 +1104,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           assertSessionUnarchived(sessionId);
           const holder = await owner(sessionId,{mutating:true}),
             manager = holder.sessionManager;
-          const membership=await assertWorkspaceWritable(manager,{forExecution:!!confirmation||!!args.readAuthorization});
+          const membership=await assertWorkspaceWritable(manager,{requireTeam:true,forExecution:!!confirmation||!!args.readAuthorization});
           if (continuation) {
             loadPreparedContinuation({home,manager,sourceTaskId:continuation.source.id});
             if (readSessionProject(manager)!==continuation.source.workspace.project ||
@@ -1206,7 +1118,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           const config = loadConfig(home);
           if (config?.formatVersion !== 3) throw Error("请先配置具名 Team。");
           if (!readSessionTeam(manager.getBranch()))
-            throw Error("此历史会话尚未绑定 Team，请明确选择。");
+            throw Error("请先为此对话明确选择阵容。");
           const editor=readConversationMetadata(manager).editor;
           let frozenMaterials=continuation?.materials??[];
           if(!confirmation&&!continuation){
@@ -1218,18 +1130,21 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
               frozenMaterials=resolveEditorMaterials(sessionId,editor.materials,manager);
             }
           }
-          if(!confirmation && !continuation && args.editorEditId!==undefined){
+          if(!confirmation && !continuation){
             if(editor.editId!==args.editorEditId||editor.text!==input)throw sessionStateError('DRAFT_CONFLICT','提交的完整草稿已变化，请重新核对；未发送。');
+            if(retiredReviewOption(editor.turnOptions))throw sessionStateError("TURN_CONSTRAINTS","普通对话的旧评审选项已退役。请在本条限制中确认当前规则再发送。");
             if(editor.turnOptions?.readAllowed&&!editor.turnOptions.readVersion)throw materialError("READ_VERSION","原草稿缺少当时选择的固定版本，请重新选择项目文件。");
             const expected=editorTurnInput(editor.turnOptions,{project:readSessionProject(manager),workspaceId:membership.workspaceId??null});
-            if(JSON.stringify(expected.constraints)!==JSON.stringify(constraints)||JSON.stringify(normalizeRootBudget(expected.budget))!==JSON.stringify(budget)||JSON.stringify(expected.readAuthorization??null)!==JSON.stringify(args.readAuthorization??null))throw sessionStateError('DRAFT_CONFLICT','提交选项与已保存草稿不一致；未发送。');
+            if(!isDeepStrictEqual(normalizeConstraints(expected.constraints),constraints)||
+              !isDeepStrictEqual(normalizeRootBudget(expected.budget),budget)||
+              !isDeepStrictEqual(expected.readAuthorization??null,args.readAuthorization??null))
+              throw sessionStateError('DRAFT_CONFLICT','提交选项与已保存草稿不一致；未发送。');
           }
           if(!input.trim()&&!frozenMaterials.length)throw Error("请输入问题或添加至少一份就绪材料。");
           const snapshot = {
             config: confirmation?.source.frozenConfig??resolveConversationConfig(config, manager).config,
             workspace:{id:membership.workspaceId??null,project:readSessionProject(manager),managedDirectory:readManagedDirectory(manager)},
             contextTaskIds:conversationTaskIds(manager),
-            singleModel: readSessionMode(manager),
             materials:frozenMaterials,
             cwd: neutralDirectory(home),
           };
@@ -1237,12 +1152,13 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           snapshot.guiResourceOptions=resources.options;
           snapshot.projectDirectoryAvailable=resources.projectAvailable;
           snapshot.workspace.directoryIdentity=resources.projectAvailable?directoryIdentity(snapshot.workspace.project):null;
-          const networkBlocker=guiNetworkBlocker(input,constraints);
-          if(networkBlocker)throw workspaceError("NETWORK_POLICY",networkBlocker);
-          if (!confirmation && (continuation || isGuiFileTask(input, {
-            readOnly: constraints.readOnly,
-            fileWork: args.editorEditId !== undefined && (editor.turnOptions?.fileWork || !!editor.workRequest),
-          }))) await requireGuiFileTask(home,continuation
+          const source=confirmation?.source??continuation?.source;
+          snapshot.turnIntent=source?.turnIntent??guiTurnIntent(input,{
+            ...constraints,...(!source?{fileWork:editor.turnOptions?.fileWork,workRequest:editor.workRequest}:{}),
+          });
+          if(snapshot.turnIntent.blocker)
+            throw workspaceError(snapshot.turnIntent.blockerCode??(snapshot.turnIntent.fileRequired&&constraints.readOnly&&snapshot.turnIntent.networkMode!=="whole-turn-offline"?"TURN_CONSTRAINTS":"NETWORK_POLICY"),snapshot.turnIntent.blocker);
+          if (!confirmation && (continuation || snapshot.turnIntent.fileRequired)) await requireGuiFileTask(home,continuation
             ? {...snapshot.workspace,directoryIdentity:continuation.source.workspace.directoryIdentity??undefined}
             : snapshot.workspace,snapshot.config.work);
           const thinking = readConversationMetadata(manager).thinking;
@@ -1271,11 +1187,14 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           cwd: snapshot.cwd,
           input,
           frozenConfig: snapshot.config,
-          frozenConstraints:constraints,budget,workspace:snapshot.workspace,readAuthorization:snapshot.readAuthorization,contextTaskIds:snapshot.contextTaskIds,
+          frozenConstraints:constraints,budget,workspace:snapshot.workspace,readAuthorization:snapshot.readAuthorization,contextTaskIds:snapshot.contextTaskIds,turnIntent:snapshot.turnIntent,
           ...(confirmation?{frozenSkillSource:confirmation.source,frozenPackageSnapshot:confirmation.source.packageSnapshot,confirmedOperation:{...confirmation,execute:task=>executeConfirmed(task,confirmation.source,confirmation.reservation)}}:{}),
           mainRuntime: rt,
           guiResourceOptions:snapshot.guiResourceOptions,
-          beforeWork:()=>requireConversationFileWork(home,snapshot.workspace),
+          projectDirectoryAvailable:snapshot.projectDirectoryAvailable,
+          beforeWork:(_task,{prepare=false}={})=>prepare
+            ?requireConversationFileWork(home,snapshot.workspace)
+            :inspectConversationFileWork(home,snapshot.workspace),
           materials:snapshot.materials,
           ...(continuation?{continuationSource:{taskId:continuation.source.id}}:{}),
           taskId: state.taskId,
@@ -1311,16 +1230,32 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   }
   async function confirmWork(args) {
     if(!args||Object.keys(args).some(k=>!["sessionId","submissionId","proposalRef","protocolVersion"].includes(k))||args.protocolVersion!==unifiedProtocol||typeof args.submissionId!=="string"||!args.submissionId||args.submissionId.length>200)throw Error("确认参数或协议无效。");
+    const {sessionId,proposalRef,submissionId}=args, id=proposalRef?.sourceTaskId;
+    const assertProposalBranch=manager=>{
+      if(!conversationTaskIds(manager).includes(id))throw Error("提议不属于当前可见分支。");
+    };
     const prepared=await writeSelection(async()=>{
-      const holder=await owner(args.sessionId,{mutating:true});
-      const membership=await assertWorkspaceWritable(holder.sessionManager,{forExecution:true});
-      const id=args.proposalRef?.sourceTaskId;
-      if(!conversationTaskIds(holder.sessionManager).includes(id))throw Error("提议不属于当前可见分支。");
+      const manager=await reader(sessionId);
+      assertProposalBranch(manager);
+      const saved=readTask(home,id);
+      if(saved.confirmationIntent){
+        const facts=workspaceFacts(manager);
+        const membership=projectMembership(facts,readGuiWorkspaces(home));
+        if(membership.workspaceError||saved.workspace?.project!==facts.project)
+          throw workspaceError("WORKSPACE_UNAVAILABLE",membership.workspaceError??"提议的目录归属无法确认。");
+        checkedProposal(home,saved,proposalRef,{sessionId,workspaceId:membership.workspaceId});
+        const found=await confirmationState({home,source:saved,reservation:saved.confirmationIntent,receiptOnly:true});
+        if(found.task)return {found};
+      }
+      assertSessionUnarchived(sessionId);
+      const holder=await owner(sessionId,{mutating:true});
+      const membership=await assertWorkspaceWritable(holder.sessionManager,{forExecution:true,requireTeam:true});
+      assertProposalBranch(holder.sessionManager);
       const sourceTask=live.get(id),source=sourceTask?.record??readTask(home,id);
       if (source.workspace?.directoryIdentity!==undefined)
         await requireFileWork(home,source.workspace.project,source.workspace.directoryIdentity);
       const save=()=>{holder.assertOwned();if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",id+".json"),source,holder.assertOwned);taskCache.delete(id);};
-      const reservation=await reserveConfirmation({home,source,proposalRef:args.proposalRef,sessionId:args.sessionId,workspaceId:membership.workspaceId??null,submissionId:args.submissionId,save});
+      const reservation=await reserveConfirmation({home,source,proposalRef,sessionId,workspaceId:membership.workspaceId,submissionId,save});
       const found=await confirmationState({home,source,reservation});
       return {source,reservation,found};
     });
@@ -1346,14 +1281,15 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       protocolVersion:unifiedProtocol},null,continuation);
   }
 
-  async function usableRoster(id,config=loadConfig(home),getCatalog=()=>createModelRuntime(home)) {
+  async function usableRoster(id,config=loadConfig(home),getCatalog=()=>createModelRuntime(home),requireAll=true) {
     const roster=config?.teams?.find(t=>t.id===id);
     if(!roster)return null;
     try {
       const catalog=await getCatalog(),refs=resolveTeamConfig(config,roster);
-      for(const ref of [refs.main,...refs.secondary])
-        await validateModelRefs({...refs,main:ref,secondary:[]},catalog,{singleModel:true});
-      return roster;
+      if(!refs.secondary.length)return null;
+      const needed=requireAll?[refs.main,...refs.secondary]:[refs.main];
+      const routes=await Promise.all(needed.map(ref=>projectModelFacts(catalog,ref)));
+      return routes.every(route=>route.available)?roster:null;
     }catch{return null;}
   }
   async function validateWorkspaceRoster(id) {
@@ -1374,7 +1310,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       let result;
       if (name === "workspace.create") {
         if (current) throw workspaceError("WORKSPACE_CONFLICT","该 Team 标识已存在；请打开已保存的 Team。",current);
-        const project = args.project === null ? null : await inspectWorkspaceProject(args.project);
+        const project = requireTeamFolder(args.project);
         await validateWorkspaceRoster(args.defaultRosterId);
         result = createGuiWorkspace(home,{...args,project});
       } else {
@@ -1386,9 +1322,11 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           throw workspaceError("WORKSPACE_CONFLICT","项目 Team 已变化，请读取最新状态。",current);
         let change;
         if (name === "workspace.bind" || name === "workspace.rebind") {
-          if (name === "workspace.bind" && current.project!==null)
-            throw workspaceError("WORKSPACE_CONFLICT","请通过新版目录变更入口更换目录。",current);
-          const path=args.path===null&&name==="workspace.rebind"?null:inspectWorkspaceProject(args.path);
+          if (name === "workspace.bind")
+            throw workspaceError("WORKSPACE_CONFLICT","请通过 Team 的目录选择入口绑定目录。",current);
+          if (!isWorkspaceId(args.operationId)) throw Error("Team 目录变更身份无效。");
+          if (current.archived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。",current);
+          const path=requireTeamFolder(args.path);
           const frozen=freezeWorkspaceHistory(directory,infos,table,current,path,{signature,projectMembership,inspectWorkspaceProject,assertIdle:related=>{
             if ([active?.sessionId,extensionCommand?.sessionId].some(id=>related.has(id)))
               throw workspaceError("WORKSPACE_CONFLICT","此 Team 正在运行任务或插件命令。",current);
@@ -1426,7 +1364,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       return result;
     });
   }
-  async function action(name, args = {}) {
+  async function action(name, args = {}, {receiptOnly=false}={}) {
     if (closed) throw Error("宿主已关闭。");
     if (shuttingDown && !["home.draft", "session.draft", "session.view", "task.cancel"].includes(name))
       throw Object.assign(Error("宿主正在退出；新操作已冻结，历史和草稿保存仍可用。"),{code:"HOST_SHUTTING_DOWN"});
@@ -1537,7 +1475,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       emit();
       return { version, unread: false };
     }
-    if (name === "task.submit") return submit(args);
+    if (name === "task.submit") return submit(args,null,null,{receiptOnly});
     if (name === "task.confirmWork") return confirmWork(args);
     if (name === "task.continuePrepared") return continuePrepared(args);
     if (name === "session.mode") throw Error("统一会话已移除模式切换；旧 CLI 会话保留原模式。");
@@ -1552,7 +1490,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       return { taskId: args.taskId };
     }
     if (name === "task.reveal")
-      return revealGuiTask(rawTask(args.taskId).record);
+      return revealGuiTask(home,rawTask(args.taskId).record);
     if (name === "project.inspect") {
       if (args.purpose==="directory"||args.purpose==="team-directory") {
         const basic=args.purpose==="directory"?inspectGuiDirectory(args.path):inspectTeamFolder(home,args.path);
@@ -1564,9 +1502,27 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (name === "project.browse") return browseProjectFolders(args.path);
     if (name === "project.mkdir") return makeProjectFolder(args);
     if (name === "project.prepare") {
-      const prepared=await prepareGuiProject(home,args);
-      if (["confirm","finish"].includes(args.action)) emit();
-      return prepared;
+      if (args.action==="query") return prepareGuiProject(home,args);
+      if (!["confirm","finish"].includes(args.action) || !isWorkspaceId(args.sessionId) || !isWorkspaceId(args.sourceTaskId))
+        throw workspaceError("WORKSPACE_UNAVAILABLE","新文件工作仅在 Team 对话目录内准备；旧准备请核对原会话、任务和操作。");
+      return writeSelection(async()=>{
+        const receipt=await prepareGuiProject(home,{operationId:args.operationId,action:"query"});
+        const holder=await owner(args.sessionId,{mutating:true}), manager=holder.sessionManager;
+        assertSessionUnarchived(args.sessionId);
+        const membership=await assertWorkspaceWritable(manager,{requireTeam:true});
+        const {source}=loadPreparedContinuation({home,manager,sourceTaskId:args.sourceTaskId});
+        holder.assertOwned();
+        const project=readSessionProject(manager);
+        if (!project || readManagedDirectory(manager) || receipt.path!==project || receipt.root!==project ||
+            source.workspace?.project!==project || source.workspace?.id!==membership.workspaceId ||
+            !receipt.expectedTree || receipt.expectedTree!==args.expectedTree ||
+            !conversationDirectoryAvailable(manager,project) ||
+            source.workspace.directoryIdentity && !isDeepStrictEqual(directoryIdentity(project),source.workspace.directoryIdentity))
+          throw workspaceError("WORKSPACE_UNAVAILABLE","旧准备操作、目录或版本无法与原会话核对。");
+        const result=await prepareGuiProject(home,args);
+        emit();
+        return result;
+      });
     }
     if (name === "workspace.rebind.query") return queryGuiWorkspaceRebind(home,args);
     if (["workspace.create","workspace.update","workspace.bind","workspace.rebind"].includes(name))
@@ -1653,7 +1609,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             throw sessionStateError("SESSION_BUSY", "此对话正被另一窗口占用，请先关闭该窗口。");
           throw error;
         }
-        await assertWorkspaceWritable(source.sessionManager);
+        await assertWorkspaceWritable(source.sessionManager,{requireTeam:true});
         assertIdle();
         source.assertOwned();
         const branch = source.sessionManager.getBranch();
@@ -1662,7 +1618,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         if (!endpoint) throw Error("回复终点记录缺失，请修复历史后再新建分支。");
         const original=source.sessionManager;
         const manager=SessionManager.inMemory(original.getCwd(),undefined,[original.getHeader(),...branch.slice(0,branch.indexOf(endpoint)+1)]);
-        const membership = await assertWorkspaceWritable(manager);
+        const membership = await assertWorkspaceWritable(manager,{requireTeam:true});
         assertIdle();
         source.assertOwned();
         manager.createBranchedSession(endpoint.id);
@@ -1673,13 +1629,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           appendConversationEntry(holder, "cothink-fork", {sessionId, taskId});
           if (readSessionWorkspace(manager) === undefined)
             appendConversationEntry(holder,"cothink-gui-workspace",{workspaceId:membership.workspaceId});
-          const teamRoot=readGuiWorkspaces(home).workspaces.find(w=>w.id===membership.workspaceId)?.project;
-          if (teamRoot) {
-            folder=createConversationFolder(home,teamRoot,id);
-            appendConversationEntry(holder,"cothink-project",folder);
-          }
-          else if (branch.some(entry=>entry.customType==="cothink-project" && entry.data?.managedDirectory))
-            throw Error("先为 Team 关联文件夹，再新建对话。");
+          const teamRoot=requireActiveTeam(readGuiWorkspaces(home),membership.workspaceId).project;
+          folder=createConversationFolder(home,requireTeamFolder(teamRoot),id);
+          appendConversationEntry(holder,"cothink-project",folder);
           appendConversationEntry(holder, "cothink-title", {title:`${readable.title} · 分支`});
           // Historical drafts are not messages, and belong to the source editor.
           appendConversationEntry(holder, "cothink-draft", {text:""});
@@ -1704,62 +1656,40 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     }
     if (name === "session.create") {
       return writeSelection(async () => {
-        const modern = Object.hasOwn(args,"workspaceId");
-        if (Object.keys(args).some(key => !["sessionId","workspaceId","project","sourceSessionId","sourceLeafId","homeDraftId","handoff"].includes(key)) ||
-            modern && Object.hasOwn(args,"project") || modern && !isWorkspaceId(args.sessionId) ||
-            args.sessionId !== undefined && !isWorkspaceId(args.sessionId) ||
-            modern && args.workspaceId !== null && !isWorkspaceId(args.workspaceId) ||
+        if (!isWorkspaceId(args.workspaceId))
+          throw workspaceError("WORKSPACE_UNAVAILABLE","新对话必须明确选择有效 Team；不能使用旧项目路径。");
+        if (Object.keys(args).some(key => !["sessionId","workspaceId","sourceSessionId","sourceLeafId","homeDraftId"].includes(key)) ||
+            !isWorkspaceId(args.sessionId) ||
             (args.sourceSessionId!==undefined || args.sourceLeafId!==undefined) &&
-              (!modern || !isWorkspaceId(args.sourceSessionId) || typeof args.sourceLeafId!=="string") ||
-            args.homeDraftId!==undefined && (!modern || !isWorkspaceId(args.homeDraftId) || args.sourceSessionId!==undefined) ||
-            args.handoff!==undefined && (!modern || !args.workspaceId || args.homeDraftId || !args.handoff ||
-              Object.keys(args.handoff).some(k=>!["project","text"].includes(k)) ||
-              !isWorkspaceProject(args.handoff.project) || typeof args.handoff.text!=="string")) throw Error("新对话参数无效，请刷新页面。");
-        const id = args.sessionId ?? randomUUID();
+              (!isWorkspaceId(args.sourceSessionId) || typeof args.sourceLeafId!=="string") ||
+            args.homeDraftId!==undefined && (!isWorkspaceId(args.homeDraftId) || args.sourceSessionId!==undefined))
+          throw Error("新对话参数无效，请刷新页面。");
+        const id = args.sessionId;
         if (holders.has(id)) throw sessionStateError("SESSION_STATE_CONFLICT","会话 ID 已存在，请读取原 ID；本次未创建。");
         const writer = acquireSessionWriter(join(home,"pi"),id);
         let holder, folder;
         try {
           assertNewGuiSessionId(directory,id);
-          let workspace = null, project = null;
-          if (modern) {
-            if (args.workspaceId !== null) {
-              const table = discoverWorkspaces(await summaries());
-              workspace = table.workspaces.find(w => w.id === args.workspaceId);
-              if (!workspace) throw workspaceError("WORKSPACE_UNAVAILABLE","Team 不存在，请刷新列表。");
-              project = workspace.project;
-            }
-          } else {
-            project = args.project == null ? null : await inspectWorkspaceProject(args.project);
-            if (project !== null) {
-              const table=discoverWorkspaces(await summaries());
-              workspace=workspaceForProject(table,project);
-              if (!workspace) {
-                const config=loadConfig(home), recent=config?.teams?.find(t=>t.id===config.lastUsedTeamId);
-                workspace=createGuiWorkspace(home,{workspaceId:randomUUID(),name:[...(basename(project).trim() || project)].slice(0,80).join(""),
-                  project,defaultRosterId:recent?.id ?? null});
-              }
-            }
-          }
-          if (workspace?.archived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。",workspace);
-          if (args.handoff && (project!==args.handoff.project || !savedDirectoryAvailable(project)))
-            throw workspaceError("WORKSPACE_CONFLICT","Team 默认目录已变化或不可用，请重新核对。",workspace);
-          if (modern && project) folder=createConversationFolder(home,project,id);
+          const workspace=requireActiveTeam(discoverWorkspaces(await summaries()),args.workspaceId);
+          const project=requireTeamFolder(workspace.project);
+          const checkHomeIdentity=()=>{
+            const row=readHomeDraft(home);
+            const reserved=row?.pendingCreateSessionId===id;
+            if ((reserved || args.homeDraftId) &&
+                (!reserved || row.draftId!==args.homeDraftId || row.targetWorkspaceId!==workspace.id))
+              throw sessionStateError("DRAFT_CONFLICT","首页待创建身份已改变。");
+          };
+          checkHomeIdentity();
+          folder=createConversationFolder(home,project,id);
           const manager = SessionManager.create(neutralDirectory(home),directory,{id});
           holder = {sessionManager:manager,writer,assertOwned:writer.assertOwned};
-          appendConversationEntry(holder,"cothink-project",folder??{project});
-          appendConversationEntry(holder,"cothink-gui-workspace",{workspaceId:workspace?.id ?? null});
+          appendConversationEntry(holder,"cothink-project",folder);
+          appendConversationEntry(holder,"cothink-gui-workspace",{workspaceId:workspace.id});
           appendConversationEntry(holder,"cothink-flow",{flow:"unified",version:unifiedProtocol});
-          if (args.handoff?.text) appendConversationEntry(holder,"cothink-draft",{text:args.handoff.text,editId:randomUUID()});
-          if(args.homeDraftId){
-            const homeDraft=readHomeDraft(home);
-            if(homeDraft?.draftId!==args.homeDraftId||homeDraft.pendingCreateSessionId!==id||homeDraft.targetWorkspaceId!==args.workspaceId)
-              throw sessionStateError("DRAFT_CONFLICT","首页待创建身份已改变。");
-            appendConversationEntry(holder,"cothink-home-origin",{draftId:args.homeDraftId});
-          }
+          if(args.homeDraftId) appendConversationEntry(holder,"cothink-home-origin",{draftId:args.homeDraftId});
           const config = loadConfig(home);
           let catalog;
-          const rosterFor=id=>usableRoster(id,config,()=>catalog??=createModelRuntime(home));
+          const rosterFor=id=>usableRoster(id,config,()=>catalog??=createModelRuntime(home),false);
           let roster, reason;
           const defaultId=workspace?.defaultRosterId;
           if(defaultId!=null){
@@ -1776,22 +1706,21 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
               if(saved){
                 const current=await rosterFor(saved.id);
                 if(!current || contextDigest(current)!==contextDigest(saved)) throw Error("来源阵容已变化");
-                roster=saved;
+                reason=`可选用来源阵容「${saved.name}」。请选择本对话的阵容后发送。`;
               }
             } catch {
               reason="来源对话的分支或阵容已变化，请明确选择阵容。";
             }
           }
-          if(!roster&&!reason)roster=await rosterFor(config?.lastUsedTeamId);
           if (roster) saveSessionTeam(holder,roster);
-          else appendConversationEntry(holder,"cothink-roster-required",{reason:reason??"没有可用阵容，请选择或新建阵容。"});
+          else appendConversationEntry(holder,"cothink-roster-required",{reason:reason??"Team 未设置默认阵容，请为本对话选择阵容后发送。"});
           holder.sessionManager = persistNewGuiSession({manager,directory,assertOwned:()=>{
             writer.assertOwned();
-            if (workspace) {
-              const latest=readGuiWorkspaces(home).workspaces.find(w=>w.id===workspace.id);
-              if (!latest || latest.revision !== workspace.revision || latest.archived)
-                throw workspaceError("WORKSPACE_CONFLICT","Team 已变化，请重新读取后创建对话。",latest);
-            }
+            checkHomeIdentity();
+            const latest=readGuiWorkspaces(home).workspaces.find(w=>w.id===workspace.id);
+            if (!latest || latest.revision !== workspace.revision || latest.archived ||
+                !conversationDirectoryAvailable(manager,folder.project))
+              throw workspaceError("WORKSPACE_CONFLICT","Team 或对话目录已变化，请重新读取后创建对话。",latest);
           }});
           holder.persisted=true;
           holders.set(id,holder);
@@ -1811,7 +1740,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       [
         "session.name",
         "session.draft",
-        "session.mode",
         "session.team",
         "session.thinking",
       ].includes(name)
@@ -1827,7 +1755,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           assertSessionUnarchived(args.sessionId);
           const holder = await owner(args.sessionId,{mutating:true}),
             target = holder.runtime ?? holder;
-          await assertWorkspaceWritable(holder.sessionManager);
+          await assertWorkspaceWritable(holder.sessionManager,{requireTeam:true});
           assertSessionUnarchived(args.sessionId);
           if (name === "session.name") {
             if (
@@ -1868,11 +1796,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             const resolved=resolveEditorMaterials(args.sessionId,editor.materials,manager);
             saveGuiDraft(target,editor);
             for(const {manifest} of resolved)materials.acknowledge(manifest);
-          }
-          if (name === "session.mode") {
-            if (!["one", "cothink"].includes(args.mode))
-              throw Error("模式无效");
-            saveSessionMode(target, args.mode === "one");
           }
           if (name === "session.team") {
             const config = loadConfig(home),
@@ -2046,7 +1969,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           return readFileSync(path, "utf8")
             .split("\n")
             .filter(Boolean)
-            .map((line) => JSON.parse(line));
+            .map(line => ({...JSON.parse(line),processSessionFile:path}));
         } catch {
           return [];
         }
@@ -2054,17 +1977,34 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       const p = projectGuiTask(t.record, t.requests(), entries);
       p.finalText=finalGuiText(t.record,t.requests(),home);p.proposal=t.record.proposal;p.proposalRef=t.record.proposalRef;p.flow=t.record.flow;
       if(t.record.flow==='unified'){
-        const delivered=t.record.deliveryRef?resolveDelivery(home,t.record):[];
-        const ids=[...new Set([...(t.record.projectOperation?.childTaskIds??[]),...delivered.map(x=>x.record.id)])];
-        p.executionTasks=ids.map(childId=>{
-          const child=readTask(home,childId),inherited=delivered.some(x=>x.record.id===childId&&x.relation==='inherited');
-          if(!inherited&&(child.rootTaskId!==t.record.id||child.project?.commandId!==t.record.projectOperation.commandId))throw Error('执行来源归属不符');
-          const childEntries=[...new Set(child.stages.map(s=>s.sessionFile).filter(Boolean))].flatMap(path=>{try{return readFileSync(path,'utf8').split('\n').filter(Boolean).map(JSON.parse);}catch{return [];}});
-          return {...projectGuiTask(child,readRequests(home,child),childEntries),relation:inherited?'inherited':'owned',rootTaskId:child.rootTaskId,stepId:child.project.stepId};
+        const delivery=guiDeliverySummary(home,t.record);
+        p.status=delivery.status;p.error=delivery.error;
+        if(delivery.visualSource){
+          const visual=delivery.visualSource;
+          let requests=[];
+          try { requests=readRequests(home,visual); } catch { /* Retain screenshot metadata when its request cannot be read. */ }
+          const projected=projectGuiTask(visual,requests,[],{deliveryVersion:t.record.deliveryRef?.version});
+          p.deliveryVisual={id:visual.id,work:projected.work};
+        }
+        p.resultRevision=guiResultRevision({...t.record,status:p.status,error:p.error},p.finalText);
+        let owned=[];
+        const unavailable=error=>{p.executionError="执行来源尚不能核验："+error.message;};
+        try {owned=resolveOwnedTasks(home,t.record,unavailable);} catch(error){unavailable(error);}
+        const sources=new Map([...owned.map(record=>({record,relation:'owned'})),...delivery.sources].map(source=>[source.record.id,source]));
+        p.executionTasks=[...sources.values()].map(({record:child,relation})=>{
+          const childEntries=[...new Set(child.stages.map(s=>s.sessionFile).filter(Boolean))].flatMap(path=>{try{return readFileSync(path,'utf8').split('\n').filter(Boolean).map(line=>({...JSON.parse(line),processSessionFile:path}));}catch{return [];}});
+          try {return {...projectGuiTask(child,readRequests(home,child),childEntries,{deliveryVersion:t.record.deliveryRef?.version??null}),relation,rootTaskId:child.rootTaskId,stepId:child.project.stepId};}
+          catch(error){return {...projectGuiTask(child,[],childEntries,{deliveryVersion:null}),relation,rootTaskId:child.rootTaskId,stepId:child.project.stepId,error:"执行请求来源尚不能核验："+error.message};}
         });
+        if (t.record.processCheck) p.processCheck = projectGuiProcessCheck(t.record, [
+          ...p.messages, ...p.executionTasks.filter(child => child.relation === "owned").flatMap(child => child.messages),
+        ]);
       }
 
-      if(t.record.flow==="unified")p.usage=rootUsage(home,t.record);
+      if(t.record.flow==="unified") {
+        try { p.usage=rootUsage(home,t.record); }
+        catch(error) { p.usage=null;p.executionError??="执行用量尚不能核验："+error.message; }
+      }
       if (t.record.flow!=="unified" && active?.taskId === id && live.has(id)) p.usage = t.usage();
       return p;
     }),

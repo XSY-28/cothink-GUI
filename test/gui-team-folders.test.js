@@ -4,7 +4,7 @@ import {randomUUID} from "node:crypto";
 import {existsSync,mkdirSync,mkdtempSync,readFileSync,realpathSync,renameSync,rmSync,writeFileSync} from "node:fs";
 import {dirname,join} from "node:path";
 import {tmpdir} from "node:os";
-import {controller,finished,teamId} from "./helpers/gui-controller-fixture.js";
+import {controller,finished,prepareSubmit,teamId} from "./helpers/gui-controller-fixture.js";
 import {execution} from "./helpers/agent-sync-fixture.js";
 import {fixture} from "./helpers/pi-fixture.js";
 import {createConversationFolder,placeConversationDelivery,requireConversationFileWork} from "../src/gui-work.js";
@@ -15,7 +15,12 @@ test("a Team owns one folder per conversation and accepted work lands in its own
   const folder=realpathSync(mkdtempSync(join(tmpdir(),"cothink-team-folders-")));
   t.after(()=>rmSync(folder,{recursive:true,force:true}));
   writeFileSync(join(folder,"keep.txt"),"Team parent");
-  const f=await fixture(t,(_,n)=>[
+  let pendingPlan=false;
+  const f=await fixture(t,(_,n)=>pendingPlan?tool("start_work",{action:"start",reason:"deliver pending file",plan:{
+    goal:"Create pending.txt",scope:["pending.txt"],deliverables:["pending.txt"],checks:[
+      {command:"node",args:["-e","require('fs').accessSync('pending.txt')"]},
+    ],
+  }}):[
     tool("start_work",{action:"start",reason:"deliver file",plan:{goal:"Create index.html",scope:["index.html"],deliverables:["index.html"],checks:[
       {command:"node",args:["-e","require('fs').accessSync('index.html')"]},
     ]}}),
@@ -32,10 +37,11 @@ test("a Team owns one folder per conversation and accepted work lands in its own
   assert.notEqual(a.project,b.project);
   assert.ok(existsSync(a.project)&&existsSync(b.project));
   assert.equal(f.calls.length,0);
-  const started=await c.action("task.submit",{sessionId:a.id,input:"请生成 index.html，不允许联网。",protocolVersion:1,submissionId:"folder-proposal"});
+  const started=await c.action("task.submit",await prepareSubmit(c,{sessionId:a.id,input:"请生成 index.html，不允许联网。",protocolVersion:1,submissionId:"folder-proposal"}));
   const proposal=await finished(c,started.taskId);
   assert.ok(proposal.proposalRef,proposal.error);
-  const confirmed=await c.action("task.confirmWork",{sessionId:a.id,protocolVersion:1,submissionId:"folder-confirm",proposalRef:proposal.proposalRef});
+  const confirmArgs={sessionId:a.id,protocolVersion:1,submissionId:"folder-confirm",proposalRef:proposal.proposalRef};
+  const confirmed=await c.action("task.confirmWork",confirmArgs);
   const result=await finished(c,confirmed.taskId);
   assert.equal(result.status,"completed",result.error);
   assert.equal(readFileSync(join(a.project,"index.html"),"utf8"),"<h1>本地成果</h1>\n");
@@ -44,11 +50,36 @@ test("a Team owns one folder per conversation and accepted work lands in its own
   assert.equal(readFileSync(join(folder,"keep.txt"),"utf8"),"Team parent");
   const turn=(await c.session(a.id)).turns.find(item=>item.taskId===confirmed.taskId);
   assert.ok(turn?.canFork);
+  assert.equal((await c.sessions({workspaceId})).items.length,2);
+
+  pendingPlan=true;
+  const pending=await c.action("task.submit",await prepareSubmit(c,{sessionId:b.id,input:"请生成 pending.txt。"}));
+  const pendingProposal=await finished(c,pending.taskId);
+  assert.ok(pendingProposal.proposalRef,pendingProposal.error);
+  const pendingArgs={sessionId:b.id,protocolVersion:1,submissionId:"archived-confirm",proposalRef:pendingProposal.proposalRef};
+  const sourcePath=join(f.home,"tasks",pending.taskId+".json");
+  const before=readFileSync(sourcePath),calls=f.calls.length;
+  const currentB=await c.session(b.id);
+  const archivedB=await c.action("session.archive",{sessionId:b.id,expectedRevision:currentB.navigation.revision,archived:true});
+  await assert.rejects(c.action("task.confirmWork",pendingArgs),{code:"SESSION_STATE_UNAVAILABLE"});
+  assert.ok(readFileSync(sourcePath).equals(before),"an archived conversation cannot reserve a confirmation");
+  await c.action("session.archive",{sessionId:b.id,expectedRevision:archivedB.navigation.revision,archived:false});
+
   const moved=folder+"-moved";
   t.after(()=>rmSync(moved,{recursive:true,force:true}));
   renameSync(folder,moved);
+  await assert.rejects(c.action("task.confirmWork",pendingArgs),{code:"WORKSPACE_UNAVAILABLE"});
+  assert.ok(readFileSync(sourcePath).equals(before),"an unavailable conversation folder cannot reserve a confirmation");
   await assert.rejects(c.action("session.fork",{sessionId:a.id,taskId:turn.taskId}));
-  assert.equal((await c.sessions({workspaceId})).items.length,2);
+  const currentA=await c.session(a.id);
+  await c.action("session.archive",{sessionId:a.id,expectedRevision:currentA.navigation.revision,archived:true});
+  const consumedSource=join(f.home,"tasks",started.taskId+".json");
+  const savedReceipt=readFileSync(consumedSource);
+  assert.deepEqual(await c.action("task.confirmWork",confirmArgs),confirmed,"the consumed receipt is readable after archive and folder loss");
+  await assert.rejects(c.action("task.confirmWork",{...confirmArgs,sessionId:b.id}),/提议不属于/);
+  await assert.rejects(c.action("task.confirmWork",{...confirmArgs,proposalRef:{...confirmArgs.proposalRef,planDigest:"0".repeat(64)}}),{code:"PROPOSAL_SOURCE"});
+  assert.ok(readFileSync(consumedSource).equals(savedReceipt),"the receipt query must not rewrite the original proposal");
+  assert.equal(f.calls.length,calls);
 });
 
 test("publication does not overwrite a local file with the same name, even if Git ignores it",async t=>{

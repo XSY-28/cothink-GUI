@@ -1,4 +1,4 @@
-import {defaultTurnOptions,editorTurnInput} from "../../src/gui-turn-options.js";
+import {defaultTurnOptions,editorTurnInput,GUI_INPUT_VERSION,retiredReviewOption} from "../../src/gui-turn-options.js";
 import {materialType} from "../../src/gui-material-types.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createDraftBook, readGuiStorage, writeGuiStorage } from "./view.js";
@@ -6,6 +6,7 @@ import { saveWorkspaceChange } from "./api.js";
 import { useSessionSearch } from "./features/navigation/useSessionSearch.js";
 
 const HOME = "@home";
+const inputVersion = Number(GUI_INPUT_VERSION);
 const emptyBootstrap = { teams: [], models: [], providers: [], sessions: [], work: {}, active: null };
 function readPending() {
   const value = readGuiStorage("cothink.pending");
@@ -470,11 +471,11 @@ export function useGuiWorkspace(api) {
       return {...current,workspaces:prior ? current.workspaces.map(row=>row.id===id ? value : row) : [...current.workspaces,value]};
     });
     if (open && request === selectionRequest.current) {
-      const homeText=!selected.current && workspaceRef.current===null ? book.current.snapshot(HOME).text : null;
-      selectWorkspaceId(id);
       try {
-        if (homeText) await flushDraft(HOME);
-        await createSession({workspaceId:id,...(homeText&&saved.project?{handoff:{project:saved.project,text:homeText}}:{})});
+        if (!selected.current && workspaceRef.current===null && book.current.snapshot(HOME).editId)
+          await transferHome({workspaceId:id});
+        else
+          await createSession({workspaceId:id});
       } catch (error) {
         const message = `Team 已保存。第一条对话未能确认：${error.message}`;
         setError(message);
@@ -645,7 +646,7 @@ export function useGuiWorkspace(api) {
   }, [api, refresh]);
 
   async function queryCreation(id) {
-    if(bootstrap.protocol?.guiInput!==2){
+    if(!(bootstrap.protocol?.guiInput>=2)){
       const value=await api.read("session",{id}).catch(()=>null);
       return value&&!value.selectionError?{status:"confirmed",session:value}:{status:"unknown"};
     }
@@ -658,12 +659,9 @@ export function useGuiWorkspace(api) {
     return ()=>{if(creationIntent.current===intent){creationIntent.current=null;setCreating(null);}};
   }
   async function createSession(options = {}) {
-    const project=Object.hasOwn(options,"project") ? options.project : projectRef.current;
-    const modern=Object.hasOwn(options,"workspaceId");
-    if (workspaceRef.current === undefined || (modern && options.workspaceId === undefined))
-      throw Error("新建对话前，请先在左栏选择一个 Team 或通用对话。");
+    if (!options.workspaceId) throw Error("新建对话前，请先在左栏选择一个 Team。");
     if(submissionBusy.current || pendingRef.current) throw Error("先确认正在提交的任务。");
-    const createScope=JSON.stringify(modern ? ["workspace",options.workspaceId] : ["project",project]);
+    const createScope=JSON.stringify(["workspace",options.workspaceId]);
     if (creatingSessions.current.has(createScope)) throw Error("正在确认此处的前一次创建，请稍候。");
     const unknown=unknownCreations.current.get(createScope);
     creatingSessions.current.add(createScope);
@@ -680,21 +678,14 @@ export function useGuiWorkspace(api) {
         }
         value=result.session;
         if(result.status!=="confirmed")throw Error(`创建结果尚未确认，请按原会话 ID ${sessionId} 查询。不会自动重建。`);
-        const original=unknown.options?.handoff, requested=options.handoff;
-        if ((original || requested) && (original?.project!==requested?.project ||
-            original?.text!==requested?.text || requested?.project!==(value.teamDirectory??value.project))) {
-          rememberCreation(createScope,null);setCreationNotice(null);
-          await refresh();
-          throw Error("上一次新建已保存，可在对话列表打开。目录或草稿已变化，请重新确认本次新建。");
-        }
+        if (value.workspaceId!==options.workspaceId) throw Error("原会话不属于所选 Team，未继续。");
       }else{
         const flushed=source&&source===selected.current&&options.sourceLeafId===undefined?await flushDraft(source):null;
         const leaf=options.sourceLeafId??flushed?.branchAnchor??book.current.snapshot(source).branchAnchor??sourceLeaf;
         rememberCreation(createScope,{sessionId,options});
         try {
-          value=await api.action("session.create",{sessionId,...(modern ? {workspaceId:options.workspaceId} : {project}),
-            ...(options.handoff?{handoff:options.handoff}:{}),
-            ...(modern&&source&&typeof leaf==="string"?{sourceSessionId:source,sourceLeafId:leaf}:{})});
+          value=await api.action("session.create",{sessionId,workspaceId:options.workspaceId,
+            ...(source&&typeof leaf==="string"?{sourceSessionId:source,sourceLeafId:leaf}:{})});
           if(value?.selectionError)throw Object.assign(Error(value.selectionError),{unknown:true});
         }catch(error){
           if(!error.unknown && !["SESSION_STATE_UNAVAILABLE","SESSION_STATE_CONFLICT"].includes(error.code)){
@@ -719,20 +710,21 @@ export function useGuiWorkspace(api) {
       return null;
     }finally{creatingSessions.current.delete(createScope);end();}
   }
-  function changeHomeReservation(action,sessionId){
+  function changeHomeReservation(action,sessionId,workspaceId){
     const operation=draftQueue.current.catch(()=>{}).then(async()=>{
       const row=home.current;
       if(!row||conflicts.current.has(HOME))throw Error("首页保存稿需要先核对。");
       let next;
       try{
         next=await api.action(action,{draftId:row.draftId,expectedRevision:row.revision,sessionId,
-          ...(action==="home.reserve"?{workspaceId:null}:{})});
+          ...(action==="home.reserve"?{workspaceId}:{})});
       }catch(error){
         if(error.code==="DRAFT_CONFLICT")await markHomeDraftConflict();
         if(!error.unknown)throw error;
         const fresh=(await readBootstrap().catch(()=>null))?.homeDraft;
         if(fresh?.draftId!==row.draftId||fresh.editor.editId!==row.editor.editId||
-          fresh.pendingCreateSessionId!==(action==="home.reserve"?sessionId:null))throw error;
+          fresh.pendingCreateSessionId!==(action==="home.reserve"?sessionId:null)||
+          fresh.targetWorkspaceId!==(action==="home.reserve"?workspaceId:null))throw error;
         next=fresh;
       }
       setHome(next);
@@ -742,72 +734,71 @@ export function useGuiWorkspace(api) {
     draftQueue.current=operation;
     return operation;
   }
-  async function transferHome({send=false} = {}) {
+  async function transferHome({workspaceId,recover=false} = {}) {
     if(selected.current || workspaceRef.current!==null || creationBusy())return null;
-    if(bootstrap.protocol?.guiInput!==2||bootstrap.homeDraftError)throw Error(bootstrap.homeDraftError??"需要新版界面才能保存首页草稿。");
+    if(bootstrap.protocol?.guiInput!==inputVersion||bootstrap.homeDraftError)throw Error(bootstrap.homeDraftError??"需要新版界面才能保存首页草稿。");
     const request=++selectionRequest.current,end=beginCreate(request);
-    let received;
     try {
-      const desired=book.current.snapshot(HOME).editId;
+      if(materialBatches.current.has(HOME)||materialRowsFor(HOME).some(row=>row.status!=="ready"))
+        throw Error("首页草稿仍保留，请完成、核对或移除未就绪材料，再转移。");
       await flushDraft(HOME);
       let row=home.current;
       if(!row)return null;
-      let sessionId=row.pendingCreateSessionId;
+      let sessionId=row.pendingCreateSessionId, received;
       if(sessionId){
+        if(!recover)throw Error("首页已有待确认创建。请先查询原会话。");
         const status=await queryCreation(sessionId);
-        if(status.status!=="confirmed"){
-          if(status.status==="absent"){
-            await changeHomeReservation("home.clearReservation",sessionId);
-            throw Error("已查询原创建：没有保存新对话。首页草稿保留，可再次发送。");
-          }
-          throw Error("创建结果尚未确认。请查询原会话；不会自动重建或发送。");
+        if(status.status==="absent" || status.status==="confirmed" && row.targetWorkspaceId===null){
+          await changeHomeReservation("home.clearReservation",sessionId);
+          throw Error(status.status==="absent"
+            ? "原会话未保存。首页草稿仍保留，可重新选择 Team。"
+            : "旧会话仍可查阅。首页草稿保留，请选择有效 Team。");
         }
+        if(status.status!=="confirmed")
+          throw Error("创建结果尚未确认。请查询原会话；不会自动重建或发送。");
         received=status.session;
-        send=false;
-      }else if(send){
+      }else if(!recover && workspaceId){
         sessionId=crypto.randomUUID();
-        row=await changeHomeReservation("home.reserve",sessionId);
+        row=await changeHomeReservation("home.reserve",sessionId,workspaceId);
         try {
-          received=await api.action("session.create",{sessionId,workspaceId:null,homeDraftId:row.draftId});
+          received=await api.action("session.create",{sessionId,workspaceId,homeDraftId:row.draftId});
           if(received?.selectionError)throw Object.assign(Error(received.selectionError),{unknown:true});
         } catch(error){
           if(error.unknown || ["SESSION_STATE_UNAVAILABLE","SESSION_STATE_CONFLICT"].includes(error.code))
             throw Error("创建结果尚未确认。请查询原会话；不会自动重建或发送。");
-          await flushDraft(HOME);
           await changeHomeReservation("home.clearReservation",sessionId);
           throw error;
         }
       }
       if(!received)return null;
-      // A newer edit during creation must be saved to the same destination, but cannot be sent automatically.
-      let saved;
-      clearTimeout(draftTimers.current.get(HOME));draftTimers.current.delete(HOME);
-      await flushDraft(HOME);
+      if(received.workspaceId!==row.targetWorkspaceId)
+        throw Error("原会话不属于保留的目标 Team；首页草稿仍保留。");
       const operation=draftQueue.current.catch(()=>{}).then(async()=>{
-        row=home.current;
+        if(conflicts.current.has(HOME)||home.current?.revision!==row.revision||
+          book.current.snapshot(HOME).editId!==row.editor.editId)
+          throw Error("首页草稿已有新编辑；原稿保留，请核对后再转移。");
+        let saved;
         try {
           saved=await api.action("home.transfer",{draftId:row.draftId,expectedRevision:row.revision,sessionId});
         }catch(error){
           if(error.code==="DRAFT_CONFLICT")await markHomeDraftConflict();
           if(!error.unknown)throw error;
           const [fresh,result]=await Promise.all([readBootstrap(),queryCreation(sessionId)]);
-          if(fresh.homeDraft||fresh.homeDraftError||result.status!=="confirmed"||result.session.editor?.editId!==row.editor.editId)throw error;
-          saved=result.session;send=false;
+          if(fresh.homeDraft||fresh.homeDraftError||result.status!=="confirmed"||
+            result.session.workspaceId!==row.targetWorkspaceId||result.session.editor?.editId!==row.editor.editId)throw error;
+          saved=result.session;
         }
-        const newest=book.current.snapshot(HOME);
+        if(saved.id!==sessionId||saved.workspaceId!==row.targetWorkspaceId||saved.editor?.editId!==row.editor.editId)
+          throw Error("新会话草稿尚未核对，请查询原会话。");
         setHome(null);book.current.restore(HOME,{});
         book.current.load(sessionId,saved.editor,saved.draftRevision,saved.branchAnchor);
-        if(newest.editId!==saved.editor.editId){
-          const {text,workRequest,selectionId,turnOptions,materials}=newest;
-          book.current.edit(sessionId,{text,workRequest,selectionId,turnOptions,materials});
-          scheduleDraft(sessionId);send=false;
-        }
+        return saved;
       });
       draftQueue.current=operation;
-      await operation;
+      const saved=await operation;
       if(request!==selectionRequest.current)return null;
       await openSession(sessionId,undefined,request,saved);
-      return {session:saved,send:send&&desired===saved.editor.editId&&!!saved.team};
+      return saved;
     } finally{end();}
   }
   function showHome(){
@@ -818,7 +809,7 @@ export function useGuiWorkspace(api) {
     setCurrentProject(null);
   }
   async function recoverCreation(){
-    if(!selected.current&&home.current?.pendingCreateSessionId)return transferHome();
+    if(!selected.current&&home.current?.pendingCreateSessionId)return transferHome({recover:true});
     if(creationNotice)return createSession(creationNotice.options);
   }
   async function forkSession({sessionId = selected.current, taskId} = {}) {
@@ -839,7 +830,6 @@ export function useGuiWorkspace(api) {
   }
   async function changeSession(name, args = {}, sessionId = selected.current) {
     if (!sessionId) return;
-    if (name === "session.mode" && (submissionBusy.current || pendingRef.current?.sessionId === sessionId)) return;
     const value = await api.action(name, {...args, sessionId});
     if (selected.current === sessionId) setSession(rememberView(value));
     await refresh();
@@ -1009,7 +999,7 @@ export function useGuiWorkspace(api) {
       ref=listed.items.find(item=>item.ref.path===path)?.ref;
       if(!ref)return null;
     }
-    const result=await api.file(ref,{purpose:"source"});
+    const result=await api.file(ref,{purpose:"preview"});
     return /^image\/(png|jpeg|gif|webp)$/.test(result.mediaType)?new Blob([result.bytes],{type:result.mediaType}):null;
   }
   async function listProjectMaterials(args){
@@ -1062,11 +1052,7 @@ export function useGuiWorkspace(api) {
       if(localDestination(command)){setDraft(HOME,"");return {local:localDestination(command)};}
       if(command&&!command.startsWith("skill:")){setError(["one","cothink","project"].includes(command)?"统一会话会按任务选择路径；旧模式命令已移除。":"未知本地命令。请使用 /help。");return;}
       if(!snapshot.text?.trim()&&!snapshot.materials?.length)return;
-      if(materialBatches.current.has(HOME)||materialRowsFor(HOME).some(row=>row.status!=="ready")){setError("请完成、核对或移除未就绪材料。");return;}
-      try{
-        const result=await transferHome({send:true});
-        if(result?.send)return submitSaved(result.session);
-      }catch(error){setError(error.message);}
+      setError("请先选择或创建 Team；首页草稿保留。");
       return;
     }
     return submitSaved(session,{sessionId,input});
@@ -1082,6 +1068,7 @@ export function useGuiWorkspace(api) {
     if(!snapshot.text?.trim()&&!snapshot.materials?.length)return;
     const slash=localCommand(snapshot.text);
     if(localDestination(slash)){setDraft(sessionId,"");return {local:localDestination(slash)};}
+    if(retiredReviewOption(snapshot.turnOptions)){setError("请先在草稿中确认采用现行规则。");return;}
     if(materialBatches.current.has(sessionId)||materialRowsFor(sessionId,session).some(row=>row.status!=="ready")){setError("请完成、核对或移除未就绪材料。");return;}
     if (connection === "reconnecting" || bootstrap.shutdown?.requested) {setError("宿主未连接或正在退出；草稿保留，不发送新任务。");return;}
     if (bootstrap.active || bootstrap.extensionUI?.command || submissionBusy.current || pendingRef.current || !session.team) return;
@@ -1259,7 +1246,7 @@ export function useGuiWorkspace(api) {
   }
   return {
     state: {bootstrap, readingPosition, readingError, stopping:stopStatus && stopStatus.taskId === bootstrap.active?.taskId ? stopStatus : null, sessions, nextCursor, navigationQuery, currentProject, workspaceId, workspaceMatches, navigationLoading, navigationError, navigationNotice, selectedSessionId, session, task, tasksById, draft, workRequest:workChoices[homeEditorId(selectedSessionId)]?.request ?? null,turnOptions:workChoices[homeEditorId(selectedSessionId)]?.turnOptions??null, draftConflict:!!draftConflicts[homeEditorId(selectedSessionId)], pending,
-      homeDraft, homeReady:ready&&!session&&!selectedSessionId&&workspaceId===null&&!navigationLoading&&bootstrap.protocol?.guiInput===2&&!bootstrap.homeDraftError,
+      homeDraft, homeReady:ready&&!session&&!selectedSessionId&&workspaceId===null&&!navigationLoading&&bootstrap.protocol?.guiInput===inputVersion&&!bootstrap.homeDraftError,
       creating:creating?.request===selectionRequest.current,creationNotice,
       materials:materialRowsFor(homeEditorId(selectedSessionId)),materialCapabilities:bootstrap.materialCapabilities,
       editorKey:selectedSessionId??homeDraft?.draftId??HOME,selectedSkill:/^\/skill:([^\s]+)/.exec(draft)?.[1]??null,
@@ -1270,7 +1257,7 @@ export function useGuiWorkspace(api) {
       bindWorkspace: (workspace,path) => manageWorkspace("workspace.rebind",{workspaceId:workspace.id,expectedRevision:workspace.revision,path,operationId:crypto.randomUUID()}),
       queryWorkspaceRebind: args => api.action("workspace.rebind.query",args),
       queryWorkspaceCreation: async id => (await readWorkspaces()).find(row=>row.id===id),
-      clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, recoverCreation, showHome, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, recoverSubmission, abandonSubmission,
+      clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, recoverCreation, transferHome, showHome, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, recoverSubmission, abandonSubmission,
       selectTask, changeSession, recordView, refresh, cancelTask, acknowledgeNotes, setWorkRequest,setTurnOptions, refreshTeams,
       saveTeam: args => manageTeam("team.save", args),
       removeTeam: args => manageTeam("team.remove", args),

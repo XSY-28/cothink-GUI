@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 import { createApi } from "../gui/src/api.js";
-import { controller, finished, load } from "./helpers/gui-controller-fixture.js";
+import { editorTurnInput } from "../src/gui-turn-options.js";
+import { controller, finished, fixtureConversation, load } from "./helpers/gui-controller-fixture.js";
 import { fixture } from "./helpers/pi-fixture.js";
 
 const { startGuiServer } = await load("src/gui-server.js");
@@ -10,11 +11,16 @@ const editor = page => page.getByRole("textbox", { name: "输入问题" });
 const action = (request, name) => request.url().endsWith("/api/action") &&
   request.method() === "POST" && request.postDataJSON()?.action === name;
 
-async function setup(t, reply) {
+async function setup(t, reply, initialDraft) {
   const model = await fixture(t, reply);
   const c = await controller(t, model);
-  const room = await c.action("session.create", { sessionId: crypto.randomUUID(), workspaceId: null });
+  const room = await fixtureConversation(t, c);
   await c.action("session.name", { sessionId: room.id, title: "草稿恢复验收" });
+  if (initialDraft) {
+    const saved = await c.session(room.id);
+    await c.action("session.draft", {sessionId:room.id,editId:crypto.randomUUID(),workRequest:null,selectionId:null,
+      expectedDraftRevision:saved.draftRevision,branchAnchor:saved.branchAnchor,...initialDraft});
+  }
   const host = await startGuiServer({ controller: c, open: false });
   let hostOpen = true;
   const close = async () => { if (hostOpen) { hostOpen = false; await host.close(); } };
@@ -36,6 +42,40 @@ async function save(page, text) {
   await editor(page).fill(text);
   await saved;
 }
+
+test("an old review draft waits for acceptance and submits with its existing hard limits", async t => {
+  const message = "这条旧草稿还没有提交。";
+  const {page,model} = await setup(t,undefined,{text:message,turnOptions:{
+    id:crypto.randomUUID(),review:true,delegate:"review-only",readOnly:true,maxCalls:"1",
+  }});
+  const send = page.getByRole("button",{name:"发送",exact:true});
+  const accept = page.getByRole("button",{name:"采用现行规则",exact:true});
+  assert.equal(await editor(page).inputValue(),message);
+  assert.equal(await send.isDisabled(),true);
+  await accept.waitFor();
+  await editor(page).press("Enter");
+  assert.equal(model.calls.length,0);
+  const saved = page.waitForResponse(r=>action(r.request(),"session.draft") && r.ok());
+  await accept.click();
+  const body = await (await saved).json();
+  assert.equal(body.editor.text,message);
+  assert.equal(body.editor.turnOptions.delegate,false);
+  assert.equal(body.editor.turnOptions.readOnly,true);
+  assert.equal(body.editor.turnOptions.maxCalls,"1");
+  assert.equal(body.editor.turnOptions.review,false);
+  await page.reload();
+  await editor(page).waitFor();
+  assert.equal(await accept.count(),0,"the acknowledgement survives reload");
+  const sent = page.waitForRequest(r=>action(r,"task.submit"));
+  await send.click();
+  const args=(await sent).postDataJSON().args;
+  assert.equal(args.editorEditId,body.editor.editId);
+  assert.equal(args.protocolVersion,1);
+  assert.deepEqual(args.constraints,{readOnly:true,allowedSubtasks:[]});
+  assert.deepEqual(args.budget,{maxCalls:1});
+  await page.getByText("fixture answer",{exact:true}).waitFor();
+  assert.equal(model.calls.length,1);
+});
 
 test("a received submission is recovered on a different desktop origin", async t => {
   const { model, host, close, page, visit } = await setup(t);
@@ -66,11 +106,11 @@ test("a received submission is recovered on a different desktop origin", async t
 
 test("a different submission ID cannot send the same saved editor twice", async t => {
   const model = await fixture(t), c = await controller(t, model);
-  const room = await c.action("session.create", { sessionId: crypto.randomUUID(), workspaceId: null });
+  const room = await fixtureConversation(t, c);
   const input="同一个已保存的编辑快照只发送一次。", editorEditId=crypto.randomUUID();
   await c.action("session.draft", {sessionId:room.id,text:input,editId:editorEditId,
     expectedDraftRevision:room.draftRevision,branchAnchor:room.branchAnchor,workRequest:null,selectionId:null});
-  const submit={sessionId:room.id,input,editorEditId,protocolVersion:1,submissionId:crypto.randomUUID()};
+  const submit={sessionId:room.id,input,editorEditId,protocolVersion:1,submissionId:crypto.randomUUID(),...editorTurnInput(null)};
   const original=await c.action("task.submit",submit);
   await finished(c,original.taskId);
   const retry={...submit,submissionId:crypto.randomUUID()};

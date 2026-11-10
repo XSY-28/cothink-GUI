@@ -1,23 +1,11 @@
-import {createContextAccess,contextToolNames,contextState} from './context-management.js';
+import { buildConversationProjection, createContextAccess, contextState } from './context-management.js';
 import {assertCleanUnifiedStartup} from "./project-handoff.js";
 import { beforeHostExtensionImport, assertNoUnknownHandoff } from './project-handoff.js';
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join, resolve, isAbsolute, relative } from "node:path";
 import { createHash } from "node:crypto";
 import {pathToFileURL} from 'node:url';
-import { createProvider, envApiKeyAuth } from "@earendil-works/pi-ai";
-import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
-import { moonshotaiCnProvider } from "@earendil-works/pi-ai/providers/moonshotai-cn";
-import { moonshotaiProvider } from "@earendil-works/pi-ai/providers/moonshotai";
-import {
-  configureHttpDispatcher,
-  ModelRuntime,
-  SessionManager,
-  SettingsManager,
-  createAgentSessionServices,
-  createAgentSessionFromServices,
-} from "@earendil-works/pi-coding-agent";
+import { configureHttpDispatcher, SessionManager, SettingsManager, createAgentSessionServices, createAgentSessionFromServices } from "@earendil-works/pi-coding-agent";
 import { materialReference, materialText, prepareMaterialImages } from "./context.js";
 import { createRequestPolicy } from "./request-policy.js";
 import {
@@ -31,6 +19,9 @@ import { resolvePackageResources, localNames } from "./packages.js";
 import {Type} from 'typebox';
 import {readFrozenSkill,taskSkillDirectory} from './skill-resources.js';
 import {capabilitySnapshot} from './builtin-skills.js';
+import { createModelRuntime } from "./pi-model-runtime.js";
+export { createModelRuntime, projectModelFacts, projectRoutingBudget } from "./pi-model-runtime.js";
+
 export const managedSettings = {
   retry: { enabled: false, provider: { maxRetries: 0, timeoutMs: 0 } },
   compaction: { enabled: false },
@@ -41,87 +32,6 @@ export const managedSettings = {
   fullscreenExitOutput: "resume-hint",
   fullscreenCopyOnSelect: true,
 };
-export async function createModelRuntime(home) {
-  const agentDir = join(home, "pi");
-  privateDirectory(agentDir);
-  const runtime = await ModelRuntime.create({
-    authPath: join(agentDir, "auth.json"),
-    modelsPath: join(agentDir, "models.json"),
-    allowModelNetwork: false,
-  });
-  // Pi's flag covers create() only; native UI refreshes must use the same pinned catalog.
-  const refresh = runtime.refresh.bind(runtime);
-  const managedProviders = new Set();
-  const builtinIds = new Set([...getBuiltinProviders(), "radius"]);
-  let registering = false, pending = Promise.resolve();
-  runtime.refresh = (options = {}) => {
-    // Pi registration invokes refresh synchronously in the background. The enclosing
-    // pass performs that refresh after all declarations are installed instead.
-    if (registering) return Promise.resolve({ aborted: false, errors: new Map() });
-    const run = pending.then(async () => {
-      registering = true;
-      try {
-        for (const id of managedProviders) runtime.unregisterProvider(id);
-        managedProviders.clear();
-      } finally { registering = false; }
-      // Reconcile the whole local config even when the UI requested one provider:
-      // deleted identities must disappear and newly imported identities must appear.
-      const first = await refresh({ ...options, providers: undefined, allowNetwork: false });
-      registering = true;
-      try { addModels(); } finally { registering = false; }
-      const last = await refresh({ ...options, allowNetwork: false });
-      return { aborted: first.aborted || last.aborted, errors: new Map([...first.errors, ...last.errors]) };
-    });
-    pending = run.catch(() => {});
-    return run;
-  };
-  function addModels() {
-    // Fixed additions use Pi's public provider API; credentials and models.json stay owned by Pi/the user.
-    for (const provider of runtime.getProviders()) {
-      let official = false;
-      try {
-        const url = new URL(provider.baseUrl);
-        official = url.protocol === "https:" &&
-          ["api.moonshot.cn", "api.moonshot.ai"].includes(url.hostname) &&
-          !url.port && !url.username && !url.password && !url.search && !url.hash &&
-          url.pathname.replace(/\/+$/, "") === "/v1";
-      } catch { /* Other providers keep their own model catalog. */ }
-      const moonshot = ["moonshotai-cn", "moonshotai"].includes(provider.id);
-      if (!moonshot && (!official || builtinIds.has(provider.id))) continue;
-      if (!provider.getModels().some((model) => model.api === "openai-completions")) continue;
-      // Never capture a composed provider: it can retain revoked user keys/headers after refresh.
-      const base = provider.id === "moonshotai-cn" ? moonshotaiCnProvider()
-        : provider.id === "moonshotai" ? moonshotaiProvider()
-          : createProvider({
-              id: provider.id, name: provider.name, baseUrl: provider.baseUrl, models: [],
-              auth: { apiKey: envApiKeyAuth("API key", []) }, api: openAICompletionsApi(),
-            });
-      const model = {
-        type: "chat", id: "kimi-k3.1-pro", name: "Kimi K3.1 Pro",
-        provider: provider.id, api: "openai-completions", baseUrl: base.baseUrl,
-        reasoning: true, input: ["text", "image"],
-        contextWindow: 1048576, maxTokens: 1048576,
-        thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
-        // Pi's zero-price sentinel leaves CoThink's catalog estimate null, never a claim of free usage.
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        compat: {
-          supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: true,
-          maxTokensField: "max_completion_tokens", supportsStrictMode: false,
-          thinkingFormat: "openai", requiresReasoningContentOnAssistantMessages: true,
-          supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true,
-        },
-      };
-      managedProviders.add(provider.id);
-      runtime.registerNativeProvider({
-        ...base,
-        getModels: () => [...base.getModels(), model],
-        getAllModels: () => [...(base.getAllModels?.() ?? base.getModels()), model],
-      });
-    }
-  }
-  await runtime.refresh({ allowNetwork: false });
-  return runtime;
-}
 export function secretValues(home) {
   const values = [];
   for (const name of ["auth.json", "models.json"]) {
@@ -207,16 +117,18 @@ export async function createRuntime({
   const mr = modelRuntime ?? (await createModelRuntime(home));
   await nativeContext?.bindSession?.(manager.getSessionId(),manager.getSessionFile(),{modelRuntime:mr,modelRef});
   const skillTools=projectManaged||useFrozenSkills?[{
-    name:'read_skill',label:'Read frozen skill',description:'Read a selected task-frozen skill body or reference on demand. No arbitrary files or new authority.',
+    name:'read_skill',label:'Read frozen skill',description:'Read a selected task-frozen skill body or reference. Use its name and either the directory’s advertised skill:<name>/<path> URI or a relative path within that same skill. Omit path for SKILL.md.',
     parameters:Type.Object({name:Type.String(),path:Type.Optional(Type.String()),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer())}),
-    execute:async(id,args)=>{if(!binding)throw problem('NO_TASK','No bound task');const {task,stage}=binding;writer.assertOwned();task.projectPolicy?.admit('read',{actor:stage.role});return {content:[{type:'text',text:JSON.stringify(readFrozenSkill(task,args,{actor:stage.role,stageId:stage.id,toolCallId:id}))}]};}
+    execute:async(id,args)=>{if(!binding)throw problem('NO_TASK','No bound task');const {task,stage}=binding;writer.assertOwned();if(binding.allowedSkills&&!binding.allowedSkills.includes(args.name))throw problem('SKILL_RESOURCE','Skill is outside this role’s frozen grant');task.projectPolicy?.admit('read',{actor:stage.role});return {content:[{type:'text',text:JSON.stringify(readFrozenSkill(task,args,{actor:stage.role,stageId:stage.id,toolCallId:id}))}]};}
   },{
     name:'get_capabilities',label:'Current capabilities',description:'Inspect host-confirmed skills, active tools, permissions and unavailable context features. This does not grant authority.',parameters:Type.Object({}),
     execute:async()=>{if(!binding)throw problem('NO_TASK','No bound task');return {content:[{type:'text',text:JSON.stringify(runtime.capabilities())}]};}
   }]:[];
   const contextTools=contextAccess?[
-    ['search_context',Type.Object({query:Type.Optional(Type.String()),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer())}),'search'],
-    ['read_context',Type.Object({ref:Type.Any(),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer())}),'read'],
+    ['search_context',Type.Object({query:Type.Optional(Type.String()),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer()),
+      purpose:Type.Optional(Type.String({description:'Use only when necessary to attribute work, verify evidence or explicitly continue it: attribution, evidence, continuation.'})),
+      taskId:Type.Optional(Type.String({description:'For process lookup, the relevant task ID from the current branch.'}))}),'search'],
+    ['read_context',Type.Object({ref:Type.Any(),purpose:Type.Optional(Type.String({description:'Supply the same purpose when reading a process reference.'})),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer())}),'read'],
     ['save_context_note',Type.Object({text:Type.String(),sources:Type.Array(Type.Any())}),'save'],
   ].map(([name,parameters,method])=>({name,label:name,description:'Current branch context only. Host references required; notes are derived material, never authorization.',parameters,
     execute:async(id,args)=>{runtime.assertOwned();if(!binding||binding.task.signal.aborted||binding.task.record.status!=='running')throw problem('TASK_ENDED','Context tools require a live task');return {content:[{type:'text',text:JSON.stringify(contextReader[method](args))}]};}})):[];
@@ -415,7 +327,7 @@ export async function createRuntime({
         .filter((d) => d.type === "error")
         .map((d) => d.message),
     ];
-    const routingNames=["start_work","request_review","read_project_context"];
+    const routingNames=["start_work","read_project_context","delegate","collect","feedback","pause_member"];
     const hostRoutingTools = () => {
       const owners = services.resourceLoader.getExtensions().extensions
         .filter((extension) => routingNames.some(name=>extension.tools.has(name)));
@@ -520,6 +432,13 @@ export async function createRuntime({
       return id;
     };
     const session = result.session;
+    const originalProjection=manager.buildSessionProjection;
+    const conversationProjection=function(...args){
+      const projection=originalProjection.apply(this,args),stage=binding?.stage;
+      if(binding?.task.record.flow!=='unified'||stage.role!=='main'||!['draft','context-summary'].includes(stage.phase))return projection;
+      return buildConversationProjection(home,manager,{projection,...(stage.phase==='draft'?{liveFrom:binding.contextLeaf}:{})});
+    };
+    if(contextAccess)manager.buildSessionProjection=conversationProjection;
     const hostSendCustomMessage=session.sendCustomMessage.bind(session),nativeSendUserMessage=session.sendUserMessage.bind(session);
     const unmanagedGeneration=()=>problem("UNADAPTED_PLUGIN","UNADAPTED_PLUGIN: Plugin-triggered model work requires a running managed work task; local commands and pure answers cannot launch it.");
     session.sendUserMessage=(...args)=>nativeEnabled()?nativeSendUserMessage(...args):Promise.reject(unmanagedGeneration());
@@ -538,7 +457,7 @@ export async function createRuntime({
     const finishTurn = session.agent.finishTurn;
     session.agent.finishTurn = async (...args) => {
       const decision = await finishTurn?.(...args);
-      return stopAfterTurn ? { action: "end" } : decision;
+      return stopAfterTurn||binding?.stage.phase==="manager-final" ? { action: "end" } : decision;
     };
     const originalDispose = session.dispose.bind(session);
     session.dispose = () => {
@@ -664,7 +583,7 @@ export async function createRuntime({
         const tools=active?session.getActiveToolNames():[];
         const readOnly=!active||!!record?.constraints?.readOnly||!authority||!!authority.readOnly||['review','visual-review','worker-prepare','worker-conflict-resolution','project-effect'].includes(phase);
         const readable=active&&(authority?!!(authority.readScope?.length||authority.scope?.length):!!record?.readAuthorization);
-        return {...capabilitySnapshot({skills:task?taskSkillDirectory(task):[],tools,phase,readOnly,
+        return {...capabilitySnapshot({skills:task?taskSkillDirectory(task).filter(skill=>!binding.allowedSkills||binding.allowedSkills.includes(skill.name)):[],tools,phase,readOnly,
           hasProject:!!(record?.workspace?.project||record?.project),readAuthorized:readable&&tools.some(n=>['read','grep','find','ls','read_project_context'].includes(n)),writeAuthorized:!!authority?.scope?.length,scriptAuthorized:!!authority&&!authority.readOnly,executionConfigured:!!(record?.work?.execution??record?.frozenConfig?.work?.execution),context:contextAccess?{...contextState(manager),sourceLeaf:record?.branchId??manager.getLeafId()}:null}),
           active,source:binding?{taskId:record.id,stageId:binding.stage.id,role:binding.stage.role}:null};
       },
@@ -688,10 +607,11 @@ export async function createRuntime({
         if (binding) binding.task.runtimes.delete(runtime);
         binding = undefined;
       },
-      bindTask(task, stage) {
+      bindTask(task, stage, {materials, beforeDispatch, allowedSkills} = {}) {
         if (task.projectPolicy) {
           const expected = stage.phase === "project-effect" ? "project-effect-" + stage.id
             : stage.phase === "visual-review" ? "visual-review-" + task.record.id + "-" + stage.id
+            : stage.phase === "process-check" ? "process-check-" + task.record.rootTaskId
             : stage.role === "main" ? "leader-" + task.record.id
             : stage.role.replace(/^member:/, "member-");
           if (role !== expected) throw problem("PROJECT_STALE", "Pi runtime does not own this project role");
@@ -700,11 +620,15 @@ export async function createRuntime({
         binding = {
           task,
           stage,
+          materials,
+          allowedSkills,
+          beforeDispatch,
           modelRef: stage.modelRef,
           maxOutputTokens,
           timeout,
           error: null,
           assertOwned: () => runtime.assertOwned(),
+          contextLeaf:manager.getLeafId(),
         };
         task.runtimes.add(runtime);
         enforce();
@@ -745,6 +669,7 @@ export async function createRuntime({
         } else if(task.record.flow==='unified'||task.record.rootTaskId) options.expandPromptTemplates=false;
         stopAfterTurn = false;
         await runtime.selectModel(stage.modelRef);
+        if(contextAccess&&task.record.flow==='unified'&&stage.phase==='draft')session.refreshContext();
         if(inputMaterials.length){
           const images=await prepareMaterialImages(inputMaterials,session.model,settingsManager.getImageAutoResize());
           binding.requiredPromptImages=images.map(image=>image.evidence);
@@ -783,7 +708,7 @@ export async function createRuntime({
             let detail = call?.response?.errorMessage ?? call?.error;
             if (!detail && call?.response?.stopReason === "length") {
               const phase = {
-                draft: "主答初稿",
+                draft: task.record.turnIntent ? "主模型答复" : "主答初稿",
                 review: "独立评审",
                 revision: "主答修订",
               }[stage.phase] ?? stage.phase;
@@ -842,6 +767,7 @@ export async function createRuntime({
             unsubscribeError();
             unsubscribe();
             session.dispose();
+            if(manager.buildSessionProjection===conversationProjection)manager.buildSessionProjection=originalProjection;
             if(lateOutputError)throw lateOutputError;
           } catch(error) {
             // Keep the lease when cleanup cannot be confirmed, and preserve the failure.

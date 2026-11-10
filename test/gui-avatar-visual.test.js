@@ -30,12 +30,14 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
     {id:"7c8094cd-3476-4bfa-8f53-000000000001",name:"花园讨论",reply:"这份答复来自花园讨论 Team。"},
     {id:"7c8094cd-3476-4bfa-8f53-000000000002",name:"蓝色工具箱",reply:"这份答复来自蓝色工具箱 Team。"}
   ];
-  const ordinary=mkdtempSync(join(tmpdir(),"cothink-avatar-unprepared-"));
-  t.after(()=>rmSync(ordinary,{recursive:true,force:true}));
+  const folders=mkdtempSync(join(tmpdir(),"cothink-avatar-unprepared-"));
+  t.after(()=>rmSync(folders,{recursive:true,force:true}));
   for(const item of teams){
+    const folder=join(folders,item.id);
+    mkdirSync(folder);
     const workspace=await controller.action("workspace.create",{workspaceId:item.id,name:item.name,
-      project:item===teams[0]?ordinary:null,defaultRosterId:rosterId});
-    item.project=workspace.project;
+      project:folder,defaultRosterId:rosterId});
+    if(item===teams[0])item.project=workspace.project;
   }
   const h=await startGuiServer({controller,open:false});t.after(()=>h.close());
   const browser=await chromium.launch({headless:true});t.after(()=>browser.close());

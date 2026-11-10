@@ -1,22 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {cpSync,mkdirSync,writeFileSync,readFileSync} from 'node:fs';
-import {join,resolve} from 'node:path';
-import {fileURLToPath,pathToFileURL} from 'node:url';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {fixture} from './helpers/pi-fixture.js';
 import {repository} from './helpers/git-fixture.js';
 import {invoke} from './helpers/cli-fixture.js';
 import {execution} from './helpers/agent-sync-fixture.js';
-const productRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL('..',import.meta.url)));
-const {saveConfig}=await import(pathToFileURL(join(productRoot,'src/config.js')));
-const {listTasks}=await import(pathToFileURL(join(productRoot,'src/task.js')));
-const tool=(name,args={})=>({toolCalls:[{name,args}]});
-const runtime=process.env.COTHINK_TEST_PLUGIN_RUNTIME;
-function installNative(f){
- const root=process.env.COTHINK_TEST_NATIVE_HOME;if(!root)throw Error('Set COTHINK_TEST_NATIVE_HOME to a prepared Pi directory containing original pi-subagents@0.84.0 npm/ and settings.json; prepare it with the normal cothink install command.');
- cpSync(join(root,'npm'),join(f.home,'pi/npm'),{recursive:true});cpSync(join(root,'settings.json'),join(f.home,'pi/settings.json'));
-}
-function evidence(name,value){const directory=process.env.COTHINK_TEST_EVIDENCE_DIR;if(!directory)return;mkdirSync(directory,{recursive:true});writeFileSync(join(directory,name),JSON.stringify(value,null,2));}
+import {fixtureConversation,prepareSubmit,seedFixtureConversationRepository,teamId} from './helpers/gui-controller-fixture.js';
+import { evidence, installNative, listTasks, productRoot, runtime, saveConfig, tool } from "./project-native.fixture.js";
 
 for(const unified of [false,true])test(`PROJECT ${unified?'unified root':'legacy'} original native frontend uses host model journal, independent source and reviewed public acceptance`,{timeout:120000},async t=>{
  const repo=repository(t);let sourceSkill;let rootCalls=0,helperCalls=0,helperId,fixtureError;
@@ -50,18 +42,19 @@ for(const unified of [false,true])test(`PROJECT ${unified?'unified root':'legacy
  sourceSkill=join(f.home,'native-method');mkdirSync(join(sourceSkill,'references'),{recursive:true});mkdirSync(join(sourceSkill,'scripts'));writeFileSync(join(sourceSkill,'SKILL.md'),'---\nname: native-method\ndescription: Frozen native helper file recipe\n---\nRead [value](references/value.txt) and run `scripts/write.cjs`.\n');writeFileSync(join(sourceSkill,'references/value.txt'),'NATIVE_PROJECT');writeFileSync(join(sourceSkill,'scripts/write.cjs'),"const fs=require('fs');if(fs.existsSync('/native-work')||fs.existsSync('/plugins'))throw Error('Helper shell escaped its isolated source');fs.writeFileSync('a.txt',fs.readFileSync(require('path').join(__dirname,'../references/value.txt')));");
  saveConfig(f.home,{formatVersion:2,...f.models,piResources:{skills:[sourceSkill]},work:{execution,projectPluginRuntime:runtime}});
  const plan=join(f.home,'plan.json');writeFileSync(plan,JSON.stringify({goal:'Write a.txt=NATIVE_PROJECT using the installed native plugin helper',scope:['a.txt'],plugins:['pi-subagents'],budget:{maxCalls:14},deliverables:['a.txt'],checks:[{command:'node',args:['-e',"if(require('fs').readFileSync('a.txt','utf8')!=='NATIVE_PROJECT')process.exit(1)"]}]}));
- let run,formalTaskId,planningCalls=0;
+ let run,formalTaskId,planningCalls=0,project=repo.project;
  if(unified){
    const {createGuiController}=await import(pathToFileURL(join(productRoot,'src/gui-controller.js')));
    const {createTeamConfig}=await import(pathToFileURL(join(productRoot,'src/teams.js')));
    const {readProject}=await import(pathToFileURL(join(productRoot,'src/project.js')));
    const {randomUUID}=await import('node:crypto');
    const inputPlan=JSON.parse(readFileSync(plan)),config={formatVersion:2,...f.models,piResources:{skills:[sourceSkill]},work:{execution,projectPluginRuntime:runtime}};
-   saveConfig(f.home,createTeamConfig(config,'Native unified fixture',randomUUID()));
+   saveConfig(f.home,createTeamConfig(config,'Native unified fixture',teamId));
    const controller=await createGuiController({home:f.home,cwd:repo.project});t.after(()=>controller.close());
-   const session=await controller.action('session.create',{project:repo.project});
+   const session=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,controller));
+   project=session.project;
    const complete=async id=>{for(let n=0;n<1200;n++){const task=await controller.task(id);if(!['running','preparing','cancelling'].includes(task.status))return task;await new Promise(resolve=>setTimeout(resolve,25));}throw Error('native fixture task did not settle');};
-   const submitted=await controller.action('task.submit',{sessionId:session.id,input:inputPlan.goal,submissionId:randomUUID(),protocolVersion:1,budget:{maxCalls:15}});
+   const submitted=await controller.action('task.submit',await prepareSubmit(controller,{sessionId:session.id,input:inputPlan.goal,budget:{maxCalls:15}}));
    const proposal=await complete(submitted.taskId);assert.equal(proposal.status,'blocked',proposal.error);
    const source=listTasks(f.home).find(task=>task.id===submitted.taskId);assert.ok(source.proposalRef);
    planningCalls=source.rootRequests.filter(r=>!r.notSent).length;assert.equal(planningCalls,1);assert.equal(f.calls.length,1);
@@ -72,14 +65,20 @@ for(const unified of [false,true])test(`PROJECT ${unified?'unified root':'legacy
    assert.equal(root.budget.maxCalls,14,'one proposal call is deducted before confirmation');
    assert.equal(f.calls.length,planningCalls+14);
    assert.equal(root.projectOperation.childTaskIds.length,1);formalTaskId=root.projectOperation.childTaskIds[0];
-   const state=await readProject(f.home,repo.project);assert.equal(state.usage.calls,14);
+   const state=await readProject(f.home,project);assert.equal(state.usage.calls,14);
    evidence('project-native-unified-accounting.json',{planningTaskId:source.id,planningCalls,confirmedRootId:root.id,ownedCalls:14,formalTaskId,formalCalls:state.usage.calls,aggregateCalls:f.calls.length});
    run={code:state.status==='completed'?0:1,stdout:JSON.stringify(state),stderr:''};
  }else run=await invoke(f,['project','start','--file',plan,'--json'],'',repo.project);
  evidence('project-native-latest-run.json',run);const task=unified?listTasks(f.home).find(task=>task.id===formalTaskId):listTasks(f.home)[0];if(task)evidence('project-native-latest-task.json',task);
  if(fixtureError)throw fixtureError;assert.equal(run.code,0,run.stdout+run.stderr);const state=JSON.parse(run.stdout);assert.equal(state.status,'completed',run.stdout);
  assert.equal(helperCalls,6);assert.equal(task.work.helpers.length,1);const child=task.work.helpers[0];assert.equal(child.status,'completed');assert.equal(child.treatment.decision,'adopted');assert.ok(child.native.sessionId);assert.equal(child.parentActorId,'main');assert.equal(task.stages.find(s=>s.id===child.stage.id).role,'helper:'+child.helperId);
- assert.equal(state.usage.calls,f.calls.length-planningCalls);assert.equal(readFileSync(join(task.work.resultWorkspace,'a.txt'),'utf8'),'NATIVE_PROJECT');assert.equal(readFileSync(join(repo.project,'a.txt'),'utf8'),'base A\n');
+ assert.equal(state.usage.calls,f.calls.length-planningCalls);
+ assert.equal(readFileSync(join(task.work.resultWorkspace,'a.txt'),'utf8'),'NATIVE_PROJECT');
+ assert.equal(readFileSync(join(repo.project,'a.txt'),'utf8'),'base A\n','acceptance never changes the original checkout or Team parent');
+ if(unified){
+  assert.notEqual(project,repo.project);
+  assert.equal(readFileSync(join(project,'a.txt'),'utf8'),'NATIVE_PROJECT','the bound conversation directory receives the accepted file');
+ }
 });
 
 test('PROJECT original background parallel workflow continues after tool return and shares two seats',{timeout:120000},async t=>{
@@ -151,43 +150,4 @@ test('PROJECT original nested native child reads creator overlay and returns fil
  for(const [name,nested]of [['native-parent',true],['native-leaf',false]])writeFileSync(join(f.home,'pi/agents',name+'.md'),'---\nname: '+name+'\ndescription: Actual native nested creator\nmodel: fixture/main\ntools: read, write, edit, ls'+(nested?', subagent':'')+'\nallowNestedSubagents: '+nested+'\ninheritProjectContext: false\ninheritGlobalContext: false\ninheritSkills: false\n---\n'+(nested?'PARENT_NATIVE_MARKER':'LEAF_NATIVE_MARKER')+'\nDo assigned work and review child results.\n');
  saveConfig(f.home,{formatVersion:2,...f.models,work:{execution,projectPluginRuntime:runtime}});const plan=join(f.home,'plan.json');writeFileSync(plan,JSON.stringify({goal:'Original nested native creator must adopt leaf overlay then root accepts a.txt=NESTED_FINAL',scope:['a.txt'],plugins:['pi-subagents'],budget:{maxCalls:20},deliverables:['a.txt'],checks:[{command:'node',args:['-e',"if(require('fs').readFileSync('a.txt','utf8')!=='NESTED_FINAL')process.exit(1)"]}]}));
  const run=await invoke(f,['project','start','--file',plan,'--json'],'',repo.project);const task=listTasks(f.home)[0];evidence('project-native-nested-task.json',task);evidence('project-native-nested-run.json',run);if(fixtureError)throw fixtureError;assert.equal(run.code,0,run.stdout+run.stderr);const parent=task.work.helpers.find(h=>h.helperId===parentId),leaf=task.work.helpers.find(h=>h.helperId===leafId);assert.equal(leaf.parentActorId,parentId);assert.equal(leaf.treatment.destinationHelperId,parentId);assert.equal(Buffer.from(leaf.snapshot.files['a.txt'].contentBase64,'base64').toString(),'PARENT_OVERLAY');assert.equal(readFileSync(join(task.work.resultWorkspace,'a.txt'),'utf8'),'NESTED_FINAL');assert.ok(task.work.capacity.every(s=>s.active<=2));
-});
-
-test('PROJECT formal employee uses its allowed same-model original native helper and root accepts reviewed file',{timeout:120000},async t=>{
- const repo=repository(t);let rootCalls=0,employeeCalls=0,helperCalls=0,memberId,helperId,fixtureError;
- const f=await fixture(t,({body})=>{
-  try{
-   const system=String(body.messages.find(message=>message.role==='system')?.content??''),names=(body.tools??[]).map(item=>item.function.name),last=body.messages.findLast(message=>message.role==='tool')?.content??'';
-   if(system.includes('You are helper ')){
-    assert.equal(body.model,'r1','helper must use the actual employee-approved model');
-    if(++helperCalls===1)return tool('write',{path:'a.txt',content:'EMPLOYEE_NATIVE'});
-    assert.match(last,/successfully/i);return {text:'Original employee-owned native helper wrote EMPLOYEE_NATIVE'};
-   }
-   if(body.model==='main'){
-    switch(++rootCalls){
-     case 1:return tool('project_staff',{action:'appoint',input:{id:'native-writer',responsibility:'Own the checked a.txt deliverable',models:['fixture/r1'],scope:['a.txt'],need:'deliverable',reason:'Employee has the approved native helper model and exact file scope'}});
-     case 2:return tool('delegate',{staffId:'native-writer',model:'fixture/r1',scope:['a.txt'],readScope:['a.txt'],assignment:'Use the original installed native helper on your allowed fixture/r1 model to write a.txt=EMPLOYEE_NATIVE; inspect and adopt its exact file before handing back',reason:'The designated employee owns the original deliverable and creator review'});
-     case 3:memberId=JSON.parse(last).memberId;assert.ok(memberId,last);return tool('collect',{memberId});
-     case 4:assert.match(last,/EMPLOYEE_NATIVE/);return tool('accept_change',{memberId});
-     default:if(JSON.parse(last).status==='review_required')return tool('accept_change',{memberId});assert.equal(JSON.parse(last).status,'accepted',last);return {text:'Root independently inspected and accepted the employee native artifact.'};
-    }
-   }
-   assert.equal(body.model,'r1');
-   if(!names.includes('project_plugin_0_subagent'))return {text:'The original task is one exact a.txt artifact. I will inspect the given scope, use only my approved r1 route, and review any native child result myself before returning it.'};
-   switch(++employeeCalls){
-    case 1:return tool('project_plugin_0_subagent',{agent:'native-employee',model:'fixture/r1',task:'Write a.txt=EMPLOYEE_NATIVE in the independent creator-owned source',async:false,artifacts:false});
-    case 2:{const match=last.match(/"helperId":"([a-f0-9-]+)"/);assert.ok(match,last);helperId=match[1];return tool('cothink_helper_result',{helperId,decision:'inspect'});}
-    case 3:assert.match(last,/EMPLOYEE_NATIVE|RU1QTE9ZRU/);return tool('cothink_helper_result',{helperId,decision:'adopt',reason:'Actual employee inspected the complete original/new a.txt diff and owns its scope'});
-    default:assert.equal(JSON.parse(last).status,'applied',last);return {text:'EMPLOYEE_NATIVE is implemented in my employee draft after explicit native helper inspection and adoption; ready for root checks.'};
-   }
-  }catch(error){fixtureError=error;return {text:'Unexpected employee native integration result.'};}
- });
- installNative(f);mkdirSync(join(f.home,'pi/agents'),{recursive:true});writeFileSync(join(f.home,'pi/agents/native-employee.md'),'---\nname: native-employee\ndescription: Original employee-owned native child\nmodel: fixture/r1\ntools: read, write, edit, ls\ninheritProjectContext: false\ninheritGlobalContext: false\ninheritSkills: false\n---\nFollow the original task and creator file scope.\n');
- saveConfig(f.home,{formatVersion:2,...f.models,work:{execution,projectPluginRuntime:runtime}});
- const plan=join(f.home,'plan.json');writeFileSync(plan,JSON.stringify({goal:'Designated employee must use its approved same-model original native helper and explicitly adopt a.txt=EMPLOYEE_NATIVE before root acceptance',scope:['a.txt'],plugins:['pi-subagents'],budget:{maxCalls:18},deliverables:['a.txt'],checks:[{command:'node',args:['-e',"if(require('fs').readFileSync('a.txt','utf8')!=='EMPLOYEE_NATIVE')process.exit(1)"]}]}));
- const run=await invoke(f,['project','start','--file',plan,'--json'],'',repo.project);const task=listTasks(f.home)[0];evidence('project-native-employee-run.json',run);if(task)evidence('project-native-employee-task.json',task);
- if(fixtureError)throw fixtureError;assert.equal(run.code,0,run.stdout+run.stderr);const project=JSON.parse(run.stdout);assert.equal(project.status,'completed',run.stdout);
- const helper=task.work.helpers.find(item=>item.helperId===helperId);assert.equal(helper.parentActorId,'member:'+memberId);assert.equal(helper.model.modelId,'r1');assert.equal(helper.treatment.decision,'adopted');assert.equal(helper.import.status,'applied');assert.equal(helper.status,'completed');assert.equal(helperCalls,2);
- const rootStage=task.stages.find(stage=>stage.role==='main'&&stage.phase==='work'),employeeStage=task.stages.find(stage=>stage.role==='member:'+memberId&&stage.phase==='worker'),helperStage=task.stages.find(stage=>stage.nativeLaunchId===helperId);assert.ok(rootStage&&employeeStage&&helperStage);assert.equal(helperStage.creatorRole,employeeStage.role);assert.equal(new Set([rootStage.sessionId,employeeStage.sessionId,helperStage.sessionId]).size,3);
- assert.ok(task.work.capacity.every(sample=>sample.active<=2));assert.equal(task.work.capacity.at(-1).active,0);assert.equal(project.usage.calls,f.calls.length);assert.equal(task.usage.calls,f.calls.length);assert.equal(task.work.acceptance.filter(item=>item.status==='accepted').length,1);assert.equal(readFileSync(join(task.work.resultWorkspace,'a.txt'),'utf8'),'EMPLOYEE_NATIVE');assert.equal(readFileSync(join(repo.project,'a.txt'),'utf8'),'base A\n');
 });

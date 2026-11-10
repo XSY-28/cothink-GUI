@@ -72,6 +72,8 @@ Docker exec 使用同一个 Docker 引擎的 Exec API，保存 exec ID 并查询
 - 越界/非法源产物使整个 Shell 导入失败，现场保留且后续命令被阻止。明确 `refreshChange(...,{resetExecution:true,reason})` 才封存未导入环境并从已确认草稿继续。手工改投影也先保存证据，不能偷偷接纳。
 - `abandonChange` 终止相关容器后释放范围，保留版本/失败资料。`close` 必须 await；重新打开后旧授权失效，原草稿须显式 refresh 才能继续。
 
+JS 可信宿主可在创建写实例时提供冻结的 `checkPolicies`，键为策略名，值为已授权的非空检查数组，并绑定同一固定执行镜像。`inspect()` 返回策略名和摘要，`beginChange` 可传 `checkPolicy: {id, digest}`。准备和接纳沿用草稿绑定的策略。正式版本检查可用同一绑定调用 `checkCurrent`。无命名策略的调用沿用原默认检查。启用命名策略的项目使用防止旧写入者降级检查的存储格式，需要新版内核打开。
+
 同一项目只有一个本地写 owner，不能靠墙钟到期抢占活进程。不同 `home` 也不能同时写。显式登记现有 `integrationRef` 会保留该引用和历史；移交方负责停止旧写者。正式 ref 不能被其他工作区 checkout 后由本工具推进。
 
 ## 查询历史

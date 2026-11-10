@@ -1,3 +1,5 @@
+import {GUI_INPUT_VERSION} from "../../src/gui-turn-options.js";
+
 export function copyText(text) {
   const desktop = window.cothinkDesktop;
   return desktop?.writeClipboardText
@@ -91,7 +93,7 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
   return {
     read,
     uploadMaterial: (ownerId,uploadId,bytes,signal) => request("/api/materials?"+new URLSearchParams({ownerId,uploadId}),{
-      method:"POST",headers:{"Content-Type":"application/octet-stream","X-CoThink-GUI-Input":"2"},body:bytes,signal,
+      method:"POST",headers:{"Content-Type":"application/octet-stream","X-CoThink-GUI-Input":GUI_INPUT_VERSION},body:bytes,signal,
     }),
     async material(ref,{project=false}={}){
       const path=(project?"/api/project-material?":"/api/materials?")+new URLSearchParams(ref);
@@ -117,7 +119,7 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
     action: (action, args = {}) =>
       request("/api/action", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-CoThink-GUI-Input":"2" },
+        headers: { "Content-Type": "application/json", "X-CoThink-GUI-Input":GUI_INPUT_VERSION },
         body: JSON.stringify({ action, args }),
       }),
     async recover(pending) {

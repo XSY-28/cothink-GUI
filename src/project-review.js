@@ -19,7 +19,7 @@ const directModelFamilies = {
   "api.moonshot.cn": /^kimi-k\d(?:\.\d+)?(?:-pro)?$/,
   "api.moonshot.ai": /^kimi-k\d(?:\.\d+)?(?:-pro)?$/,
 };
-function reviewFamily(id) {
+export function reviewFamily(id) {
   if (typeof id !== "string" || !id) return null;
   // A datestamped snapshot and its floating selector can resolve to one model.
   return canonical(id)

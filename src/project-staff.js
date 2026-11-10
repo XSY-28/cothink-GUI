@@ -1,192 +1,20 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Type } from "typebox";
-import { inScope, projectScopesOverlap, assertProjectPathSpellings, validProjectPath } from "./versioning.js";
+import { inScope, projectScopesOverlap, assertProjectPathSpellings } from "./versioning.js";
 import { workModelIdentity } from "./workers.js";
 import { problem } from "./task.js";
 import { assertProjectReview, readReviewCandidate, completeProjectReview } from "./project-review.js";
+import { actions, active, ancestry, assignments, changeProjectStaff, fail, maxDepth, position, requireText, scopeList, supervisors, taskStep } from "./project-staff-topology.js";
+export { changeProjectStaff } from "./project-staff-topology.js";
 
-const fail = (message) => {
-  throw problem("PROJECT_STAFF", message);
-};
-const active = (position) => position?.status === "active";
-const assignments = (state) => Object.values(state.staffAssignments ?? {});
-const position = (state, id) => state.staff.find((p) => p.id === id) ?? fail("Unknown project position: " + id);
-const requireText = (value, name) => {
-  if (typeof value !== "string" || !value.trim()) fail(name + " is required.");
-  return value.trim();
-};
-function scopeList(value, bound, name) {
-  if (!Array.isArray(value)) fail(name + " must be a list of repository paths.");
-  for (const path of value) {
-    if (!validProjectPath(path, true) || !inScope(path, bound))
-      fail(name + " exceeds authority: " + path);
-  }
-  return [...new Set(value)];
-}
-function models(value, parent) {
-  if (
-    !Array.isArray(value) ||
-    value.some((m) => typeof m !== "string" || !m.trim() || (parent && !parent.models.includes(m)))
-  )
-    fail("Model is outside the supervisor's allowed roster.");
-  return [...new Set(value)];
-}
-function supervisor(state, id) {
-  if (id === "root") return null;
-  const lead = position(state, id);
-  if (!active(lead) || !lead.canDelegate || lead.supervisorId !== "root")
-    fail("Not an active subgoal supervisor: " + id);
-  return lead;
-}
-function handoff(row, input) {
-  for (const key of ["version", "failure", "pending", "decision"]) {
-    if (input[key] !== undefined) row.handoff[key] = requireText(input[key], key);
-  }
-}
-const actions = ["list", "appoint", "promote", "retain", "handoff", "transfer", "retire", "finish"];
-function transferModels(state, row, target) {
-  const next = supervisor(state, target);
-  if (next && row.canDelegate) fail("Transfer would create an extra supervisor layer.");
-  scopeList(row.scope, next?.scope ?? state.scope, "scope");
-  scopeList(row.readScope, next?.readScope ?? ["."], "readScope");
-  return models(row.models.length || !next ? row.models : next.models, next);
-}
-
-export function changeProjectStaff(state, action, input = {}, actor = "root", automatic = false) {
-  state.staff ??= [];
-  if (action === "list") return state.staff;
-  if (!actions.includes(action)) fail("Unknown staff action: " + action);
-  if (state.status === "paused") fail("Project is paused.");
-  const manager = supervisor(state, actor);
-  const id = requireText(input.id, "Staff id");
-  if (id === "root" || !/^[\p{L}\p{N}][\p{L}\p{N}_.-]*$/u.test(id) || Object.hasOwn(Object.prototype, id))
-    fail("Invalid staff id.");
-  if (action === "appoint") {
-    const parentId = input.supervisorId ?? actor;
-    if (manager && actor !== parentId) fail("Subgoal staffing is limited to direct reports.");
-    const parent = supervisor(state, parentId);
-    const scope = scopeList(input.scope ?? parent?.scope ?? state.scope, parent?.scope ?? state.scope, "scope");
-    const readScope = scopeList(
-      input.readScope ?? parent?.readScope ?? state.readScope ?? ["."],
-      parent?.readScope ?? state.readScope ?? ["."],
-      "readScope",
-    );
-    const allowed = models(input.models ?? parent?.models ?? [], parent);
-    const responsibility = requireText(input.responsibility, "responsibility");
-    if (automatic) {
-      if (!["deliverable", "review", "capability"].includes(input.need))
-        fail("Explain the independent deliverable, independent review or configured capability gap.");
-      requireText(input.reason, "staffing reason and existing coverage");
-      const covered = state.staff.find(
-        (p) =>
-          active(p) &&
-          p.supervisorId === parentId &&
-          p.responsibility === responsibility &&
-          scope.every((s) => inScope(s, p.scope)) &&
-          readScope.every((s) => inScope(s, p.readScope)) &&
-          (!p.models.length || allowed.every((m) => p.models.includes(m))),
-      );
-      if (covered) return covered;
-    }
-    if (state.staff.some((p) => p.id === id)) fail("Staff id already in use, including history: " + id);
-    const row = {
-      id,
-      supervisorId: parentId,
-      responsibility,
-      scope,
-      readScope,
-      models: allowed,
-      status: "active",
-      retained: false,
-      canDelegate: false,
-      handoff: {},
-      source: automatic ? "automatic" : "user",
-    };
-    if (automatic) Object.assign(row, { need: input.need, reason: input.reason });
-    state.staff.push(row);
-    return row;
-  }
-  const row = position(state, id);
-  if (manager && row.supervisorId !== actor && !(id === actor && action === "handoff"))
-    fail("Not a direct report: " + id);
-  if (row.status === "retired") fail("Position retired; its history is read-only.");
-  if (action === "handoff") {
-    handoff(row, input);
-    return row;
-  }
-  if (action === "finish") {
-    if (row.status !== "draining") fail("Start a transfer or retirement before finishing.");
-    const held = assignments(state).filter((a) => a.staffId === id && a.status !== "disposed");
-    if (held.length) fail("Unresolved assignments: " + held.map((a) => a.dispatchId).join(", "));
-    const reports = state.staff.filter((p) => p.supervisorId === id && p.status !== "retired");
-    if (reports.length)
-      fail("Transfer or retire remaining direct reports: " + reports.map((p) => p.id).join(", "));
-    if (row.transition.action === "transfer") {
-      row.models = transferModels(state, row, row.transition.supervisorId);
-      row.supervisorId = row.transition.supervisorId;
-      row.status = "active";
-    } else row.status = "retired";
-    (row.transitions ??= []).push({
-      ...row.transition,
-      handoff: { ...row.handoff },
-    });
-    delete row.transition;
-    return row;
-  }
-  if (!active(row) && !["transfer", "retire"].includes(action)) fail("Position is draining: " + id);
-  if (action === "promote") {
-    if (manager || row.supervisorId !== "root") fail("Only root can promote a direct report.");
-    row.subgoal = requireText(input.subgoal, "independently verifiable subgoal");
-    row.models = models(input.models, null);
-    if (!row.models.length) fail("Promotion requires a nonempty allowed roster.");
-    row.canDelegate = true;
-  } else if (action === "retain") {
-    if (
-      new Set(
-        assignments(state)
-          .filter(
-            (a) =>
-              a.staffId === id &&
-              a.status === "disposed" &&
-              a.outcome !== "not_sent" &&
-              (a.requestId || a.candidate || a.calls?.some((c) => c.sent)),
-          )
-          .map((a) => a.taskId),
-      ).size < 2
-    )
-      fail("Retention needs completed responsibility across at least two project tasks.");
-    row.retentionReason = requireText(input.reason, "handover cost");
-    row.retained = true;
-  } else {
-    const reason = requireText(input.reason, "handover reason");
-    const dest = action === "transfer" ? requireText(input.supervisorId, "new supervisorId") : undefined;
-    if (dest === id) fail("A position cannot supervise itself.");
-    if (dest && manager && dest !== actor) fail("Root decides cross-group transfers.");
-    if (dest) transferModels(state, row, dest);
-    handoff(row, input);
-    row.transition = {
-      action,
-      reason,
-      from: row.supervisorId,
-      ...(dest ? { supervisorId: dest } : {}),
-    };
-    row.status = "draining";
-  }
-  return row;
-}
-
-function authorizedPosition(state, { staffId, actor, model }) {
+function authorizedPosition(state, { staffId, actor, model, taskId }) {
   const row = position(state, staffId);
   if (!active(row) || row.supervisorId !== actor)
     fail("Position unavailable or outside this supervisor's authority: " + staffId);
-  const parent = supervisor(state, actor);
-  if ((row.models.length && !row.models.includes(model)) || (parent && !parent.models.includes(model)))
+  const chain = supervisors(state, actor, taskId);
+  if ((row.models.length && !row.models.includes(model)) || chain.some((lead) => !lead.models.includes(model)))
     fail("Model is outside the allowed roster: " + model);
   return row;
-}
-// Only host-owned project steps and bounded role grants determine work identity.
-function taskStep(state, taskId) {
-  return state.steps?.find((step) => step.attempts?.some((a) => a.taskId === taskId));
 }
 function worksOf(step) {
   const planned = step?.works ?? (step?.deliverables ?? step?.scope ?? []).map((path) => ({
@@ -200,7 +28,7 @@ function registerSubwork(state, taskId, actor, input) {
   const step = taskStep(state, taskId);
   if (state.paused || state.status === "paused" || !step || step.attempts.at(-1)?.taskId !== taskId)
     fail("Registration needs a current project step.");
-  const manager = supervisor(state, actor);
+  const manager = actor === "root" ? null : supervisors(state, actor, taskId)[0];
   const scope = canonical(scopeList(input.scope, manager?.scope ?? step.scope, "subwork scope"));
   if (!scope.length) fail("Subwork needs a nonempty, bounded delivery scope.");
   scopeList(scope, step.scope, "step scope");
@@ -254,7 +82,8 @@ function selectWork(state, input, row) {
   if (named && input.readOnly && !overlap(area, named.scope))
     fail("Read scope does not reach the named work.");
   if (row.canDelegate && input.readOnly && !named)
-    return {workId: JSON.stringify(["coordinate", step.id, canonical(row.scope)])};
+    return {workId: JSON.stringify(["coordinate", step.id, canonical(row.scope),
+      ...(row.supervisorId === "root" ? [] : [row.supervisorId])])};
   if (named && !input.readOnly && !matches.includes(named))
     fail("Select the registered subwork for that delivery boundary.");
   if (!work || (!input.readOnly && (!area.length || !area.every((path) => inScope(path, work.scope)))))
@@ -267,6 +96,7 @@ function selectWork(state, input, row) {
 function actorAssignment(state, taskId, actorRole) {
   const a = assignments(state).find((a) => a.taskId === taskId && a.role === actorRole);
   if (!a || a.status !== "active") fail("No live project assignment for " + actorRole);
+  assertUnpaused(a);
   const row = authorizedPosition(state, a);
   if (a.grantEpoch !== undefined && a.grantEpoch !== (row.transitions?.length ?? 0))
     fail("The original assignment grant has been handed off.");
@@ -276,7 +106,7 @@ function verifyActor(state, input) {
   if (input.actorRole === undefined && !state.steps?.length) return;
   if (input.actorRole === "main" && input.actor === "root") return;
   const parent = actorAssignment(state, input.taskId, input.actorRole);
-  if (input.actor !== parent.staffId || input.supervisorMemberId !== parent.dispatchId)
+  if (parent.reviewOf || input.actor !== parent.staffId || input.supervisorMemberId !== parent.dispatchId)
     fail("Dispatch is outside the current supervisor session.");
 }
 function priorWork(state, prior) {
@@ -332,7 +162,7 @@ function admitAssignment(state, input, previous) {
     fail("Root already owns this work.");
   assertProjectReview(state, input);
 }
-function beginStaffAssignment(state, input) {
+function beginStaffAssignment(state, input, beforeNew) {
   state.staffAssignments ??= {};
   const row = authorizedPosition(state, input);
   verifyActor(state, input);
@@ -352,6 +182,7 @@ function beginStaffAssignment(state, input) {
     fail("Dispatch id already exists or is invalid.");
   const role = "member:" + dispatchId;
   if (input.role && input.role !== role) fail("Role does not match the bound dispatch.");
+  beforeNew?.();
   const a = { ...input, dispatchId, role, status: "active" };
   state.staffAssignments[a.dispatchId] = a;
   return a;
@@ -380,6 +211,7 @@ function resumeAssignment(state, input) {
   const prev = state.staffAssignments?.[input.dispatchId];
   if (!prev || !["result", "disposed"].includes(prev.status))
     fail("Feedback requires a known, settled result.");
+  assertUnpaused(prev);
   const next = { ...prev, ...input };
   if (prev.grantEpoch !== undefined && prev.grantEpoch !== (position(state, prev.staffId).transitions?.length ?? 0))
     fail("The original assignment grant has been handed off.");
@@ -499,7 +331,7 @@ function reconcileAssignments(state, record, requests, kernelFacts = []) {
       !calls.some((c) => c.sent) &&
       operations.every((op) => facts.get(op.requestId) === "not_sent");
     if (
-      unresolved.size ||
+      a.pause?.status === "unknown" || unresolved.size ||
       (member?.status === "outcome_unknown" && !resolved(member.kernelUnknownRequestId ?? member.beginRequestId))
     )
       a.status = "unknown";
@@ -520,9 +352,70 @@ function reconcileAssignments(state, record, requests, kernelFacts = []) {
   }
 }
 
+function assertUnpaused(assignment) {
+  if (assignment?.pause) throw problem("GROUP_PAUSED", "This assignment is paused under its original dispatch.");
+}
+
+function assignmentOwner(state, {taskId, actorRole, dispatchId, rootReview = false, allowPaused = false, resumeCandidate}) {
+  if (state.paused || state.status === "paused") fail("Project is paused.");
+  const a = state.staffAssignments?.[dispatchId];
+  if (!a || a.taskId !== taskId) fail("Assignment unavailable to this session.");
+  if (!allowPaused) {
+    const continuation = a.pause?.continuations?.at(-1);
+    if (!resumeCandidate || actorRole !== "main" || !rootReview || !continuation || continuation.revokedAt ||
+      continuation.candidate !== resumeCandidate.candidate || continuation.privateVersion !== resumeCandidate.privateVersion)
+      assertUnpaused(a);
+  }
+  const row = authorizedPosition(state, a);
+  if ((a.grantEpoch ?? 0) !== (row.transitions?.length ?? 0))
+    fail("Assignment authority has changed.");
+  if (actorRole === "main" && (rootReview || a.actor === "root")) return a;
+  if (actorRole === "main") fail("Only the direct supervisor controls this assignment.");
+  const parent = actorAssignment(state, taskId, actorRole);
+  if (a.supervisorMemberId !== parent.dispatchId || a.actor !== parent.staffId)
+    fail("Only the direct supervisor controls this assignment.");
+  return a;
+}
+
+function pauseAssignments(state, input, snapshot) {
+  const target = assignmentOwner(state, {...input, allowPaused:true});
+  const reason = requireText(input.reason, "Pause reason");
+  const group = [target], affected = [];
+  const candidates = assignments(state).filter((a) => a.taskId === input.taskId);
+  const at = new Date().toISOString();
+  for (const a of group) {
+    group.push(...candidates.filter((child) => child.supervisorMemberId === a.dispatchId));
+    if (a.status === "disposed") continue;
+    const continuation = a.pause?.continuations?.at(-1);
+    if (continuation && !continuation.revokedAt) {
+      continuation.revokedAt = at;
+      continuation.revokedBy = input.actorRole;
+      continuation.revocationReason = reason;
+      Object.assign(a.pause, snapshot(a.dispatchId), {status:"pausing"});
+    }
+    a.pause ??= {...snapshot(a.dispatchId), status:"pausing", reason, at, by:input.actorRole};
+    affected.push({dispatchId:a.dispatchId, pause:a.pause});
+  }
+  if (!affected.length) fail("The assignment group has already been settled.");
+  return affected;
+}
+
+function resumePausedCandidate(state, input) {
+  const a = assignmentOwner(state, {...input, allowPaused:true});
+  const pause = a.pause, reason = requireText(input.reason, "Candidate continuation reason");
+  if (a.status !== "result" || pause?.status !== "settled" || pause.changeStatus !== "prepared" ||
+    pause.candidate !== input.candidate || pause.privateVersion !== input.privateVersion)
+    throw problem("GROUP_RESUME", "Only a settled, exact prepared candidate may continue.");
+  const continuations = (pause.continuations ??= []);
+  if (!continuations.length || continuations.at(-1).revokedAt)
+    continuations.push({candidate:input.candidate, privateVersion:input.privateVersion, reason,
+      by:input.actorRole, at:new Date().toISOString()});
+  return pause;
+}
+
 export function createProjectStaff(host) {
-  const change = (action, input, actor = "root", automatic = false) =>
-    host.update((state) => changeProjectStaff(state, action, input, actor, automatic));
+  const change = (action, input, actor = "root", automatic = false, options) =>
+    host.update((state) => changeProjectStaff(state, action, input, actor, automatic, options));
   return {
     list: () => host.read().staff ?? [],
     rootReview: (ref, task, v, scope) => readReviewCandidate(host, ref, task, v, scope),
@@ -531,9 +424,29 @@ export function createProjectStaff(host) {
     assignment: (id) => host.read().staffAssignments?.[id],
     change,
     abandonedRoot: (detail) => host.update((state) => recordRootAbandonment(state, detail)),
-    begin: (input) => host.update((state) => beginStaffAssignment(state, input)),
+    begin: (input, beforeNew) => host.update((state) => beginStaffAssignment(state, input, beforeNew)),
     resume: (input) => host.update((state) => resumeAssignment(state, input)),
     update: (id, patch) => host.update((state) => updateStaffAssignment(state, id, patch)),
+    pause: (input, snapshot) => host.update((state) => pauseAssignments(state, input, snapshot)),
+    resumePausedCandidate: (input) => host.update((state) => resumePausedCandidate(state, input)),
+    settlePause(dispatchId, receipt) {
+      return host.update((state) => {
+        const a = state.staffAssignments?.[dispatchId];
+        if (a?.pause?.status !== "pausing") fail("No pending assignment pause.");
+        Object.assign(a.pause, receipt);
+        if (receipt.status === "unknown" && a.status !== "disposed") {
+          a.status = "unknown";
+          a.unknownRequestIds = [...new Set([...(a.unknownRequestIds ?? []), ...receipt.unresolvedRequestIds])];
+        }
+        return a.pause;
+      });
+    },
+    canManage(taskId, staffId) {
+      const state = host.read();
+      const chain = ancestry(state, staffId);
+      return chain.length + 1 < maxDepth(state, taskId) &&
+        chain.every((row) => active(row) && row.canDelegate);
+    },
     reconcile: (record, requests, facts) =>
       host.update((state) => reconcileAssignments(state, record, requests, facts)),
     works(taskId, actorRole = "main") {
@@ -541,23 +454,11 @@ export function createProjectStaff(host) {
       const works = worksOf(taskStep(state, taskId));
       if (actorRole === "main") return works;
       const a = actorAssignment(state, taskId, actorRole);
-      const row = supervisor(state, a.staffId);
+      const row = supervisors(state, a.staffId, taskId)[0];
       return works.filter((w) => w.scope.every((path) => inScope(path, row.scope)));
     },
-    checkOwner({taskId, actorRole, dispatchId, rootReview = false}) {
-      const state = host.read();
-      if (state.paused || state.status === "paused") fail("Project is paused.");
-      const a = state.staffAssignments?.[dispatchId];
-      if (!a || a.taskId !== taskId) fail("Assignment unavailable to this session.");
-      const row = authorizedPosition(state, a);
-      if (!active(row) || row.supervisorId !== a.actor ||
-        (a.grantEpoch ?? 0) !== (row.transitions?.length ?? 0))
-        fail("Assignment authority has changed.");
-      if (actorRole === "main" && (rootReview || a.actor === "root")) return true;
-      if (actorRole === "main") fail("Only the direct supervisor controls this assignment.");
-      const parent = actorAssignment(state, taskId, actorRole);
-      if (a.supervisorMemberId !== parent.dispatchId || a.actor !== parent.staffId)
-        fail("Only the direct supervisor controls this assignment.");
+    checkOwner(input) {
+      assignmentOwner(host.read(), input);
       return true;
     },
     checkIdentity({ taskId, role, identity, model }, state = host.read()) {
@@ -616,15 +517,16 @@ export function createProjectStaff(host) {
       };
       return draft ? claim(draft) : host.update(claim);
     },
-    tools(actor = "root", admit = () => {}, taskId) {
+    tools(actor = "root", admit = () => {}, taskId, allowedModels) {
       return [
         {
           name: "project_staff",
           label: "Project staff",
           description:
-            "Manage persistent project positions, separate from a Team model. List existing positions first. Appoint only for an independent deliverable, independent review, or configured capability gap. Never add credentials or capacity. register_work {scope} returns a stable work ID for a bounded subitem of this step. Supply an input object, e.g. appoint {id,responsibility,scope,readScope,models,need,reason}; promote {id,subgoal,models}; retain {id,reason}; handoff {id,decision,pending,failure,version}; transfer {id,supervisorId,reason} or retire {id,reason}, then finish {id} once unresolved work is settled.",
+            "Manage persistent project positions, separate from a Team model. List existing positions first. Appoint only for an independent deliverable, independent review, or configured capability gap. Never add credentials or capacity. register_work {scope} returns a stable work ID for a bounded subitem of this step. Supply an input object, e.g. appoint {id,responsibility,scope,readScope,models,need,reason}; promote {id,subgoal,models}; retain {id,reason}; handoff {id,decision,pending,failure,version}; transfer {id,supervisorId,reason} or retire {id,reason}, then finish {id} once unresolved work is settled." +
+            (actor === "root" ? " Root may set_depth {maxDepth} for this turn. Count root as layer one, use three layers by default and select four for work that needs another supervisor. Settle affected assignments before reducing depth." : ""),
           parameters: Type.Object({
-            action: Type.Union([...actions, "register_work"].map((a) => Type.Literal(a))),
+            action: Type.Union([...actions, "register_work", ...(actor === "root" ? ["set_depth"] : [])].map((a) => Type.Literal(a))),
             input: Type.Optional(
               Type.Object({
                 id: Type.Optional(Type.String()),
@@ -640,6 +542,7 @@ export function createProjectStaff(host) {
                 pending: Type.Optional(Type.String()),
                 failure: Type.Optional(Type.String()),
                 version: Type.Optional(Type.String()),
+                ...(actor === "root" ? {maxDepth:Type.Optional(Type.Integer({minimum:1, maximum:4}))} : {}),
               }),
             ),
           }),
@@ -651,7 +554,7 @@ export function createProjectStaff(host) {
                 ? host
                     .read()
                     .staff.filter((p) => actor === "root" || p.id === actor || p.supervisorId === actor)
-                : change(action, input ?? {}, actor, true);
+                : change(action, input ?? {}, actor, true, {taskId, allowedModels});
             return {
               content: [{ type: "text", text: JSON.stringify(result) }],
             };

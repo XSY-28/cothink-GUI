@@ -2,73 +2,31 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import {randomUUID} from "node:crypto";
-import { join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
 import { repository } from "./helpers/git-fixture.js";
 import { fixture } from "./helpers/pi-fixture.js";
+import { fixtureConversation, prepareSubmit } from "./helpers/gui-controller-fixture.js";
+import { createTeamConfig, editorTurnInput, host, load, newSession, readTask, saveConfig, send, settle, setup } from "./gui-history.fixture.js";
 
-// Use the distributed runtime as well as the distributed controller in installed checks.
-const root = resolve(process.env.COTHINK_TEST_PACKAGE_ROOT ?? fileURLToPath(new URL("..", import.meta.url)));
-const load = (path) => import(pathToFileURL(join(root, path)));
 const { SessionManager } = await load("node_modules/@earendil-works/pi-coding-agent/dist/index.js");
-const { startGuiServer } = await load("src/gui-server.js");
-const { saveConfig } = await load("src/config.js");
-const { createTeamConfig } = await load("src/teams.js");
-const { readTask } = await load("src/task.js");
-const { createApi } = await load("gui/src/api.js");
 
-async function host(t, f) {
-  const h = await startGuiServer({ home: f.home, cwd: f.cwd, open: false });
-  t.after(() => h.close());
-  const origin = new URL(h.url).origin;
-  async function request(path, body) {
-    return fetch(origin + path, {
-      method: body ? "POST" : "GET",
-      headers: { Authorization: `Bearer ${h.token}`, ...(body ? { "Content-Type": "application/json", "X-CoThink-GUI-Input":"2" } : {}) },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-  }
-  async function json(path, body) {
-    const response = await request(path, body);
-    assert.equal(response.status, 200, await response.clone().text());
-    return response.json();
-  }
-  const reads = [];
-  const api = createApi(h.token, (path, options) => { reads.push(options.method); return fetch(origin + path, options); });
-  return { close: h.close, get: json, action: (action, args) => json("/api/action", { action, args }), reads, recover: api.recover, request,
-    reject: async (action, args) => {
-      const response = await request("/api/action", { action, args });
-      assert.equal(response.status, 400, await response.clone().text());
-      assert.match(await response.text(), /损坏|缺失|不可用|修复/);
-    } };
-}
-async function setup(t) {
-  const f = await fixture(t, (_, n) => ({ text: `HISTORY_REPLY_${n}` }));
-  saveConfig(f.home, createTeamConfig({ formatVersion: 2, ...f.models }, "History fixture", "7c8094cd-3476-4bfa-8f53-055d87972896"));
-  return f;
-}
-async function send(h, sessionId, input, submissionId = input) {
-  const accepted = await h.action("task.submit", { sessionId, input, submissionId,protocolVersion:1 });
-  for (let i = 0; i < 500; i++) {
-    const task = await h.get("/api/task?id=" + accepted.taskId);
-    if (task.status !== "running") {
-      assert.equal(task.status, "completed", task.error);
-      return task;
-    }
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  throw Error("history fixture did not settle");
-}
-async function newSession(h) {
-  const s = await h.action("session.create", { project: null });
-
-  return s.id;
+// A raw SDK fork predates Team-managed folders. Seed a saved project session
+// with the public SDK so its fork is classified through the historical import.
+function legacyProjectSession(t,f){
+  const project=realpathSync(repository(t).project);
+  const manager=SessionManager.create(project,join(f.home,"pi/sessions/main"));
+  manager.appendCustomEntry("cothink-project",{project});
+  manager.appendCustomEntry("cothink-mode",{singleModel:true});
+  manager.appendCustomEntry("cothink-team",{team:{id:"7c8094cd-3476-4bfa-8f53-055d87972896",name:"History fixture",...f.models}});
+  manager.appendMessage({role:"user",content:"previous project context",timestamp:Date.now()});
+  return manager;
 }
 
 test("real Pi selected-branch fork inherits ancestor turns and keeps submission identity independent when continuing", async (t) => {
   const f = await setup(t);
+  const legacy=legacyProjectSession(t,f);
   let h = await host(t, f);
-  const id = await newSession(h), first = await send(h, id, "FORK_ANCESTOR");
+  const id = legacy.getSessionId(), first = await send(h, id, "FORK_ANCESTOR");
   const source = readTask(f.home, first.id).stages[0].sessionFile;
   const ancestorLeaf = SessionManager.open(source).getLeafId();
   await send(h, id, "FORK_EXCLUDED_SIBLING");
@@ -95,7 +53,7 @@ test("real Pi selected-branch fork inherits ancestor turns and keeps submission 
 test("real Pi same-session branch displays branch order, excludes sibling turns and retains durable deduplication", async (t) => {
   const f = await setup(t);
   let h = await host(t, f);
-  const id = await newSession(h), first = await send(h, id, "TREE_ANCESTOR");
+  const id = await newSession(t,h), first = await send(h, id, "TREE_ANCESTOR");
   const source = readTask(f.home, first.id).stages[0].sessionFile;
   const ancestorLeaf = SessionManager.open(source).getLeafId();
   const sibling = await send(h, id, "TREE_EXCLUDED_SIBLING");
@@ -108,7 +66,8 @@ test("real Pi same-session branch displays branch order, excludes sibling turns 
   assert.deepEqual((await h.get("/api/session?id=" + id)).turns.map((x) => x.taskId), [first.id]);
   assert.equal((await h.recover({ sessionId: id, protocolVersion:1, submissionId: "TREE_EXCLUDED_SIBLING" })).taskId, sibling.id);
   assert.deepEqual(h.reads, ["GET"], "confirmation recovery observes durable association without mutation");
-  const replay = await h.action("task.submit", { sessionId: id, input: "TREE_EXCLUDED_SIBLING", protocolVersion:1, submissionId: "TREE_EXCLUDED_SIBLING" });
+  const replay = await h.action("task.submit", { sessionId: id, input: "TREE_EXCLUDED_SIBLING", protocolVersion:1,
+    submissionId:"TREE_EXCLUDED_SIBLING",editorEditId:readTask(f.home,sibling.id).editorEditId,...editorTurnInput(null) });
   assert.equal(replay.taskId, sibling.id);
   assert.equal(f.calls.length, 2);
   assert.equal((await h.get("/api/sessions?query=TREE_EXCLUDED_SIBLING")).items.length,0);
@@ -128,8 +87,8 @@ for (const damage of ["truncated session", "missing request", "corrupt request"]
   test(`${damage} stays unavailable without breaking healthy bootstrap/settings or changing original bytes`, async (t) => {
     const f = await setup(t);
     let h = await host(t, f);
-    const healthyId = await newSession(h), healthy = await send(h, healthyId, "HEALTHY_HISTORY");
-    const badId = await newSession(h), bad = await send(h, badId, "DAMAGED_HISTORY");
+    const healthyId = await newSession(t,h), healthy = await send(h, healthyId, "HEALTHY_HISTORY");
+    const badId = await newSession(t,h), bad = await send(h, badId, "DAMAGED_HISTORY");
     await h.close();
     const record = readTask(f.home, bad.id), sessionPath = record.stages[0].sessionFile;
     const requestPath = join(f.home, "requests", record.requestIds[0] + ".json");
@@ -149,10 +108,11 @@ for (const damage of ["truncated session", "missing request", "corrupt request"]
     assert.equal((await h.get("/api/task?id=" + healthy.id)).status, "completed");
     await h.action("settings.work", { work: { checks: [] } });
     assert.deepEqual((await h.get("/api/bootstrap")).work.checks, []);
-    await h.reject("task.submit", { sessionId: badId, input: "MUST_NOT_SEND", protocolVersion:1, submissionId: "blocked" });
+    await h.reject("task.submit", { sessionId: badId, input: "MUST_NOT_SEND", protocolVersion:1, submissionId: "blocked",editorEditId:randomUUID() });
     await h.reject("session.name", { sessionId: badId, title:"Blocked rename" });
     await h.reject("session.fork", {sessionId:badId,taskId:bad.id});
-    const old = await h.action("task.submit", { sessionId: badId, input: "DAMAGED_HISTORY", protocolVersion:1, submissionId: "DAMAGED_HISTORY" });
+    const old = await h.action("task.submit", { sessionId: badId, input: "DAMAGED_HISTORY", protocolVersion:1,
+      submissionId:"DAMAGED_HISTORY",editorEditId:record.editorEditId,...editorTurnInput(null) });
     assert.equal(old.taskId, bad.id, "known association may be queried, never replayed");
     assert.equal(f.calls.length, 2);
     assert.deepEqual(readFileSync(sessionPath), beforeSession);
@@ -163,7 +123,7 @@ for (const damage of ["truncated session", "missing request", "corrupt request"]
 
 test("completed live caches cannot hide newly damaged durable session or request facts", async (t) => {
   const f = await setup(t), h = await host(t, f);
-  const id = await newSession(h), task = await send(h, id, "CACHED_HISTORY");
+  const id = await newSession(t,h), task = await send(h, id, "CACHED_HISTORY");
   const record = readTask(f.home, task.id), sessionPath = record.stages[0].sessionFile;
   const requestPath = join(f.home, "requests", record.requestIds[0] + ".json");
   for (const path of [sessionPath, requestPath]) {
@@ -171,7 +131,7 @@ test("completed live caches cannot hide newly damaged durable session or request
     appendFileSync(path, '{"broken');
     const damaged = readFileSync(path);
     assert.equal((await h.get("/api/session?id=" + id)).readOnly, true);
-    await h.reject("task.submit", { sessionId: id, input: "NO_CACHED_CONTINUATION", protocolVersion:1, submissionId: "blocked-cache" });
+    await h.reject("task.submit", { sessionId: id, input: "NO_CACHED_CONTINUATION", protocolVersion:1, submissionId: "blocked-cache",editorEditId:randomUUID() });
     assert.deepEqual(readFileSync(path), damaged);
     assert.equal(f.calls.length, 1);
     writeFileSync(path, original);
@@ -182,11 +142,10 @@ test("completed live caches cannot hide newly damaged durable session or request
 test("same-process GUI close and reopen leaves released parent and fork sessions writable", async (t) => {
   const f = await setup(t);
   let h = await host(t, f);
-  const parentId = await newSession(h), first = await send(h, parentId, "REOPEN_PARENT");
-  const source = readTask(f.home, first.id).stages[0].sessionFile;
+  const parentId = await newSession(t,h), first = await send(h, parentId, "REOPEN_PARENT");
+  const fork = await h.action("session.fork",{sessionId:parentId,taskId:first.id});
   await h.close();
-  const fork = SessionManager.forkFrom(source, SessionManager.open(source).getCwd(), join(f.home, "pi/sessions/main"));
-  const forkId = fork.getSessionId();
+  const forkId = fork.id;
   h = await host(t, f);
   assert.equal((await h.get("/api/session?id=" + parentId)).readOnly, false);
   assert.equal((await h.get("/api/bootstrap")).sessions.find((s) => s.id === parentId).readOnly, false);
@@ -207,7 +166,7 @@ test("same-process GUI close and reopen leaves released parent and fork sessions
 
 test("GUI reply fork copies only completed ancestors, restores their selections and leaves source bytes and submission ownership intact", async (t) => {
   const f = await setup(t), h = await host(t, f);
-  const id = await newSession(h);
+  const id = await newSession(t,h);
   const editor=await h.get("/api/session?id="+id);
   await h.action("session.draft", {sessionId:id,text:"draft belongs to source",expectedDraftRevision:editor.draftRevision,branchAnchor:editor.branchAnchor,editId:randomUUID(),workRequest:null,selectionId:null});
   const first = await send(h,id,"GUI_FORK_FIRST");
@@ -225,7 +184,8 @@ test("GUI reply fork copies only completed ancestors, restores their selections 
   assert.deepEqual(fork.turns.map(t=>t.taskId),[first.id]);
   assert.equal(fork.turns[0].flow,"unified");
   assert.deepEqual(fork.team,original.team);
-  assert.equal(fork.project,original.project);
+  assert.notEqual(fork.project,original.project);
+  assert.equal(fork.workspaceId,original.workspaceId);
   assert.equal(fork.draft,"");
   assert.deepEqual(fork.forkOf,{sessionId:id,taskId:first.id});
   assert.deepEqual(fork.submissions,[]);
@@ -248,8 +208,8 @@ test("GUI reply fork copies only completed ancestors, restores their selections 
 
 test("GUI reply fork rejects another branch, incomplete replies and damaged history without mutation", async (t) => {
   const f = await setup(t), h = await host(t,f);
-  const id = await newSession(h), first = await send(h,id,"FORK_GUARDS_FIRST");
-  const otherId = await newSession(h), other = await send(h,otherId,"FORK_GUARDS_OTHER");
+  const id = await newSession(t,h), first = await send(h,id,"FORK_GUARDS_FIRST");
+  const otherId = await newSession(t,h), other = await send(h,otherId,"FORK_GUARDS_OTHER");
   const source = readTask(f.home,first.id).stages[0].sessionFile;
   const before = readFileSync(source), callCount = f.calls.length;
   const unrelated = await h.request("/api/action",{action:"session.fork",args:{sessionId:id,taskId:other.id}});
@@ -276,8 +236,9 @@ test("GUI reply fork refuses an active source without cancelling it",async t=>{
     return {text:`active reply ${n}`};
   });
   saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},"Active fork fixture","7c8094cd-3476-4bfa-8f53-055d87972896"));
-  const h=await host(t,f), id=await newSession(h), first=await send(h,id,"FIRST_DONE");
-  const running=await h.action("task.submit",{sessionId:id,input:"KEEP_RUNNING",protocolVersion:1, submissionId:"active"});
+  const h=await host(t,f), id=await newSession(t,h), first=await send(h,id,"FIRST_DONE");
+  const activeSubmission=await prepareSubmit(h,{sessionId:id,input:"KEEP_RUNNING",submissionId:"active"});
+  const running=await h.action("task.submit",activeSubmission);
   for(let n=0;n<500&&!unblock;n++) await new Promise(r=>setTimeout(r,10));
   assert.ok(unblock);
   try {
@@ -287,18 +248,14 @@ test("GUI reply fork refuses an active source without cancelling it",async t=>{
     assert.equal((await h.get("/api/task?id="+running.taskId)).status,"running");
     assert.equal(readTask(f.home,running.taskId).cancelRequestedAt,undefined);
   } finally {unblock();}
-  await send(h,id,"KEEP_RUNNING","active");
+  assert.equal((await settle(h,await h.action("task.submit",activeSubmission))).id,running.taskId);
   assert.equal(f.calls.length,2);
 });
 
 
 test("fork gets its own folder and respects archive and writer guards",async t=>{
-  const f=await setup(t), project=realpathSync(repository(t).project);
-  const manager=SessionManager.create(project,join(f.home,"pi/sessions/main"));
-  manager.appendCustomEntry("cothink-project",{project});
-  manager.appendCustomEntry("cothink-mode",{singleModel:true});
-  manager.appendCustomEntry("cothink-team",{team:{id:"7c8094cd-3476-4bfa-8f53-055d87972896",name:"History fixture",...f.models}});
-  manager.appendMessage({role:"user",content:"previous project context",timestamp:Date.now()});
+  const f=await setup(t), manager=legacyProjectSession(t,f);
+  const project=manager.getCwd();
   const h=await host(t,f), id=manager.getSessionId(), first=await send(h,id,"PROJECT_FORK");
   const source=manager.getSessionFile(), before=readFileSync(source);
   const other=await host(t,f);
@@ -321,7 +278,7 @@ test("fork gets its own folder and respects archive and writer guards",async t=>
 });
 
 test("reply fork does not let Pi opening a legacy schema rewrite the original history",async t=>{
-  const f=await setup(t),h=await host(t,f),id=await newSession(h),first=await send(h,id,"LEGACY_FORK");
+  const f=await setup(t),h=await host(t,f),id=await newSession(t,h),first=await send(h,id,"LEGACY_FORK");
   const source=readTask(f.home,first.id).stages[0].sessionFile;
   const lines=readFileSync(source,"utf8").trim().split("\n").map(JSON.parse);
   lines[0].version=2;
@@ -377,7 +334,7 @@ test("workspace bootstrap imports healthy legacy paths incrementally without rew
 test("invalid workspace markers retain completed turns without reclassifying them as generic", async t => {
   const f = await setup(t);
   let h = await host(t,f);
-  const id = await newSession(h), task = await send(h,id,"WORKSPACE_HISTORY");
+  const id = await newSession(t,h), task = await send(h,id,"WORKSPACE_HISTORY");
   const path = readTask(f.home,task.id).stages[0].sessionFile;
   await h.close();
   SessionManager.open(path).appendCustomEntry("cothink-gui-workspace",{workspaceId:"malformed"});
@@ -388,7 +345,7 @@ test("invalid workspace markers retain completed turns without reclassifying the
   assert.match(session.workspaceError,/归属/);
   assert.deepEqual(session.turns.map(turn=>turn.taskId),[task.id]);
   assert.deepEqual((await h.get("/api/sessions?workspaceId=")).items,[]);
-  const rejected = await h.request("/api/action",{action:"task.submit",args:{sessionId:id,input:"Do not run",protocolVersion:1, submissionId:"WORKSPACE_UNCERTAIN"}});
+  const rejected = await h.request("/api/action",{action:"task.submit",args:{sessionId:id,input:"Do not run",protocolVersion:1, submissionId:"WORKSPACE_UNCERTAIN",editorEditId:randomUUID()}});
   assert.equal(rejected.status,409);
   assert.equal((await rejected.json()).code,"WORKSPACE_UNAVAILABLE");
   assert.equal(readFileSync(path,"utf8"),original);
@@ -396,56 +353,16 @@ test("invalid workspace markers retain completed turns without reclassifying the
 });
 
 test("HTTP editor requires complete version fields and keeps DRAFT_CONFLICT visible",async t=>{
-  const f=await setup(t),h=await host(t,f),s=await h.action("session.create",{sessionId:randomUUID(),workspaceId:null});
+  const f=await setup(t),h=await host(t,f),s=await fixtureConversation(t,h);
   const rejected=await h.request("/api/action",{action:"session.draft",args:{sessionId:s.id,text:"obsolete caller"}});
   assert.equal(rejected.status,409); assert.equal((await rejected.json()).code,"DRAFT_CONFLICT");
   assert.equal((await h.get("/api/session?id="+s.id)).draft,""); assert.equal(f.calls.length,0);
 });
 
-test("legacy view stays byte-identical until explicit save and preserves the first observed result across a later revision", async t => {
-  const {mkdirSync} = await import("node:fs");
-  const f = await setup(t);
-  let h = await host(t,f);
-  const sessionId = await newSession(h), first = await send(h,sessionId,"Legacy result");
-  const task = readTask(f.home,first.id), piPath = task.stages[0].sessionFile;
-  await h.close();
-  // Keep the exact Pi branch topology while recreating an old session without a GUI marker.
-  const entries = readFileSync(piPath,"utf8").trim().split("\n").map(JSON.parse);
-  const marker = entries.find(entry => entry.customType==="cothink-gui-workspace");
-  marker.customType = "legacy-fixture";
-  writeFileSync(piPath,entries.map(entry=>JSON.stringify(entry)).join("\n")+"\n");
-  const viewDir=join(f.home,"session-ui"), viewPath=join(viewDir,sessionId+".json");
-  mkdirSync(viewDir,{recursive:true});
-  const original='{"schemaVersion":1, "revision":3, "archived":false, "pinned":true, "changedAt":null}\n';
-  writeFileSync(viewPath,original);
-  h = await host(t,f);
-  const observed = await h.get("/api/session?id="+sessionId);
-  assert.equal(observed.view.initialized,false);
-  assert.equal(observed.view.seenResults[first.id],first.resultRevision);
-  assert.equal(readFileSync(viewPath,"utf8"),original);
-  const path=join(f.home,"requests",task.finalCallId+".json");
-  const call=JSON.parse(readFileSync(path,"utf8"));
-  writeFileSync(path,JSON.stringify({...call,text:"A newer result"}));
-  const latest = await h.get("/api/session?id="+sessionId);
-  assert.notEqual(latest.turns[0].resultRevision,first.resultRevision);
-  assert.equal(latest.view.seenResults[first.id],first.resultRevision);
-  const saved=await h.action("session.view",{sessionId,expectedViewRevision:observed.viewRevision,opened:true});
-  assert.equal(saved.view.initialized,true);
-  assert.equal(saved.view.seenResults[first.id],first.resultRevision);
-  await h.close();
-  h = await host(t,f);
-  const restored = await h.get("/api/session?id="+sessionId);
-  assert.equal(restored.view.seenResults[first.id],first.resultRevision);
-  assert.equal(restored.turns[0].resultRevision,latest.turns[0].resultRevision);
-  assert.equal(restored.navigation.revision,3);
-  assert.equal(restored.navigation.pinned,true);
-  assert.equal(f.calls.length,1);
-});
-
 test("a published fork without its reading file restarts with an explicit empty baseline", async t => {
   const f = await setup(t);
   let h = await host(t,f);
-  const sessionId = await newSession(h), task = await send(h,sessionId,"Fork source");
+  const sessionId = await newSession(t,h), task = await send(h,sessionId,"Fork source");
   const fork=await h.action("session.fork",{sessionId,taskId:task.id});
   assert.equal(fork.view.seenResults[task.id],task.resultRevision);
   await h.close();

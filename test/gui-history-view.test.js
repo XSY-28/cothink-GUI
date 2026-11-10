@@ -1,0 +1,45 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { host, newSession, readTask, send, setup } from "./gui-history.fixture.js";
+
+test("legacy view stays byte-identical until explicit save and preserves the first observed result across a later revision", async t => {
+  const {mkdirSync} = await import("node:fs");
+  const f = await setup(t);
+  let h = await host(t,f);
+  const sessionId = await newSession(t,h), first = await send(h,sessionId,"Legacy result");
+  const task = readTask(f.home,first.id), piPath = task.stages[0].sessionFile;
+  await h.close();
+  // Keep the exact Pi branch topology while recreating an old session without a GUI marker.
+  const entries = readFileSync(piPath,"utf8").trim().split("\n").map(JSON.parse);
+  const marker = entries.find(entry => entry.customType==="cothink-gui-workspace");
+  marker.customType = "legacy-fixture";
+  writeFileSync(piPath,entries.map(entry=>JSON.stringify(entry)).join("\n")+"\n");
+  const viewDir=join(f.home,"session-ui"), viewPath=join(viewDir,sessionId+".json");
+  mkdirSync(viewDir,{recursive:true});
+  const original='{"schemaVersion":1, "revision":3, "archived":false, "pinned":true, "changedAt":null}\n';
+  writeFileSync(viewPath,original);
+  h = await host(t,f);
+  const observed = await h.get("/api/session?id="+sessionId);
+  assert.equal(observed.view.initialized,false);
+  assert.equal(observed.view.seenResults[first.id],first.resultRevision);
+  assert.equal(readFileSync(viewPath,"utf8"),original);
+  const path=join(f.home,"requests",task.finalCallId+".json");
+  const call=JSON.parse(readFileSync(path,"utf8"));
+  writeFileSync(path,JSON.stringify({...call,text:"A newer result"}));
+  const latest = await h.get("/api/session?id="+sessionId);
+  assert.notEqual(latest.turns[0].resultRevision,first.resultRevision);
+  assert.equal(latest.view.seenResults[first.id],first.resultRevision);
+  const saved=await h.action("session.view",{sessionId,expectedViewRevision:observed.viewRevision,opened:true});
+  assert.equal(saved.view.initialized,true);
+  assert.equal(saved.view.seenResults[first.id],first.resultRevision);
+  await h.close();
+  h = await host(t,f);
+  const restored = await h.get("/api/session?id="+sessionId);
+  assert.equal(restored.view.seenResults[first.id],first.resultRevision);
+  assert.equal(restored.turns[0].resultRevision,latest.turns[0].resultRevision);
+  assert.equal(restored.navigation.revision,3);
+  assert.equal(restored.navigation.pinned,true);
+  assert.equal(f.calls.length,1);
+});

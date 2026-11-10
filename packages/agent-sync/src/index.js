@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import {
   git,
   textGit,
+  verifyCommit,
   entries,
   writeTree,
   commit,
@@ -27,7 +28,7 @@ import {
   changed,
   diff,
 } from "./git.js";
-import { directory, atomic, load, digest, ownerAt } from "./storage.js";
+import { directory, atomic, load, digest, canonical, ownerAt } from "./storage.js";
 import {
   problem,
   pathName,
@@ -38,18 +39,14 @@ import {
   identifier,
 } from "./scope.js";
 import { createExecutor, validateExecution } from "./executor.js";
-const canonical = (x) => JSON.stringify(sort(x));
-function sort(x) {
-  return Array.isArray(x)
-    ? x.map(sort)
-    : x && typeof x === "object"
-      ? Object.fromEntries(
-          Object.keys(x)
-            .sort()
-            .map((k) => [k, sort(x[k])]),
-        )
-      : x;
-}
+import {
+  bindCheckPolicyResolver,
+  checksPolicy,
+  namedPolicyStorageVersion,
+  prepareNamedCheckPolicies,
+  readProjectRegistration,
+  writeProjectRegistration,
+} from "./check-policy.js";
 const signalOf = (...signals) => {
   const list = signals.filter(Boolean);
   return list.length ? AbortSignal.any(list) : undefined;
@@ -64,36 +61,12 @@ function publicChange(change) {
 const checkAbort = (signal) => {
   if (signal?.aborted) throw problem("CANCELLED", "Operation cancelled");
 };
-function checksPolicy(checks) {
-  if (
-    !Array.isArray(checks) ||
-    checks.some(
-      (c) =>
-        !c ||
-        Object.keys(c).some(
-          (k) => !["command", "args", "timeoutMs"].includes(k),
-        ) ||
-        typeof c.command !== "string" ||
-        !c.command ||
-        (c.args !== undefined &&
-          (!Array.isArray(c.args) ||
-            c.args.some((a) => typeof a !== "string"))) ||
-        c.env !== undefined ||
-        (c.timeoutMs !== undefined &&
-          (!Number.isSafeInteger(c.timeoutMs) || c.timeoutMs <= 0)),
-    )
-  )
-    throw problem(
-      "CHECK_POLICY",
-      "checks require command, string args and optional positive timeoutMs; secret env is unsupported",
-    );
-  return copy(checks);
-}
 /** @returns {Promise<object>} A local owner. Always await close(). */
 export async function createAgentSync({
   project,
   home,
   checks = [],
+  checkPolicies = {},
   execution,
   signal,
   onOperation = () => {},
@@ -102,6 +75,7 @@ export async function createAgentSync({
 } = {}) {
   checks = checksPolicy(checks);
   execution = validateExecution(execution);
+  const namedPolicies = prepareNamedCheckPolicies(checkPolicies, execution);
   if (
     typeof project !== "string" ||
     typeof home !== "string" ||
@@ -172,13 +146,13 @@ export async function createAgentSync({
     meta &&
     (meta.projectId !== projectId ||
       meta.common !== common ||
-      meta.protocolVersion !== 1 ||
+      ![1, namedPolicyStorageVersion].includes(meta.protocolVersion) ||
       (integrationRef && integrationRef !== meta.integrationRef))
   )
     throw problem("CORRUPT", "Project identity/ref mismatch");
   if (readOnly && !meta)
     throw problem("NO_PROJECT", "No initialized managed project");
-  if (meta) await verifyCommit(meta.integrationRef, true);
+  if (meta) await verifyCommit(root, meta.integrationRef, true);
   const shutdown = new AbortController();
   let closeFailed = false;
   let owner,
@@ -194,6 +168,7 @@ export async function createAgentSync({
     allWork = new Set(),
     reservations = new Map();
   const policy = digest({ checks, execution: execution ?? null });
+  const resolveCheckPolicy = bindCheckPolicyResolver(checks, policy, namedPolicies);
   const executor = createExecutor({
     execution,
     data,
@@ -242,18 +217,12 @@ export async function createAgentSync({
         join(data, "execution"),
       ])
         directory(p);
-      const registration = join(registry, "project.json"),
-        registered = existsSync(registration) ? load(registration) : null;
-      if (
-        registered &&
-        registered.integrationRef !==
-          (meta?.integrationRef ?? integrationRef ?? registered.integrationRef)
-      )
-        throw problem("PROJECT_MISMATCH", "One formal ref per project");
+      const registration = join(registry, "project.json");
+      const { registered, registeredRef, storageVersion } = readProjectRegistration(registration, meta, integrationRef, namedPolicies.size);
       if (!meta) {
         const ref =
           integrationRef ??
-          registered?.integrationRef ??
+          registeredRef ??
           "refs/agent-sync/" + projectId + "/main";
         if (registered && !integrationRef)
           throw problem(
@@ -261,7 +230,7 @@ export async function createAgentSync({
             "Different home requires explicit existing integrationRef",
           );
         let start = initial;
-        if (integrationRef || registered) start = await verifyCommit(ref, true);
+        if (integrationRef || registered) start = await verifyCommit(root, ref, true);
         else {
           await git(root, [
             "update-ref",
@@ -271,7 +240,7 @@ export async function createAgentSync({
           ]);
         }
         meta = {
-          protocolVersion: 1,
+          protocolVersion: storageVersion,
           projectId,
           common,
           root,
@@ -280,11 +249,11 @@ export async function createAgentSync({
         };
         atomic(metaPath, meta);
       }
-      atomic(registration, {
-        projectId,
-        integrationRef: meta.integrationRef,
-        home,
-      });
+      writeProjectRegistration(registration, { projectId, storageVersion, integrationRef:meta.integrationRef, home });
+      if (meta.protocolVersion !== storageVersion) {
+        meta = { ...meta, protocolVersion: storageVersion };
+        atomic(metaPath, meta);
+      }
       for (const name of readdirSync(join(data, "changes")).filter((n) =>
         n.endsWith(".json"),
       )) {
@@ -364,24 +333,8 @@ export async function createAgentSync({
     close,
   };
   return api;
-  async function verifyCommit(version, ref = false) {
-    if (
-      !ref &&
-      (typeof version !== "string" || !/^([0-9a-f]{20,128})$/.test(version))
-    )
-      throw problem("VERSION", "Opaque version identifier required");
-    try {
-      return await textGit(root, [
-        "rev-parse",
-        "--verify",
-        version + "^{commit}",
-      ]);
-    } catch {
-      throw problem("VERSION", "Unknown or missing project version");
-    }
-  }
   async function tip() {
-    return verifyCommit(meta.integrationRef, true);
+    return verifyCommit(root, meta.integrationRef, true);
   }
   function getChange(id) {
     identifier(id);
@@ -532,6 +485,7 @@ export async function createAgentSync({
       acceptedVersion: r.proposedVersion,
       verification: r.verification,
       checks: r.checks ?? [],
+      ...(m.checkPolicy && { checkPolicy: m.checkPolicy }),
     };
   }
   function requestRecord(id) {
@@ -594,7 +548,7 @@ export async function createAgentSync({
     };
   }
   async function known(version) {
-    const v = await verifyCommit(version),
+    const v = await verifyCommit(root, version),
       history = await formalHistory();
     if (history.includes(v)) return v;
     for (const c of allChanges()) {
@@ -763,6 +717,8 @@ export async function createAgentSync({
     )
       throw problem("INPUT", "actor and intent required");
     return operation("beginChange", input.requestId, input, async (r) => {
+      const checkPolicy = r.payload.checkPolicy;
+      resolveCheckPolicy(checkPolicy);
       const id = randomUUID(),
         controller = new AbortController(),
         opSignal = signalOf(
@@ -791,6 +747,7 @@ export async function createAgentSync({
         basis: {},
         basisRevision: 0,
         candidates: [],
+        ...(checkPolicy && { checkPolicy }),
         executionState: "absent",
         workspace: join(data, "workspaces", id),
         privateRef: "refs/agent-sync/" + projectId + "/private/" + id,
@@ -1064,6 +1021,7 @@ export async function createAgentSync({
         serial(changeId, async () => {
           const c = getChange(changeId);
           assertChange(c);
+          const { checks, policy } = resolveCheckPolicy(c.checkPolicy);
           checkAbort(options.signal);
           if (c.readOnly)
             throw problem("NO_WRITE_CHANGE", "Observation cannot be prepared");
@@ -1323,6 +1281,7 @@ export async function createAgentSync({
           fact = await acceptedChange(c.changeId);
         if (fact) return fact;
         assertChange(c);
+        const { checks, policy } = resolveCheckPolicy(c.checkPolicy);
         checkAbort(options.signal);
         await projection(c);
         const p = c.candidates.find(
@@ -1427,6 +1386,7 @@ export async function createAgentSync({
           expectedTip,
           tree: combo.tree,
           policy,
+          ...(c.checkPolicy && { checkPolicy: c.checkPolicy }),
           result: digest(checked),
           nonce: r.nonce,
         };
@@ -1489,6 +1449,7 @@ export async function createAgentSync({
           acceptedVersion: r.proposedVersion,
           verification: checked.verification,
           checks: checked.checks,
+          ...(m.checkPolicy && { checkPolicy: copy(m.checkPolicy) }),
         };
       }),
     );
@@ -1598,17 +1559,27 @@ export async function createAgentSync({
       integrationRef: meta.integrationRef,
       version: await tip(),
       checks: copy(checks),
+      ...(namedPolicies.size && {
+        checkPolicies: Object.fromEntries(
+          [...namedPolicies].map(([id, { policy }]) => [id, policy]),
+        ),
+      }),
       execution: executor.summary(),
       policy,
     };
   }
   async function checkCurrent(options = {}) {
+    const payload =
+      options.checkPolicy === undefined ? {} : { checkPolicy: options.checkPolicy };
     return operation(
       "checkCurrent",
       options.requestId ?? randomUUID(),
-      {},
+      payload,
       (request) =>
         serial("$formal", async () => {
+          const { checks, policy } = resolveCheckPolicy(
+            request.payload.checkPolicy,
+          );
           const version = await tip(),
             tree = await textGit(root, ["rev-parse", version + "^{tree}"]);
           const r = await executor.check(

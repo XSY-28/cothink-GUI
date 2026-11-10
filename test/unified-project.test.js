@@ -1,18 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,mkdirSync,watch} from 'node:fs';
+import { readFileSync, mkdirSync, watch } from 'node:fs';
 import {join} from 'node:path';
 import {fixture} from './helpers/pi-fixture.js';
 import {repository,git} from './helpers/git-fixture.js';
 import {execution} from './helpers/agent-sync-fixture.js';
 import {runProjectTurn,reserveConfirmation,confirmationState,executeConfirmed,resolveDelivery,digest} from '../src/project-turn.js';
 import {runProjectCommand} from '../src/project.js';
-
-const deliveryContext=record=>record.handoffContext;
+import {guiFiles,guiFile} from '../src/gui-files.js';
+import { confirmProject, deliveryContext, projectSession } from "./unified-project.fixture.js";
 
 test('unified proposal confirmation performs real checked accepted edit with owned lineage and stable replay',async t=>{
  const repo=repository(t);
- const plan={goal:'Change a.txt',scope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"if(!require('fs').readFileSync('a.txt','utf8').includes('changed A'))process.exit(1)"]}]};
+ const plan={goal:'Change a.txt and verify b.txt',scope:['a.txt','b.txt'],deliverables:['a.txt','b.txt'],checks:[{command:'node',args:['-e',"const fs=require('fs');if(!fs.readFileSync('a.txt','utf8').includes('changed A')||fs.readFileSync('b.txt','utf8')!=='base B\\n')process.exit(1)"]}]};
  const replies=[{toolCalls:[{name:'start_work',args:{action:'start',reason:'edit',plan}}]},
  {toolCalls:[{name:'read_skill',args:{name:'doc-maintenance'}}]},
  {toolCalls:[{name:'read',args:{path:'a.txt'}}]},
@@ -55,6 +55,19 @@ test('unified proposal confirmation performs real checked accepted edit with own
  git(repo.project,'status','--porcelain');const alternate=join(repo.root,'alternate');git(repo.project,'worktree','add','--detach',alternate,'HEAD');
  await assert.rejects(runProjectCommand({home:f.home,cwd:alternate,args:['resume']}),/another canonical worktree/);assert.equal(f.calls.length,6);
  const bad=structuredClone(root.record);bad.deliveryRef.sources[0].callId=source.record.requestIds[0];assert.throws(()=>resolveDelivery(f.home,bad),/provenance/);
+ const files=await guiFiles(f.home,root.record);
+ assert.deepEqual(files.items.map(({name,status})=>[name,status]),[['a.txt','modified'],['b.txt','unchanged']]);
+ assert.equal((await guiFile(f.home,root.record,files.items[1].ref)).bytes.toString(),'base B\n');
+ for(const sources of [[],[root.record.deliveryRef.sources[0],root.record.deliveryRef.sources[0]]]){
+   const mismatched={...root.record,deliveryRef:{...root.record.deliveryRef,sources}};
+   assert.throws(()=>resolveDelivery(f.home,mismatched),{code:'DELIVERY_SOURCE'});
+   await assert.rejects(guiFile(f.home,mismatched,files.items[0].ref),{code:'DELIVERY_SOURCE'});
+   const retained=await guiFiles(f.home,mismatched);
+   assert.ok(retained.warnings.some(message=>message.includes('正式交付来源尚不能核验')));
+   assert.deepEqual(retained.items.map(item=>item.ref.taskId),root.record.projectOperation.childTaskIds);
+   const child=delivery[0].record;
+   assert.equal((await guiFile(f.home,child,retained.items[0].ref)).bytes.toString(),'changed A\n');
+ }
 });
 
 test('formal project budget can refuse a child even when root budget remains',async t=>{
@@ -65,18 +78,6 @@ test('formal project budget can refuse a child even when root budget remains',as
  const root=await runProjectTurn({home:f.home,cwd:repo.project,input:source.record.input,workspace:source.record.workspace,frozenConfig:config,budget:reservation.budgetSource.remaining,taskId:reservation.taskId,submissionId:reservation.submissionId,confirmedOperation:{execute:task=>executeConfirmed(task,source.record,reservation)}});
  assert.notEqual(root.record.status,'completed');assert.equal(f.calls.length,1);assert.equal(root.record.budget.maxCalls,9);assert.equal(root.record.rootRequests.filter(c=>!c.notSent).length,0);
 });
-
-// Keep the actual Pi session so automatic resume uses the same authority branch.
-async function projectSession(t,repo,f){
- const {createRuntime}=await import('../src/pi-runtime.js'),{cothinkExtension}=await import('../src/extensions/cothink.js');
- const host={allowWork:true,flow:'unified'},rt=await createRuntime({home:f.home,cwd:repo.project,modelRef:f.models.main,projectManaged:true,extensionFactories:[{name:'cothink',factory:cothinkExtension(host)}]});
- t.after(()=>rt.dispose());rt.hostContext=task=>{host.task=task;host.runtime=rt;};
- return {home:f.home,cwd:repo.project,workspace:{id:null,project:repo.project},frozenConfig:{formatVersion:2,...f.models,work:{execution}},mainRuntime:rt};
-}
-async function confirmProject(base,source,extra={}){
- const reservation=await reserveConfirmation({home:base.home,source:source.record,proposalRef:source.record.proposalRef,sessionId:source.record.sessionId,workspaceId:null,submissionId:'confirm-'+source.record.id,save:source.save});
- return runProjectTurn({...base,input:source.record.input,taskId:reservation.taskId,submissionId:reservation.submissionId,budget:reservation.budgetSource.remaining,...extra,confirmedOperation:{source:source.record,reservation,execute:task=>executeConfirmed(task,source.record,reservation)}});
-}
 test('cancellation during formal admission creates no resumable project or child sends',async t=>{
  const {projectChatState}=await import('../src/project.js');
  const repo=repository(t),plan={goal:'Verify a.txt',scope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"require('fs').accessSync('a.txt')"]}]};let planRef;
@@ -91,7 +92,8 @@ test('cancellation during formal admission creates no resumable project or child
  assert.equal(root.record.projectOperation.commandId,source.record.confirmationIntent.commandId);
  planRef={taskId:root.record.id,field:'proposal',sha256:digest(root.record.proposal)};
  const later=await runProjectTurn({...base,input:'Explain the current state',contextTaskIds:[source.record.id,root.record.id]});
- assert.notEqual(later.record.status,'completed');assert.match(later.record.error,/No formal project/);assert.equal(later.record.projectOperation,undefined);assert.equal(f.calls.length,2);
+ assert.notEqual(later.record.status,'completed');assert.match(later.record.error,/No formal project/);assert.equal(later.record.projectOperation,undefined);
+ assert.equal(f.calls.length,3,'one follow-up can correct the rejected plan, but the repeated rejection ends the turn');
 });
 test('stronger review on resume refuses old accepted delivery for automatic and confirmed execution',async t=>{
  const {projectChatState}=await import('../src/project.js'),{readTask}=await import('../src/task.js');
@@ -103,17 +105,17 @@ test('stronger review on resume refuses old accepted delivery for automatic and 
  assert.equal(first.record.status,'completed',first.record.error);const childId=first.record.projectOperation.childTaskIds[0],before=readTask(f.home,childId),projectBefore=(await projectChatState(f.home,repo.project)).state;
  planRef={taskId:first.record.id,field:'proposal',sha256:digest(first.record.proposal)};
  const automatic=await runProjectTurn({...base,input:'Continue with required independent review',frozenConstraints:{requireDifferentModelReview:true},contextTaskIds:[first.record.id]});
- await t.test('same-session automatic resume is incomplete',()=>{assert.notEqual(automatic.record.status,'completed');assert.match(automatic.record.error,/异型号独立评审.*当前项目修订/);assert.equal(automatic.record.deliveryRef,undefined);assert.equal(automatic.record.projectOperation,undefined);assert.equal(f.calls.length,6);});
+ await t.test('same-session automatic resume is incomplete',()=>{assert.notEqual(automatic.record.status,'completed');assert.match(automatic.record.error,/异型号独立评审.*当前项目修订/);assert.equal(automatic.record.deliveryRef,undefined);assert.equal(automatic.record.projectOperation,undefined);assert.equal(f.calls.length,7);});
  // A different actual session needs confirmation. Tighten the confirmed root too, so the dispatch boundary must independently reject stale/legacy weaker proposals.
  const other=await projectSession(t,repo,f),pending=await runProjectTurn({...other,input:'Resume saved project',contextTaskIds:[first.record.id]});assert.ok(pending.record.proposalRef);
  const confirmed=await confirmProject(other,pending,{frozenConstraints:{requireDifferentModelReview:true}});
- await t.test('explicit confirmation cannot weaken the current root requirement',()=>{assert.notEqual(confirmed.record.status,'completed');assert.match(confirmed.record.error,/异型号独立评审.*当前项目修订/);assert.equal(confirmed.record.deliveryRef,undefined);assert.deepEqual(confirmed.record.projectOperation.childTaskIds,[]);assert.equal(f.calls.length,7);});
+ await t.test('explicit confirmation cannot weaken the current root requirement',()=>{assert.notEqual(confirmed.record.status,'completed');assert.match(confirmed.record.error,/异型号独立评审.*当前项目修订/);assert.equal(confirmed.record.deliveryRef,undefined);assert.deepEqual(confirmed.record.projectOperation.childTaskIds,[]);assert.equal(f.calls.length,8);});
  assert.deepEqual(readTask(f.home,childId),before);assert.deepEqual((await projectChatState(f.home,repo.project)).state,projectBefore);
  revise=true;
  const revision=await runProjectTurn({...base,input:'Explicitly revise the plan to require independent review',frozenConstraints:{requireDifferentModelReview:true},contextTaskIds:[first.record.id]});assert.ok(revision.record.proposalRef,revision.record.error);
  const revised=await confirmProject(base,revision,{frozenConstraints:{requireDifferentModelReview:true},budget:{maxCalls:0}}),revisedState=(await projectChatState(f.home,repo.project)).state;
  assert.equal(revisedState.revision,2);assert.ok(revisedState.steps.every(step=>step.works.every(work=>work.independentReview===true)));
- assert.notEqual(revised.record.status,'completed');assert.equal(revised.record.deliveryRef,undefined);assert.equal(f.calls.length,8,'no review evidence is fabricated when the root has no send allowance');assert.deepEqual(readTask(f.home,childId),before);
+ assert.notEqual(revised.record.status,'completed');assert.equal(revised.record.deliveryRef,undefined);assert.equal(f.calls.length,9,'no review evidence is fabricated when the root has no send allowance');assert.deepEqual(readTask(f.home,childId),before);
 });
 
 test('cancellation during child runtime preparation settles the persisted unsent child',async t=>{

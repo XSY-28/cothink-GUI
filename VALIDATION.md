@@ -1,3 +1,31 @@
+# GUI 协作改造隔离候选（2026-11-10）
+
+源码 GUI 全量 268/268，候选 App 的 `test:app` 119/119，agent-sync 内核 52/52。源码全量首轮发现两个旧夹具问题，分别是漏选阵容和把同型号巡检误作员工请求。修正夹具后全量复跑通过。补充用例通过四层阻塞转报、批准增组、读取已接纳依赖和最终 Docker 重验。
+
+macOS ARM64 候选 build `43d780bd7c2733b8c6ba774af18e69f47845877986d91bc82959e3a7cecb0ebe`。核验 15,508 项资源，并与工作树逐字节对照 104 个应用源码、渲染器及提示词文件和 agent-sync 内核。候选在 `.noindex` 下用独立数据根启动，按 bundle ID 搜索只返回正式安装。日志与截图在本机 `work/gui-runtime-alignment/`。
+
+入口测试使用本地模型夹具、固定 Docker、真实 Chromium 和 Electron。付费模型是否自主组队、长时间现场运行与 Windows 实机不在本轮证据范围。正式安装仍为原构建。
+
+# GUI Team 归属阶段（2026-11-10，源码）
+
+Team 归属、草稿恢复、HTTP 与 Chromium 合并回归 123/123。新会话须明确绑定 Team。首页转移保留正文、材料原引用与消息限制，回执丢失时核对原 ID，零自动发送。无默认阵容时需显式选择。历史未分组记录可阅读，不能绕过写入准入。对话目录的真实 Docker 接纳未修改 Team 父目录或本地冲突文件。
+
+# GUI 只读协作阶段（2026-11-10，源码）
+
+11 项本地 HTTP 定向验收覆盖同根账本、独立岗位会话、材料与固定读取授权、定时检查、直属主管纠错与暂停，以及采纳报告后交接文件计划。报告更新后，旧独立审查回执失效。统一轮次与上下文相关回归 51/51。补充 2 项实测通过。四层只读链拒绝第五层和越级收集。采纳报告后经确认实际生成文件，正式模型只收到获准报告及其引用，固定 Docker 检查和产物读取通过。远端付费服务的独立型号识别和自主组队须另验。
+
+# GUI 协作改造第二阶段（2026-11-10，源码）
+
+正式文件协作的合并入口回归 5/5，覆盖四层岗位、短任务首检、三个实际 HTTP 请求重叠、依赖成果提前开工、周期检查和跨天接续。agent-sync 内核 52/52，单写入所有者按候选冻结检查，旧写入者降级探针在隔离副本 2/2。旧 CLI 控制与恢复 11/11。已结清候选显式接续和未知请求拒绝 2/2。
+
+定向验收还覆盖能力与材料隔离、实际协作承诺、最终组合版本的视觉复核、经理终稿续聊及原版插件的受管执行。使用真实本地 HTTP、固定 Docker 和 Chromium，模型由夹具提供。周期用例使用可控时钟。付费模型的自主组队、长时间运行和实际打包 App 另行验收。本地证据在 `work/gui-runtime-alignment/`。
+
+# GUI 协作改造首个切片（2026-11-10，源码）
+
+本地 GUI HTTP 及 Chromium 验证了简单直答、旧草稿和回执兼容，以及「自行车骑鹈鹕」原文的文件计划、确认、固定 Docker 检查、接纳和打开。无效计划未初始化目录，代码回退显示未交付。固定夹具交付的原始 HTML 在断网 Chromium 打开，预览、下载和补丁对应保存版本。根引用损坏仍可读取已独立核验的部分成果。
+
+GUI 协议、历史与组件定向 92 项，桌面宿主、上下文、材料与对话目录 36 项，设置 11 项，旧 CLI 讨论 16 项通过。文件、投影与浏览器定向 20 项通过，原题图像关系纠正后另通过 1 项实际浏览器回归。付费模型的题意与选人能力、打包 App 和后续协作阶段另行验收。证据位于本机 `work/gui-runtime-alignment/`。
+
 # Team 对话目录（0.8.14-desktop.5，2026-11-10）
 
 Team 选一次目录。新对话和分支由宿主创建自己的子目录；原记录不迁移。普通聊天不初始化 Git。文件任务自动建立子目录的起点并沿用既有检查和接纳。已验收的交付更新到对话目录，同名本地文件有冲突时保留本地文件和验收版本。
@@ -109,7 +137,7 @@ Spotlight 按应用名及 bundle ID 查询、Launch Services 和 Finder 全机�
 
 # GUI 基础使用路径修复 T1（2026-11-09，源码候选）
 
-新增失效目录普通问答、阵容默认与来源分支、首页 CAS 保存和原 ID 转移、旧 HTTP 写入拒绝，以及模型请求前技能冻结失败的确认回归。实际 Chromium 使用本次构建和两个隔离数据根：首次发送前零会话，首次发送只建一条并完成一条模拟答复；切换宿主端口恢复已确认正文，丢弃已发布创建的 HTTP 响应后按原 ID 转移，明确再次发送前零请求；无阵容时保留输入并可打开选择器。组件／视图聚焦组合 47/47，Chromium 2/2；构建通过，保留既有 chunk 体积提示。记录见 [T1 施工证据](work/gui-usability-repair/T1-report.md)。
+新增失效目录普通问答、阵容默认与来源分支、首页 CAS 保存和原 ID 转移、旧 HTTP 写入拒绝，以及模型请求前技能冻结失败的确认回归。实际 Chromium 使用本次构建和两个隔离数据根：首次发送前零会话，首次发送只建一条并完成一条模拟答复；切换宿主端口恢复已确认正文，丢弃已发布创建的 HTTP 响应后按原 ID 转移，明确再次发送前零请求；无阵容时保留输入并可打开选择器。组件／视图聚焦组合 47/47，Chromium 2/2；构建通过，保留既有 chunk 体积提示。记录见 T1 施工证据（本机 `work/gui-usability-repair/T1-report.md`）。
 
 这是本地源码、真实浏览器与 localhost 模型替身的证据。材料字节接入、目录重绑定和工作起点归后续任务；本阶段未替换正式安装，未调用真实收费模型，未验证物理输入法、Windows 和断电耐久性。
 
@@ -143,14 +171,14 @@ GitHub 目标为私有 `XSY-28/cothink-gui-workspace`；原 main 为较早的 `a
 
 左栏只列项目 Team，顶部明确“新建 Team”；会话与新建对话归入项目内“对话”，模型入口统一称“阵容”。删除 `useRecentConversations`，退出 picker 的项目查询恢复归回 App，未新增存储格式、API 或模型路径。未知首会话创建保留已保存 Team、原 ID 和错误，不自动重发。验收另修复两处 Escape：最终分页按钮消失后的 body 焦点由既有 Modal 接住；SessionRow 只在菜单展开时消费 Escape。
 
-- 组件／视图／workspace 组合 **49/49**，最终焦点专项 **2/2**，GUI 构建通过（保留既有 chunk 体积提示）。最终 `npm run test:gui` **161 项：155 通过、6 失败、0 取消**；其中三 Team 浏览器场景通过。六项仍为正式工作、委派、二进制／固定差异和依赖其结果的视觉交付，和施工前记录的失败数量及类别一致，运行核心未改；不能描述为整套通过。详见 [完整日志](work/gui/navigation-refinement/evidence/gui-full-settled.log)。
-- 浏览器使用实际 controller／HTTP／Pi 持久化：三个 Team 各两条对话后再新建，50 条其他项目置顶历史，跨 Team 消息命中，关闭搜索后的后台项目查询，草稿与阅读锚点切换，1280×880 和 800×600。导航场景 **零模型调用、零页面／控制台错误**；长正文为落盘固定夹具。见 [宽窗](work/gui/navigation-refinement/compact-desktop.png)、[窄窗导航](work/gui/navigation-refinement/compact-navigation-small.png)。
-- 最终 macOS 候选 **5/5** App 检查通过；桌面宿主 **7/7**。无模型配置下经界面创建三 Team／六对话，正常退出重开后 ID、标题、草稿保持；会话置顶、归档／恢复、全部 Team 归档后的说明、全局搜索恢复均通过。[持久化记录](work/gui/navigation-refinement/desktop-navigation-result.json)、[归档记录](work/gui/navigation-refinement/desktop-archive-result.json)、[桌面截图](work/gui/navigation-refinement/desktop-three-teams.png)。
-- 改名、切换当前阵容、设置新对话默认的实际 controller 检查 **1/1**，旧会话快照／workspace ID 不变，新会话继承新默认，零调用。[阵容日志](work/gui/navigation-refinement/evidence/roster-check.log)。运行中的 A→B 浏览写草稿→返回 A 的实际浏览器检查 **1/1**，返回／停止入口保留，B 不排队；仅一次 localhost 固定替身请求，不是收费模型。[运行切换日志](work/gui/navigation-refinement/evidence/running-team-check-final.log)。
+- 组件／视图／workspace 组合 **49/49**，最终焦点专项 **2/2**，GUI 构建通过（保留既有 chunk 体积提示）。最终 `npm run test:gui` **161 项：155 通过、6 失败、0 取消**；其中三 Team 浏览器场景通过。六项仍为正式工作、委派、二进制／固定差异和依赖其结果的视觉交付，和施工前记录的失败数量及类别一致，运行核心未改；不能描述为整套通过。详见 完整日志（本机 `work/gui/navigation-refinement/evidence/gui-full-settled.log`）。
+- 浏览器使用实际 controller／HTTP／Pi 持久化：三个 Team 各两条对话后再新建，50 条其他项目置顶历史，跨 Team 消息命中，关闭搜索后的后台项目查询，草稿与阅读锚点切换，1280×880 和 800×600。导航场景 **零模型调用、零页面／控制台错误**；长正文为落盘固定夹具。见 宽窗（本机 `work/gui/navigation-refinement/compact-desktop.png`）、窄窗导航（本机 `work/gui/navigation-refinement/compact-navigation-small.png`）。
+- 最终 macOS 候选 **5/5** App 检查通过；桌面宿主 **7/7**。无模型配置下经界面创建三 Team／六对话，正常退出重开后 ID、标题、草稿保持；会话置顶、归档／恢复、全部 Team 归档后的说明、全局搜索恢复均通过。持久化记录（本机 `work/gui/navigation-refinement/desktop-navigation-result.json`）、归档记录（本机 `work/gui/navigation-refinement/desktop-archive-result.json`）、桌面截图（本机 `work/gui/navigation-refinement/desktop-three-teams.png`）。
+- 改名、切换当前阵容、设置新对话默认的实际 controller 检查 **1/1**，旧会话快照／workspace ID 不变，新会话继承新默认，零调用。阵容日志（本机 `work/gui/navigation-refinement/evidence/roster-check.log`）。运行中的 A→B 浏览写草稿→返回 A 的实际浏览器检查 **1/1**，返回／停止入口保留，B 不排队；仅一次 localhost 固定替身请求，不是收费模型。运行切换日志（本机 `work/gui/navigation-refinement/evidence/running-team-check-final.log`）。
 
 最终候选 buildId：`fb2cdbcf35616d127f690524b6f7266922e2ac7fb7a1adf0ec29096f973d91be`；15,443 个分发文件核对，另将 GUI 源码／静态资源和桌面入口共 90 个文件与工作树逐字节比较，删除的 hook 不在包内。候选位于 `work/gui/navigation-refinement/candidate.noindex/final/CoThink-darwin-arm64/CoThink.app`。已请求注销测试副本；Launch Services 复查无候选登记，bundle ID Spotlight 查询仅显示正式安装（对 `.noindex` 副本再次逐项注销返回扫描 -10814，原始结果保留在本地证据中）；未执行正式安装或声称用户当前 App 已更新。构建产生的无关原生二进制变更已从工作树撤回，候选分发清单保留其实际构建摘要。
 
-**保留的失败与限制：** 初轮浏览器夹具缺少任务／中性目录标识、读取未完成草稿和界面选择、异步焦点检查过早，以及阅读状态写入使分页游标过期，分别通过正确夹具和实际回执／页面就绪条件修正；没有改超时、睡眠或自动重试。独立专项曾通过而完整套件暴露分页竞态，最终已在整套通过。原始日志和 [实现报告](work/gui/navigation-refinement/evidence/implementation-report.md)、[独立复核](work/gui/navigation-refinement/evidence/final-review-report.md) 保留。桌面归档探针先复现闭合菜单吞 Escape，修复后原步骤通过；运行切换探针初次误用运行中的发送按钮名称并清理失败进程，正确观察“草稿保留”后通过，未将强制清理计为正常退出。
+**保留的失败与限制：** 初轮浏览器夹具缺少任务／中性目录标识、读取未完成草稿和界面选择、异步焦点检查过早，以及阅读状态写入使分页游标过期，分别通过正确夹具和实际回执／页面就绪条件修正；没有改超时、睡眠或自动重试。独立专项曾通过而完整套件暴露分页竞态，最终已在整套通过。原始日志和 实现报告（本机 `work/gui/navigation-refinement/evidence/implementation-report.md`）、独立复核（本机 `work/gui/navigation-refinement/evidence/final-review-report.md`） 保留。桌面归档探针先复现闭合菜单吞 Escape，修复后原步骤通过；运行切换探针初次误用运行中的发送按钮名称并清理失败进程，正确观察“草稿保留”后通过，未将强制清理计为正常退出。
 
 A5 跨 Team **文件**命中后的完整界面跳转未新验，保留原引用参数的源码复核和文件安全测试不能冒充该实测；计划对应项保持未勾选。物理触屏／中文输入法、原生拖动、Windows、真实模型质量与费用、签名／公证均未新验。源码导航施工与本地候选专项已完成，完整 GUI 仍非全绿。
 
@@ -160,13 +188,13 @@ A5 跨 Team **文件**命中后的完整界面跳转未新验，保留原引用�
 
 `build:gui` 通过（保留既有大 chunk 提示）；GUI 完整重跑 159 项中 153 通过、6 失败，失败集合与修改前 158 项中 152 通过、6 失败一致，均为既有正式工作执行及依赖其结果的视觉交付检查。没有为这次 UI 修改放宽这些检查或修动执行内核。并行打包时的一次重跑未结束，停止后在无打包干扰时按原命令完成重跑，前一次日志保留。
 
-新增浏览器场景使用真实本地控制器与 HTTP：快捷新建绑定点击条目，两份草稿跨切换保留，搜索／对话／team 可达，800×600 无水平溢出、设置只有一处，零模型请求。独立复核发现搜索后最近列表误取全局分页，已用“另一工作 50 条置顶对话”复现并修复；全局搜索、工作内搜索和重新选择后均保留当前历史。组件检查 32/32、桌面宿主 7/7 通过；[桌面尺寸截图](work/gui/compact-ui/compact-desktop.png)与[窄窗口截图](work/gui/compact-ui/compact-small.png)来自实际页面。
+新增浏览器场景使用真实本地控制器与 HTTP：快捷新建绑定点击条目，两份草稿跨切换保留，搜索／对话／team 可达，800×600 无水平溢出、设置只有一处，零模型请求。独立复核发现搜索后最近列表误取全局分页，已用“另一工作 50 条置顶对话”复现并修复；全局搜索、工作内搜索和重新选择后均保留当前历史。组件检查 32/32、桌面宿主 7/7 通过；桌面尺寸截图（本机 `work/gui/compact-ui/compact-desktop.png`）与窄窗口截图（本机 `work/gui/compact-ui/compact-small.png`）来自实际页面。
 
 隔离 macOS 候选构建标识为 `9203108323c55e743e9b3a7874e87632eff97fc2301a7bd45521a8658f8c0468`，15,445 个分发文件按清单核对。实际 App 5/5 通过：原生按钮位置、窄窗工具栏避让、关闭保存／失败保留／宿主停止与 renderer 崩溃原检查。候选的 GUI 源码和窗口入口已与工作树逐字节比对。候选存于 `.noindex` 并注销测试登记，未替换 `/Applications/CoThink.app`，未提交或发布。原生鼠标拖动、物理中文输入法、Windows 实机和付费模型质量未验证；截图中的内容为测试数据。
 
 # 桌面统一会话组合验证（2026-11-08）
 
-D1—D6 的记录按当时版本保留；最终本地组合的命令、原始失败、源码／安装／App 身份和截图集中在 [D7 报告](work/gui/desktop-unified/D7-report.md)。本轮未提交源仓库、发布或替换全局安装。
+D1—D6 的记录按当时版本保留；最终本地组合的命令、原始失败、源码／安装／App 身份和截图集中在 D7 报告（本机 `work/gui/desktop-unified/D7-report.md`）。本轮未提交源仓库、发布或替换全局安装。
 
 完整核心为 **484 项：480 通过、4 项既有平台跳过、0 失败／取消**。此后仅上下文模块补齐可信 SDK 原生分支来源，修复专项83/83与完整 GUI **158/158**、App 组合 **73/73** 通过；核心整套没有在这一限定修复后重复执行。App 组合含4项真实打包窗口生命周期，其余源码机制测试与安装入口证据分别记录。
 
@@ -184,7 +212,7 @@ D1—D6 的记录按当时版本保留；最终本地组合的命令、原始失
 
 本地 fixture/Docker 聚焦组合 27/27、旧 CLI 插件/GUI/正式项目回归 120/120、最新 builtin 专项 12/12 通过。脱离源码/node_modules 的好链接、缺文件、缺锚点实际结果为 0/1/1；固定 `network:none` Docker 受管副本中的好/坏链接为 0/1，无文件变化、零模型请求，结果经显式审阅处理。生产 tarball 已打包并在隔离临时目录离线安装，最终包内字节/权限与浏览器设置检查另在报告中更新，不由安装成功推断通过。
 
-具体命令、失败保留与剩余项见 [D5 报告](work/gui/desktop-unified/D5-report.md)及[D5 进度](work/gui/desktop-unified/D5-progress.md)。这些是机制与实际工具执行证据，不证明真实模型自主选技能、文档语义质量或费用；D7 新 App/全量组合、Windows、真实收费模型仍未验证。未改 agent-sync、发布、Git 提交或替换全局安装。
+具体命令、失败保留与剩余项见 D5 报告（本机 `work/gui/desktop-unified/D5-report.md`）及D5 进度（本机 `work/gui/desktop-unified/D5-progress.md`）。这些是机制与实际工具执行证据，不证明真实模型自主选技能、文档语义质量或费用；D7 新 App/全量组合、Windows、真实收费模型仍未验证。未改 agent-sync、发布、Git 提交或替换全局安装。
 
 D5 独立审查提出正式 PROJECT 执行期间的能力归属显示问题。本轮修复按可信 rootOwner 登记分别投影协调器与所属执行者，不合并权限、不从继承成果反推工具。实际主执行者的只读观察、获写后阶段，以及准备／评审和收窄后的权限均按现有工作 binding 与工具集交集显示；环境取现有 work.execution。修复的实际确认／执行／检查接纳场景、模型与设置一致性、失败及聚焦结果见 D5 报告修复轮次；两轮修复均已独立复核。此前安装包证明的是修复前版本，修复后完整 App／安装组合留给 D7。
 
@@ -192,11 +220,11 @@ D5 独立审查提出正式 PROJECT 执行期间的能力归属显示问题。�
 
 # 桌面统一项目会话 D3–D4（2026-11-08，本地源码已独立复核）
 
-本组在已验收 D2 源码之上实现；没有收费模型调用、Git 提交／推送、发布或全局安装替换。D1–D2 已有 App 候选不代表包含本组代码，最终候选及全量组合验证留给 D7。精确文件与逐项证据见 [D3–D4 报告](work/gui/desktop-unified/D3-D4-report.md)。
+本组在已验收 D2 源码之上实现；没有收费模型调用、Git 提交／推送、发布或全局安装替换。D1–D2 已有 App 候选不代表包含本组代码，最终候选及全量组合验证留给 D7。精确文件与逐项证据见 D3–D4 报告（本机 `work/gui/desktop-unified/D3-D4-report.md`）。
 
 本地已执行：GUI 回归 152/152；原请求／runtime／讨论／正式项目／项目策略／岗位聚焦组合 86/86；随后约束与岗位及统一入口组合 54/54；本条选项、原 ID 确认、跨分支明确确认、真实文件接纳等聚焦 37/37。最后新增的预加载 CLI／程序入口反例 2/2、路由／预算／工具续答 13/13，真实浏览器最终视觉检查 1/1。各日志保留执行时点；末尾局部修改采用对应聚焦复验，不冒称每次都重跑全量。
 
-独立初审 R1–R3 修复后的相关统一入口／PROJECT／策略／岗位组合 **75/75**，单独统一入口 **22/22**，评审证据规则 **8/8**。隔离旧源码快照中的取消准入、晚登记、强制评审 resume 反例先失败，修复后通过；取消准入不创建项目，新要求与旧计划不符时明确拒绝，显式 revise 后无评审额度仍未完成。首次补充测试误用 AbortError 断言导致的 74/75 已保留，按实际 CANCELLED 契约修正后复跑通过。针对性复审确认原 R1–R3 已解决，另发现子任务创建后登记被取消拒绝时留下 running 记录。第二轮仅在无请求且 ROOT_STOPPED 的创建失败清理中持久化取消，实际准备竞态先失败后通过；正常交付和各取消窗口聚焦 **8/8**，原评审探针也得到 cancelled 子任务与 pending 步骤。具体命令、失败与冻结文件见上述报告，第二轮独立复审已批准；见 [D3–D4 第二轮复审](work/gui/desktop-unified/D3-D4-rereview2.md)。
+独立初审 R1–R3 修复后的相关统一入口／PROJECT／策略／岗位组合 **75/75**，单独统一入口 **22/22**，评审证据规则 **8/8**。隔离旧源码快照中的取消准入、晚登记、强制评审 resume 反例先失败，修复后通过；取消准入不创建项目，新要求与旧计划不符时明确拒绝，显式 revise 后无评审额度仍未完成。首次补充测试误用 AbortError 断言导致的 74/75 已保留，按实际 CANCELLED 契约修正后复跑通过。针对性复审确认原 R1–R3 已解决，另发现子任务创建后登记被取消拒绝时留下 running 记录。第二轮仅在无请求且 ROOT_STOPPED 的创建失败清理中持久化取消，实际准备竞态先失败后通过；正常交付和各取消窗口聚焦 **8/8**，原评审探针也得到 cancelled 子任务与 pending 步骤。具体命令、失败与冻结文件见上述报告，第二轮独立复审已批准；见 D3–D4 第二轮复审（本机 `work/gui/desktop-unified/D3-D4-rereview2.md`）。
 
 真实 localhost HTTP、临时 Git 与固定 Docker 环境覆盖：一根快答一次；按需评审及读取后的续答；并发请求争用最后一份根额度；根与项目预算同时约束；实际只读／禁止派生准入；原生插件助手经宿主统一请求链，父子累计 14 个物理请求；修改、检查、接纳、根文件读取；历史二进制／删除／执行位补丁重建；旧交付在后续修订后仍按原版本读取；源提议两种确认 ID 合并；预留后工厂前中断，重启仅观察并由明确继续沿原 ID 建立根；取消等待已登记操作和子任务，模型在随后解释问题里提出 resume 也不能自行解除暂停。
 
@@ -206,7 +234,7 @@ D5 独立审查提出正式 PROJECT 执行期间的能力归属显示问题。�
 
 保留的失败与修正：旧 GUI 测试依赖 ONE／固定三次及直接 runWork，按新协议迁移而未恢复旧后门；二进制 fixture 起初没有为 Shell 注册完整工作范围，修正了计划，未放宽岗位 guard；历史 deliveryRef 起初误用当前修订号，修为原交付修订号并复验；收紧 readScope 后旧最终看图助手仍请求全仓，改为继承已确认读取范围；原生 fixture 首次读取 raw state 的不存在 usage 字段，改为公共 readProject 观察后通过。原失败日志保留在该证据目录。
 
-旧二进制**不受新保护**：真实旧安装忽略 unified 分支标记并发送一次 localhost 旧 ONE 请求；旧 `project status` 只读，但旧 pause/revise 均能修改 `entryPolicy:"unified"` 项目。参见 [旧版本兼容实测](work/gui/desktop-unified/D0-old-compatibility.md)。只支持同一新版包：新版 CLI 在初始化模型／插件前拒绝继续 unified 分支，无真实 rootOwner 的正式变更也拒绝。预加载检查只覆盖已知环境／启动标志和宿主记录的扩展导入，不宣称能发现任意外部已执行代码。
+旧二进制**不受新保护**：真实旧安装忽略 unified 分支标记并发送一次 localhost 旧 ONE 请求；旧 `project status` 只读，但旧 pause/revise 均能修改 `entryPolicy:"unified"` 项目。参见 旧版本兼容实测（本机 `work/gui/desktop-unified/D0-old-compatibility.md`）。只支持同一新版包：新版 CLI 在初始化模型／插件前拒绝继续 unified 分支，无真实 rootOwner 的正式变更也拒绝。预加载检查只覆盖已知环境／启动标志和宿主记录的扩展导入，不宣称能发现任意外部已执行代码。
 
 仍未验证／未完成：D5 内置 Skill 的当前源码证据见下方追加记录，D6 上下文整理仍另行实施；D7 最终全量、安装 App 候选、物理终端／IME、Windows、真实收费模型的路由／题意／摘要质量及真实费用不由这些 fixture 证明。scope/readScope/budget 或步骤集合／依赖扩张 revise 仍明确不支持；无可核实 HTTP 发送边界的适配器不开放统一生成。未增加自动重试、自动压缩或分类模型请求，agent-sync 内核未改。
 
@@ -821,11 +849,11 @@ Pi 迁移阶段已做 Kimi K3 / DeepSeek Flash 真实问答验证；失败与费
 
 正式交接使用公开 SDK 的有效上下文投影，保留用户原文、所选消息来源、已应用摘要身份和较早已确认操作的用户输入；不重建确认时的新历史，也不重新展开已压缩原文。SavedRef、摘要、操作及来源归属在派发前核验，成员准备和后续请求继承相同材料与原权限。CLI 旧计划路径保留。
 
-这些是 localhost／本机 Docker 机制验证，不证明真实模型是否理解或遵守约束。新版候选构建、完整套件和安装后验证由 D7 继续，尚未在本波次完成。修复范围、完整命令、原始失败及冻结摘要见 [最终修复报告](work/gui/desktop-unified/final-fix-report.md)。
+这些是 localhost／本机 Docker 机制验证，不证明真实模型是否理解或遵守约束。新版候选构建、完整套件和安装后验证由 D7 继续，尚未在本波次完成。修复范围、完整命令、原始失败及冻结摘要见 最终修复报告（本机 `work/gui/desktop-unified/final-fix-report.md`）。
 
 
 ## D7 原生 SDK 分支接缝修复
 
 D7 实际完整 GUI 运行发现两个 SDK 原生 fork 继续／重开失败；原始 GUI 日志保留。上下文来源现在沿受管 main-session 存储中的真实 `parentSession` 链核验身份、项目目录和所选继承前缀，兼容 SDK 标签重排，不把 GUI 分支标记单独视为授权。两项原测试先失败后 **2/2**；历史／上下文／统一会话／正式交接／controller 覆盖 **83/83**，零跳过或取消。新增边界测试拒绝同胞、伪造来源、变更继承字节、外部／符号链接父文件和跨项目目录，保留原父文件字节。
 
-本修复未重跑完整 core，也未构建候选。独立复审及 D7 最终组合、候选验证仍待继续；精确差异、哈希及 RED/GREEN 日志见 [原生分支修复报告](work/gui/desktop-unified/final-fork-fix-report.md)。
+本修复未重跑完整 core，也未构建候选。独立复审及 D7 最终组合、候选验证仍待继续；精确差异、哈希及 RED/GREEN 日志见 原生分支修复报告（本机 `work/gui/desktop-unified/final-fork-fix-report.md`）。

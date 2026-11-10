@@ -13,11 +13,12 @@ import {createRuntime} from '../src/pi-runtime.js';
 import {cothinkExtension} from '../src/extensions/cothink.js';
 import {runProjectTurn,reserveConfirmation,executeConfirmed,digest} from '../src/project-turn.js';
 
-test('resumed workers and members, and revised workers, receive frozen inputs and inherited source identities',async t=>{
- const repo=repository(t),plan={goal:'Inspect tracked text',scope:['a.txt'],readScope:['.'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"require('fs').accessSync('a.txt')"]}]};
- let action='start',planRef,leaderTurn=0,appointed=false,readerId;
+test('formal role handoffs keep verbatim requirements and only send leader-selected optional materials',async t=>{
+ const repo=repository(t),plan={goal:'Inspect tracked text',scope:['a.txt','b.txt'],readScope:['.'],deliverables:['a.txt','b.txt'],checks:[{command:'node',args:['-e',"for(const path of ['a.txt','b.txt'])require('fs').accessSync(path)"]}]};
+ let action='start',planRef,leaderTurn=0,appointed=false,readerId,selection,unauthorizedAttempt,unauthorizedResult;
  const memberBodies=[],workerBodies=[];
  const f=await fixture(t,({body})=>{
+   if(JSON.stringify(body.messages).includes('cothink-process-observation'))return {text:'{"issues":[]}'};
    const names=body.tools?.map(x=>x.function.name)??[];
    if(names.includes('start_work'))return {toolCalls:[{name:'start_work',args:action==='resume'?{action,reason:'Continue failed step',planRef}:{action,reason:'Inspect text',plan:{...plan,goal:action==='revise'?'Inspect text again':plan.goal}}}]};
    if(body.model==='r1'){memberBodies.push(body);return {text:'Inspected authorized input'};}
@@ -25,9 +26,14 @@ test('resumed workers and members, and revised workers, receive frozen inputs an
    const staffResult=body.messages.findLast(m=>m.role==='tool');
    if(staffResult){const value=JSON.parse(staffResult.content);if(value.id&&value.supervisorId==='root')readerId=value.id;}
    const tool=(name,args)=>({toolCalls:[{name,args}]});
-   if(!appointed){appointed=true;return tool('project_staff',{action:'appoint',input:{id:'reader-'+action,responsibility:'Inspect text',scope:[],readScope:['.'],models:['fixture/r1'],need:'deliverable',reason:'Read-only inspection'}});}
+   if(!appointed){appointed=true;return tool('project_staff',{action:'appoint',input:{id:'reader-'+action,responsibility:'Inspect '+action,scope:[],readScope:['.'],models:['fixture/r1'],need:'deliverable',reason:'Read-only inspection'}});}
+   if(selection && !unauthorizedAttempt){
+     unauthorizedAttempt=true;
+     return tool('delegate',{staffId:readerId,model:'fixture/r1',assignment:'Inspect text',reason:'Read-only inspection',readOnly:true,readScope:['.'],attachmentIds:['ungranted-id']});
+   }
+   if(unauthorizedAttempt && !unauthorizedResult)unauthorizedResult=JSON.parse(staffResult.content).error;
    switch(leaderTurn++%3){
-     case 0:return tool('delegate',{staffId:readerId,model:'fixture/r1',assignment:'Inspect text',reason:'Read-only inspection',readOnly:true,scope:[],readScope:['.']});
+     case 0:return tool('delegate',{staffId:readerId,model:'fixture/r1',assignment:'Inspect text',reason:'Read-only inspection',readOnly:true,scope:[],readScope:[selection?'b.txt':'a.txt'],...selection});
      case 1:return tool('collect',{});
      default:return {text:'Inspection complete'};
    }
@@ -59,17 +65,35 @@ test('resumed workers and members, and revised workers, receive frozen inputs an
  const resumeProposal=await runProjectTurn({...base,input:'Continue; retain UNIQUE_RESUME_REQUIREMENT',contextTaskIds:[source.record.id,first.record.id]}),resumed=await confirm(resumeProposal);
  assert.equal(resumed.record.status,'completed',resumed.record.error);
  assert.ok(memberBodies.length>=2,'member preparation and assigned request actually sent');
- for(const body of [workerBodies[0],...memberBodies]){
+ for(const body of [workerBodies[0]]){
    assert.ok(payloadImageHashes(body).has(upload.sha256),'project request carries a typed WebP block');
    const sent=JSON.stringify(body.messages);
    for(const marker of ['UNIQUE_START_REQUIREMENT','UNIQUE_RESUME_REQUIREMENT','INHERITED_CONTEXT_MARKER',markerId,source.record.id])assert.ok(sent.includes(marker),marker);
  }
+ for(const body of memberBodies){
+   assert.equal(payloadImageHashes(body).has(upload.sha256),false,'an empty member grant sends no task-level image');
+   const sent=JSON.stringify(body.messages);
+   assert.doesNotMatch(sent,/INHERITED_CONTEXT_MARKER/);
+   for(const marker of ['UNIQUE_START_REQUIREMENT','UNIQUE_RESUME_REQUIREMENT',source.record.id])assert.ok(sent.includes(marker),marker);
+ }
+ const memberBefore=memberBodies.length;
  const before=workerBodies.length;action='revise';appointed=false;
- const proposal=await runProjectTurn({...base,input:'Revise inspection; preserve UNIQUE_REVISE_REQUIREMENT',contextTaskIds:[source.record.id,first.record.id,resumed.record.id]}),revised=await confirm(proposal);
+ const proposal=await runProjectTurn({...base,input:'Revise inspection; preserve UNIQUE_REVISE_REQUIREMENT',contextTaskIds:[source.record.id,first.record.id,resumed.record.id]});
+ const chosen=proposal.record.handoffContext.materials.find(item=>item.ref.id===markerId);
+ selection={attachmentIds:[material.manifest.id],contextSourceIds:[chosen.sourceId],contextSummary:{text:'Review the earlier marker.',sourceIds:[chosen.sourceId]}};
+ const revised=await confirm(proposal);
  assert.equal(revised.record.status,'completed',revised.record.error);assert.ok(workerBodies.length>before,'revised worker actually sent');
  for(const body of workerBodies.slice(before)){
    assert.ok(payloadImageHashes(body).has(upload.sha256),'project request carries a typed WebP block');
    const sent=JSON.stringify(body.messages);
    for(const marker of ['UNIQUE_START_REQUIREMENT','UNIQUE_RESUME_REQUIREMENT','UNIQUE_REVISE_REQUIREMENT',source.record.id,resumed.record.id])assert.ok(sent.includes(marker),marker);
  }
+ assert.ok(memberBodies.length>memberBefore,JSON.stringify(workerBodies.slice(before).map(body=>body.messages.findLast(message=>message.role==='tool')?.content)));
+ assert.equal(unauthorizedResult?.code,'ROLE_MATERIAL');
+ for(const body of memberBodies.slice(memberBefore)){
+   assert.ok(payloadImageHashes(body).has(upload.sha256),'selected member requests carry the frozen typed attachment');
+   const sent=JSON.stringify(body.messages);
+   for(const marker of ['UNIQUE_REVISE_REQUIREMENT','INHERITED_CONTEXT_MARKER',chosen.sourceId])assert.ok(sent.includes(marker),marker);
+ }
+ assert.match(JSON.stringify(memberBodies.at(-1).messages),/Review the earlier marker/);
 });

@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
 import { repository } from "./helpers/git-fixture.js";
+import { teamId } from "./helpers/gui-controller-fixture.js";
 import { chooseRailCreation } from "./helpers/gui-rail.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
 const packageRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL("..",import.meta.url)));
@@ -13,6 +14,7 @@ const load=path=>import(pathToFileURL(join(packageRoot,path)));
 const {saveConfig}=await load("src/config.js");
 const {createTeamConfig}=await load("src/teams.js");
 const {startGuiServer}=await load("src/gui-server.js");
+const {GUI_INPUT_VERSION}=await load("src/gui-turn-options.js");
 import { execution } from "./helpers/agent-sync-fixture.js";
 const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
 
@@ -25,6 +27,7 @@ async function saveTeam(page, name, path) {
   await dialog.getByText("可以使用这个文件夹。",{exact:true}).waitFor();
   const child=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==="/api/action"&&
     response.request().method()==="POST"&&response.request().postDataJSON()?.action==="session.create");
+  await dialog.getByRole("combobox",{name:"默认阵容",exact:true}).selectOption(teamId);
   await dialog.getByRole("button",{name:"创建",exact:true}).click();
   await dialog.waitFor({state:"hidden"});
   return (await child).json();
@@ -130,13 +133,13 @@ test(
     await page.getByLabel("输入问题").fill("制作一个蓝色矩形");
     await page.getByRole('button',{name:/^对话操作：/}).click();
     await page.getByRole('button',{name:'下一条消息的限制',exact:true}).click();
-    await page.getByLabel('本轮最多模型请求（留空不设上限）',{exact:true}).fill('5');
+    await page.getByLabel('本轮最多模型请求（留空不设上限）',{exact:true}).fill('6');
     mkdirSync(resolve('work/gui/desktop-unified/d3-d4-evidence'),{recursive:true});
     await page.screenshot({path:resolve('work/gui/desktop-unified/d3-d4-evidence/turn-options.png'),fullPage:true});
     await page.keyboard.press('Escape');
     const proposalSubmission=page.waitForRequest(request=>request.method()==="POST"&&new URL(request.url()).pathname==="/api/action"&&request.postDataJSON()?.action==="task.submit");
     await page.getByRole("button", {name:/^发送/}).dblclick();
-    assert.equal((await proposalSubmission).postDataJSON().args.budget.maxCalls,5);
+    assert.equal((await proposalSubmission).postDataJSON().args.budget.maxCalls,6);
     await page.getByRole("button",{name:"确认上述计划并执行",exact:true}).click();
     await page
       .getByText("GUI visual delivery", { exact: false })
@@ -153,17 +156,18 @@ test(
     const deliveredTask = await get('/api/task?id=' + deliveredRef.taskId);
     const deliveredSession = await get('/api/session?id=' + deliveredTask.sessionId);
     assert.equal(deliveredSession.id,session.id);
+    assert.equal(deliveredTask.status,'completed',deliveredTask.error??'The confirmed GUI task must complete before placing its files.');
     assert.match(readFileSync(join(session.project,"index.html"),"utf8"),/<h1>蓝色作品<\/h1>/);
     assert.equal(existsSync(join(repo.project,"index.html")),false);
     // Formal execution has its own same-title session; label the user conversation
     // by its durable ID so the search assertion cannot accidentally open that child.
     const renamed = await fetch(h.origin + '/api/action',{
-      method:'POST',headers:{Authorization:`Bearer ${h.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"2"},
+      method:'POST',headers:{Authorization:`Bearer ${h.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":GUI_INPUT_VERSION},
       body:JSON.stringify({action:'session.name',args:{sessionId:deliveredSession.id,title:'蓝色矩形交付记录'}}),
     });
     assert.equal(renamed.status,200);
     await page.getByRole("region",{name:"成果文件阅读"}).waitFor();
-    await page.getByText("检查、截图与版本详情",{exact:true}).click();
+    await page.getByText("最终组合视觉复核",{exact:true}).click();
     await page
       .getByText("index.html · 最终版本审查完成", { exact: true })
       .waitFor();
@@ -249,7 +253,7 @@ test(
     assert.equal(await picker.getByLabel('包含归档',{exact:true}).isChecked(),false);
     assert.equal((await get('/api/session?id=' + deliveredSession.id)).workspaceId,deliveredSession.workspaceId);
     assert.equal(f.calls.length,beforeSearch,'file search, reading and scoped history make no model calls');
-    assert.equal(f.calls.length, 5);
+    assert.equal(f.calls.length, 6);
     assert.ok(f.calls.every((c) => c.body.model === "main"));
     assert.deepEqual(errors, []);
   },
@@ -270,7 +274,7 @@ test('actual browser preserves startup draft and refuses unmanaged native comman
   const h=await startGuiServer({home:f.home,cwd:f.cwd,open:false});t.after(()=>h.close());
   const startupDraft="插件完成后我还要编辑这份草稿";
   const saved=await fetch(h.origin+"/api/action",{method:"POST",headers:{
-    Authorization:`Bearer ${h.token}`,"Content-Type":"application/json","X-CoThink-GUI-Input":"2",
+    Authorization:`Bearer ${h.token}`,"Content-Type":"application/json","X-CoThink-GUI-Input":GUI_INPUT_VERSION,
   },body:JSON.stringify({action:"home.draft",args:{draftId:randomUUID(),expectedRevision:null,
     editor:{editorVersion:2,text:startupDraft,editId:randomUUID(),materials:[],workRequest:null,selectionId:null}}})});
   assert.equal(saved.status,200);

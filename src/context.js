@@ -97,25 +97,31 @@ export function revisionMaterial(reviews) {
 
 /** Source boundaries are host-owned; delegation never replaces the user's words. */
 export function buildMemberTaskMaterial({ originalTask, project, assignment, implementationAdvice, reason,
-  execution, tools, answerSkills = [], preparation = false, feedback, taskConflict, refresh }) {
+  execution, tools, answerSkills = [], preparation = false, reuseAssignment = false, feedback, taskConflict, refresh }) {
   return JSON.stringify({
     source: "CoThink host-provided member material; not a new user message",
     instructions: "Use the user's explicitly requested response language; otherwise use the user's language. Preserve quoted source text verbatim. The original user task takes priority over the leader's assignment and advice. Skills do not grant tool permissions.",
-    originalTask: { source: "Original user input, verbatim", text: originalTask },
-    ...(project ? { projectGoal: { effectiveGoal: project.goal, revision: project.revision, subgoal: project.subgoal, deliverables: project.deliverables, startVersion: project.startVersion } } : {}),
-    ...(project?.handoffContext ? {handoffContext:project.handoffContext} : {}),
+    ...(!reuseAssignment ? {
+      originalTask: { source: "Original user input, verbatim", text: originalTask },
+      ...(project ? { projectGoal: { effectiveGoal: project.goal, revision: project.revision, subgoal: project.subgoal, deliverables: project.deliverables, startVersion: project.startVersion } } : {}),
+      ...(project?.handoffContext ? {handoffContext:project.handoffContext} : {}),
+    } : {}),
     execution: { source: "Host-confirmed current authority and capabilities", ...execution, tools },
-    answerSkills,
+    ...(!reuseAssignment ? {answerSkills} : {}),
     ...(preparation ? {
       phase: "Independent task preparation",
       instruction: execution.reviewArtifact
         ? "Inspect the supplied candidate against the original task. Record your own observations, counterexamples and uncertainties before receiving any prior opinion. Use read for evidence from this exact version."
         : "Before receiving any assignment or advice, briefly explain the original goal, key relationships and explicit constraints, and any uncertainty about the file scope. Do not guess your assignment. Only read/search tools are available. Do not implement yet.",
     } : {
-      assignment: { source: "Leader-assigned responsibility; subordinate to the original task", text: assignment },
-      implementationAdvice: { source: "Leader suggestion or hypothesis; not user requirements", text: implementationAdvice ?? "" },
-      reason: { source: "Leader selection rationale", text: reason },
-      instruction: execution.reviewKind === "ordinary"
+      ...(!reuseAssignment ? {
+        assignment: { source: "Leader-assigned responsibility; subordinate to the original task", text: assignment },
+        implementationAdvice: { source: "Leader suggestion or hypothesis; not user requirements", text: implementationAdvice ?? "" },
+        reason: { source: "Leader selection rationale", text: reason },
+      } : {}),
+      instruction: reuseAssignment
+        ? "Continue the same assignment and frozen sources from this session. Keep the original user requirements. Apply the current authority and specific correction."
+        : execution.reviewKind === "ordinary"
         ? "Compare your recorded observations with the proposed interpretation, preserving any disagreement. Base your judgment on the original task and the exact candidate."
         : "Compare the assignment and advice with your independent understanding and the original task. Report conflicts using report_task_conflict before continuing. Do not silently accept a changed task.",
       ...(feedback ? { feedback: { source: "Concrete leader correction on the same draft; not a new user request", text: feedback } } : {}),
@@ -123,4 +129,37 @@ export function buildMemberTaskMaterial({ originalTask, project, assignment, imp
       ...(refresh ? { refresh } : {}),
     }),
   });
+}
+
+export function assignedRoleMaterial(task, args, owner) {
+  if (args.reviewOf && args.reviewKind !== "ordinary" && (args.contextSourceIds?.length || args.contextSummary))
+    throw problem("ROLE_MATERIAL", "Independent review receives the fixed candidate and user requirements. Prior conversation opinions and summaries are excluded.");
+  const handoff = task.record.project.handoffContext;
+  const sources = owner ? owner.materialGrant.handoff.materials : handoff?.materials ?? [];
+  const attachments = owner ? owner.materialGrant.attachments : task.materialContext ?? [];
+  const select = (items, ids, identity) => [...new Set(ids??[])].map(id=>{
+    const item = items.find(candidate=>identity(candidate) === id);
+    if (!item) throw problem("ROLE_MATERIAL", `Material ${id} is outside this supervisor's frozen sources.`);
+    return item;
+  });
+  const chosenAttachments = select(attachments,args.attachmentIds,material=>material.manifest.id);
+  const attachmentRefs = chosenAttachments.map(material=>materialReference(material.manifest));
+  const chosenSources = select(sources,args.contextSourceIds,source=>source.sourceId).map(source=>{
+    const {attachmentRefs:embedded,...textSource}=source;
+    const included=embedded?.filter(ref=>attachmentRefs.some(selected=>selected.id===ref.id&&selected.sha256===ref.sha256));
+    return included?.length ? {...textSource,attachmentRefs:included} : textSource;
+  });
+  let derivedSummary;
+  if (args.contextSummary) {
+    const {text,sourceIds}=args.contextSummary;
+    if (!text.trim() || !sourceIds.length)
+      throw problem("ROLE_MATERIAL", "A nonempty summary requires selected frozen sources.");
+    const evidence=select(sources,sourceIds,source=>source.sourceId);
+    derivedSummary={text,derived:true,author:owner?.binding.role??"main",sources:evidence.map(source=>source.ref)};
+  }
+  return {attachments:chosenAttachments,handoff:{
+    input:handoff?.input??task.record.input,sourceTaskId:handoff?.sourceTaskId??null,sessionId:handoff?.sessionId??null,
+    inheritedInputs:handoff?.inheritedInputs??[],materials:chosenSources,attachmentRefs,
+    ...(derivedSummary?{derivedSummary}:{}),
+  }};
 }

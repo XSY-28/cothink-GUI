@@ -109,11 +109,11 @@
     },
     {
       "name": "context-management",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "3b64115a4fe8dbf6ebb5181bef50ffcf6300e17ea1f56485a7937aaf7a14601d",
+          "sha256": "0bc8b596011be6826f86094f85b09439860839abd7691179b7ac45932c177dc4",
           "mode": 420
         },
         {
@@ -123,7 +123,7 @@
         },
         {
           "path": "assets/source.json",
-          "sha256": "f290f7e4db03550207eb13486ce8e7b4df1ec97ab55953f39af10ea0b6338b50",
+          "sha256": "ab4deea12bfe9398d9406f44ba692cad28461d43b9d018312cf565c20cf78fff",
           "mode": 420
         }
       ]

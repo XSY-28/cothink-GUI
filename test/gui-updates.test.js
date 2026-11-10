@@ -3,16 +3,18 @@ import assert from 'node:assert/strict';
 import {readFileSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {fixtureConversation} from './helpers/gui-controller-fixture.js';
 import {fixture} from './helpers/pi-fixture.js';
 import {createUpdateService} from '../src/updates.js';
 import {createGuiController} from '../src/gui-controller.js';
 import {startGuiServer} from '../src/gui-server.js';
+import {GUI_INPUT_VERSION} from '../src/gui-turn-options.js';
 
 test('GUI bootstrap is usable while request hangs, subscription reports completion, drafts and selection stay intact',async t=>{
   const f=await fixture(t);let release, calls=0;
   const updates=createUpdateService({home:f.home,currentVersion:'0.8.0',env:{},fetchImpl:()=>{calls++;return new Promise(r=>release=r);}});
   const c=await createGuiController({home:f.home,cwd:f.cwd,updateService:updates});t.after(()=>c.close());
-  const s=await c.action('session.create',{project:null});
+  const s=await fixtureConversation(t,c,{defaultRosterId:null});
   await c.action('session.draft',{sessionId:s.id,text:'draft stays',expectedDraftRevision:s.draftRevision,branchAnchor:s.branchAnchor,editId:randomUUID(),workRequest:null,selectionId:null});
   let events=0;c.subscribe(()=>events++);
   const checking=c.checkForUpdates();
@@ -33,7 +35,7 @@ test('authenticated update actions reject endpoint/package injection and malform
   const c=await createGuiController({home:f.home,cwd:f.cwd,updateService:updates});
   const host=await startGuiServer({home:f.home,controller:c,open:false});t.after(()=>host.close());
   const base=host.url.split('/#')[0];
-  const post=(name,args,auth=true)=>fetch(base+'/api/action',{method:'POST',headers:{'Content-Type':'application/json', "X-CoThink-GUI-Input":"2",...(auth?{Authorization:'Bearer '+host.token}:{})},body:JSON.stringify({action:name,args})});
+  const post=(name,args,auth=true)=>fetch(base+'/api/action',{method:'POST',headers:{'Content-Type':'application/json', "X-CoThink-GUI-Input":GUI_INPUT_VERSION,...(auth?{Authorization:'Bearer '+host.token}:{})},body:JSON.stringify({action:name,args})});
   assert.equal((await post('updates.check',{},false)).status,403);
   for(const [name,args] of [['updates.check',{endpoint:'http://bad'}],['updates.configure',{automatic:'false'}],['updates.configure',{automatic:true,package:'bad'}]]) {
     assert.equal((await post(name,args)).status,400);

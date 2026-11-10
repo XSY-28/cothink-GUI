@@ -1,6 +1,11 @@
 import {validateWorkRequest} from "./visual-preview.js";
-import {assertRootOwner, assertConfirmedProjectState, digest, resolveHandoffContext} from "./project-turn.js";
+import {verifyProjectVisual} from "./visual-project-delivery.js";
+import { assertRootOwner } from "./project-turn.js";
+import { assertConfirmedProjectState } from "./project-file-confirmation.js";
+import { digest } from "./project-collaboration-evidence.js";
+import { resolveHandoffContext } from "./project-readonly-reports.js";
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   existsSync,
   readFileSync,
@@ -18,15 +23,14 @@ import {
   writePrivateJson,
 } from "./storage.js";
 import { legacyGit } from "./git-versioning.js";
-import { assertProjectPathSpellings, createVersioning, inScope, projectScopesOverlap, validProjectPath } from "./versioning.js";
-import { readTask, readRequests, taskDisplayStatus, problem } from "./task.js";
+import { assertProjectPathSpellings, createVersioning, inScope, projectScopesOverlap, validProjectPath, withChangeQueue } from "./versioning.js";
+import { readTask, readRequests, problem } from "./task.js";
 import { loadConfig, validateConfig } from "./config.js";
 import { resolveTeamConfig } from "./teams.js";
 import { runTurn } from "./discussion.js";
 import { safeText } from "./terminal.js";
 import { recoverProjectMcpReceipt, validateProjectMcp } from "./project-mcp-work.js";
 import { createProjectStaff, changeProjectStaff } from "./project-staff.js";
-import { assertProjectWorkReviewed } from "./project-review.js";
 import {
   createProjectPolicy,
   validateProjectBudget,
@@ -35,6 +39,7 @@ import {
   projectUsage,
   reconcileProjectCalls,
 } from "./project-policy.js";
+import { evidence, formal, now, onOwnedLine, ownedParents, provePrevious, savedTask, verifyDelivery } from "./project-delivery-checks.js";
 
 export const projectHelp = `cothink project start --file PLAN.json [--repo PATH] [--json]
 cothink project status|pause|resume [--repo PATH] [--json]
@@ -46,17 +51,16 @@ cothink project route judge|experiment 'JSON' [--repo PATH] [--json]
 每个交付路径默认是一项工作。可用 works 定义具名工作及 scope，effect 用 {target,action,round} 绑定一次获准动作。需要异型号独立评审时，在步骤或具体工作上指定 independentReview:true。
 `;
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
-const now = () => new Date().toISOString();
 const required = (s, label) => {
   if (typeof s !== "string" || !s.trim())
     throw Error(label + " must be nonempty text");
   return s;
 };
-function paths(items, allowRoot = false) {
+function paths(items, allowRoot = false, field = "project paths") {
   if (!Array.isArray(items) || !items.length)
-    throw Error("Expected nonempty project paths");
+    throw Error(field + " must be a nonempty array of path strings");
   for (const path of items)
-    if (!validProjectPath(path, allowRoot)) throw Error("Invalid project path: " + path);
+    if (!validProjectPath(path, allowRoot)) throw Error("Invalid path in " + field + ": " + path);
   return [...new Set(items)];
 }
 // Preserve explicit requests independently of the planner. The structured,
@@ -148,24 +152,28 @@ function projectSelections(plan) {
   const explicit = [...required(plan.goal, "goal").matchAll(/(?:^|\s)(?:\/skill:|\$)([a-zA-Z0-9_-]+)(?=\s|$|[.,，。])/g)].map(m => m[1]);
   return {mcp:validateProjectMcp(plan.mcp),plugins:names(plan.plugins,"plugins"),explicitSkills:[...new Set([...names(plan.explicitSkills,"explicitSkills"),...explicit])]};
 }
-function initialState(plan, location) {
+function compileProjectPlan(plan, location, userInput) {
+  if(!plan||typeof plan!=="object"||Array.isArray(plan))throw Error("plan must be an object");
   const goal = required(plan.goal, "goal");
+  if(plan.steps!==undefined&&(!Array.isArray(plan.steps)||plan.steps.some(step=>!step||typeof step!=="object"||Array.isArray(step))))
+    throw Error("steps must be an array of step objects");
+  if(userInput!==undefined)plan=preserveReviewRequest(userInput,plan);
   plan = projectReviewPlan(plan);
-  const scope = paths(plan.scope, true);
+  const scope = paths(plan.scope, true, "scope");
   const definitions =
     plan.steps ??
     (plan.deliverables && plan.checks ? [{ ...plan, id: "main", goal }] : []);
   if (!Array.isArray(definitions) || !definitions.length)
-    throw Error("Plan needs at least one step");
+    throw Error("Provide top-level deliverables and checks for one step, or a nonempty steps array");
   if (plan.independentReview !== undefined && typeof plan.independentReview !== "boolean")
     throw Error("Project independentReview must be a boolean");
   const steps = definitions.map((s) => {
     if (!/^[a-zA-Z0-9_-]{1,100}$/.test(required(s.id, "step id")))
       throw Error("Invalid step ID");
-    const stepScope = paths(s.scope ?? scope, true);
+    const stepScope = paths(s.scope ?? scope, true, "step "+s.id+" scope");
     if (!stepScope.every((p) => inScope(p, scope)))
       throw Error("Step scope exceeds project scope");
-    const deliverables = paths(s.deliverables);
+    const deliverables = paths(s.deliverables, false, "step "+s.id+" deliverables");
     if (!deliverables.every((p) => inScope(p, stepScope)))
       throw Error("Deliverable outside step scope");
     if (
@@ -187,7 +195,7 @@ function initialState(plan, location) {
             (!Number.isSafeInteger(c.timeoutMs) || c.timeoutMs < 1)),
       )
     )
-      throw Error("Each step needs fixed container entry-point checks");
+      throw Error("step "+s.id+" checks must be a nonempty array of fixed container entry points {command,args?,timeoutMs?}");
     const dependsOn = s.dependsOn ?? [];
     if (!Array.isArray(dependsOn))
       throw Error("dependsOn must be a list of step IDs");
@@ -223,7 +231,7 @@ function initialState(plan, location) {
       if (s.dependsOn.every((k) => reachable.has(k))) reachable.add(s.id);
   if (reachable.size !== steps.length)
     throw Error("Unknown or cyclic step dependency");
-  return {
+  const state={
     formatVersion: 1,
     id: location.id,
     repo: location.repo,
@@ -234,7 +242,7 @@ function initialState(plan, location) {
     revision: 1,
     revisions: [],
     scope,
-    ...(plan.readScope ? {readScope:paths(plan.readScope,true)} : {}),
+    ...(plan.readScope!==undefined ? {readScope:paths(plan.readScope,true,"readScope")} : {}),
     steps,
     budget: validateProjectBudget(plan.budget ?? {}),
     staff: [],
@@ -245,6 +253,7 @@ function initialState(plan, location) {
     commands: {},
     createdAt: now(),
   };
+  return {plan,state};
 }
 async function locate(home, cwd) {
   const repo = realpathSync(
@@ -340,8 +349,8 @@ export async function projectChatState(home, cwd) {
   if (state && state.repo !== loc.repo) throw Error("这个项目属于另一个工作树：" + state.repo);
   return {repo:loc.repo, commonDir:loc.commonDir, projectId:loc.id, state};
 }
-export function validateChatPlan(plan) {
-  initialState(plan, {id:"preview", repo:""});
+export function validateChatPlan(plan,{userInput}={}) {
+  return compileProjectPlan(plan, {id:"preview", repo:""}, userInput);
 }
 export async function readProject(home, repo) {
   return view(home, await locate(home, repo));
@@ -398,7 +407,7 @@ function control(s, command) {
     throw Error("Select affected steps using --step ID");
   const previousDefinitions = [];
   if (command.plan) {
-    const revised = initialState(command.plan, { id: s.id, repo: s.repo });
+    const {state:revised} = compileProjectPlan(command.plan, { id: s.id, repo: s.repo });
     assertProjectPathSpellings([...revised.steps.flatMap(stepPaths), ...s.steps.flatMap(stepPaths),
       ...s.revisions.flatMap(r => r.previousDefinitions ?? []).flatMap(stepPaths),
       ...Object.values(s.staffAssignments ?? {}).flatMap(a => [...(a.scope ?? []), ...(a.readScope ?? [])])]);
@@ -408,7 +417,8 @@ function control(s, command) {
       !equal(revised.scope, s.scope) ||
       !equal(revised.readScope, s.readScope) ||
       !equal(revised.budget, s.budget) ||
-      !equal(revised.workRequest, s.workRequest) ||
+      (s.entryPolicy === "unified" ? s.workRequest && !revised.workRequest :
+        !equal(revised.workRequest, s.workRequest)) ||
       !equal(
         revised.steps.map((x) => x.id),
         s.steps.map((x) => x.id),
@@ -457,6 +467,7 @@ function control(s, command) {
       delete before.review;
       Object.assign(before, definition(after));
     }
+    if (s.entryPolicy === "unified" && revised.workRequest) s.workRequest = revised.workRequest;
   } else {
     const selected = s.steps.filter(step => affected.has(step.id));
     const updated = preserveReviewRequest(goal, {steps:selected});
@@ -512,7 +523,7 @@ function ownHost(home, loc, lock, initial) {
     home,
     read: () => structuredClone(state),
     assertOwned: lock.assertOwned,
-    live: null,
+    live: new Map(),
     runRequested: false,
     update(fn) {
       lock.assertOwned();
@@ -557,9 +568,10 @@ function ownHost(home, loc, lock, initial) {
               if(Object.keys(c.input).some(k=>k!=="originalRequestId")||typeof id!=="string"||!["query","cancel"].includes(c.operation))throw Error("MCP recovery accepts only originalRequestId and query/cancel");
               const claim=host.read().callIntents?.find(x=>x.kind==="external"&&x.id===id);
               if(!claim)throw Error("Unknown original MCP receipt");
-              if(host.live) {
-                if(host.live.taskId!==claim.taskId)throw Error("Another live task owns this project; wait for its saved result");
-                const result=await host.live.projectPolicy.recoverMcp(id,c.operation);
+              if(host.live.size) {
+                const live=host.live.get(claim.taskId);
+                if(!live)throw Error("Another live task owns this project; wait for its saved result");
+                const result=await live.projectPolicy.recoverMcp(id,c.operation);
                 host.update(s=>{s.mcpRecovery={...result,at:now()};});
               } else {
                 const record=readTask(home,claim.taskId),policy=createProjectPolicy({host,binding:record.project,home});
@@ -584,14 +596,10 @@ function ownHost(home, loc, lock, initial) {
             ["pause", "revise"].includes(c.action)
           )
             host.finalController.abort();
-          if (
-            !error &&
-            host.live &&
-            (state.status === "paused" ||
-              state.steps.find((x) => x.id === host.live.stepId).revision !==
-                host.live.revision)
-          )
-            host.live.controller.abort();
+          if (!error) for (const live of host.live.values())
+            if (state.status === "paused" ||
+              state.steps.find(x => x.id === live.stepId).revision !== live.revision)
+              live.controller.abort();
         }
         unlinkSync(join(loc.inbox, file));
       }
@@ -601,453 +609,6 @@ function ownHost(home, loc, lock, initial) {
     return draining;
   };
   return host;
-}
-async function formal(home, repo) {
-  let v;
-  try {
-    v = await createVersioning({
-      home,
-      project: repo,
-      backend: "agent-sync",
-      readOnly: true,
-    });
-    return await v.inspect();
-  } catch (e) {
-    if (e.code !== "NO_PROJECT") throw e;
-    return {
-      version: await legacyGit(repo, [
-        "rev-parse",
-        "--verify",
-        "HEAD^{commit}",
-      ]),
-      integrationRef: null,
-    };
-  } finally {
-    await v?.close();
-  }
-}
-// Read first-parent changes after a candidate was accepted. A change followed by
-// an exact revert is still a new candidate; endpoint comparisons alone miss it.
-async function reviewedHistory(v, version, accepted) {
-  if (!accepted.length) return;
-  const pending = new Map(accepted.map(c => [c.acceptedVersion,c]));
-  const laterChanges = new Set();
-  let cursor, order = 0;
-  do {
-    const page = await v.inspect({history:{cursor,limit:100}});
-    if (!cursor && page.versions[0]?.version !== version)
-      throw Error("Formal tip moved during independent review verification");
-    for (const row of page.versions) {
-      const c = pending.get(row.version);
-      if (c) {
-        c.laterChanges = [...laterChanges];
-        c.order = order;
-        pending.delete(row.version);
-        if (!pending.size) return;
-      }
-      if (!row.parents[0]) break;
-      const diff = await v.inspect({fromVersion:row.parents[0],toVersion:row.version});
-      for (const path of diff.files) laterChanges.add(path);
-      order++;
-    }
-    cursor = page.nextCursor;
-  } while (cursor);
-  throw Error("Reviewed acceptance is absent from the current formal history");
-}
-// Re-query accepted candidates from agent-sync. Identical checks or an author's
-// saved candidate ID cannot substitute for the accepted product and its content.
-async function reviewEvidence(v, home, state, step, version, task, requestFacts) {
-  const reviewers = Object.values(state.staffAssignments ?? {}).filter(a => a.reviewReceipts?.length);
-  if (!step.works.some(work => work.independentReview) && !reviewers.length) return [];
-  const sources = new Map([[task.id,{record:task}]]);
-  // A later review-only attempt owns its review, not the prior implementation.
-  // Recover only the earlier change actually reviewed by this attempt, and
-  // only for the same work under the same frozen scope.
-  for (const reviewer of reviewers) {
-    const source = reviewer.reviewSource;
-    if (reviewer.taskId !== task.id || !source || source.taskId === task.id ||
-        !step.attempts.some(a => a.taskId === source.taskId) ||
-        !reviewer.reviewReceipts.some(r => r.reviewTaskId === task.id &&
-          r.taskId === source.taskId && r.changeId === source.changeId)) continue;
-    if (!sources.has(source.taskId)) {
-      const record = readTask(home, source.taskId);
-      if (record.project?.id !== state.id || record.project.stepId !== step.id ||
-          record.work?.root !== state.repo || record.work.backend !== "agent-sync")
-        throw Error("Cannot verify the original task for post-hoc independent review");
-      sources.set(source.taskId,{record,priorWorkIds:new Set()});
-    }
-    const {record,priorWorkIds} = sources.get(source.taskId);
-    const sameWorks = (source.workIds ?? []).filter(id =>
-      step.works.some(work => work.id === id && record.project.works?.some(old =>
-        old.id === id && isDeepStrictEqual(old.scope,work.scope))));
-    for (const id of sameWorks) priorWorkIds.add(id);
-  }
-
-  const accepted = [];
-  for (const {record,priorWorkIds} of sources.values()) {
-    if (priorWorkIds && !priorWorkIds.size) continue;
-    // Every acceptance for this work in the original task must participate in
-    // the gate. Mentioning just one of two changed files cannot hide the other.
-    for (const row of record.work?.acceptance ?? []) {
-      const fact = requestFacts?.find(f => f.id === row.requestId)?.fact ??
-        await v.inspect({requestId:row.requestId});
-      if (fact.status !== "accepted" || fact.changeId !== row.changeId) continue;
-      const change = await v.inspect({changeId:fact.changeId});
-      const candidate = change.candidates.find(c => c.candidateVersion === fact.candidateVersion);
-      if (!candidate) throw Error("Independent review candidate record is missing: " + fact.changeId);
-      const {files} = await v.inspect({fromVersion:change.baseVersion,toVersion:fact.candidateVersion});
-      const difference = await v.inspect({fromVersion:fact.candidateVersion,toVersion:version});
-      accepted.push({...fact, ...candidate, taskId:record.id, files, difference:difference.files,
-        priorWorkIds});
-    }
-  }
-  await reviewedHistory(v, version, accepted);
-  accepted.sort((a,b) => b.order - a.order);
-  const receipts = [];
-  for (const work of [...step.works, ...(step.subworks ?? [])]) {
-    const candidates = accepted.filter(c => (!c.priorWorkIds || c.priorWorkIds.has(work.id)) &&
-      c.files.some(path => inScope(path, work.scope)));
-    const current = candidates.filter(c => {
-      const scopes = [...work.scope, ...c.files, ...Object.values(c.basis).map(b => b.path),
-        ...reviewers.filter(a => a.reviewSource?.changeId === c.changeId).flatMap(a => a.readScope ?? [])];
-      return ![...c.difference,...c.laterChanges].some(path => inScope(path, scopes));
-    });
-    // A newer accept for the same files replaces an earlier candidate even if
-    // its bytes coincidentally match. Keep each last producer, in actual formal order.
-    const latest = new Map();
-    for (const c of candidates)
-      for (const path of c.files.filter(path => inScope(path,work.scope))) latest.set(path,c);
-    const facts = [...new Set(latest.values())];
-    if (facts.some(f => !current.includes(f) && (work.independentReview ||
-        reviewers.some(a => a.reviewSource?.changeId === f.changeId &&
-          a.reviewReceipts.some(r => r.verdict === "reject")))))
-      throw Error("Independent review is stale on the current formal version: " + work.id);
-    const verified = assertProjectWorkReviewed(state, {work,step,version,
-      acceptedFacts:facts.filter(f => current.includes(f)), required:!!work.independentReview});
-    if (work.independentReview && facts.some(f => f.priorWorkIds) &&
-        !verified.some(r => r.reviewTaskId === task.id && r.taskId !== task.id && r.certified && r.verdict === "pass"))
-      throw Error("独立评审未完成：本次补评没有绑定已接纳的原候选。");
-    receipts.push(...verified);
-  }
-  return [...new Map(receipts.map(r => [r.requestId,r])).values()];
-}
-async function evidence(home, state, step, record, requests, attempt) {
-  const {repo} = state;
-  const w = record.work;
-  const evidence = {
-    endedAt: now(),
-    taskStatus: taskDisplayStatus(record),
-    requestIds: requests.map((r) => r.id),
-    usage: record.usage ?? null,
-    version: w?.version ?? null,
-    resultWorkspace: w?.resultWorkspace ?? null,
-    artifacts: [],
-  };
-  if (
-    requests.some((r) => r.sent && r.status === "outcome_unknown") ||
-    ["stop_unknown", "cancelling"].includes(evidence.taskStatus) ||
-    record.tools?.some(t=>t.kind==="project_mcp_call"&&["intent","pending","outcome_unknown"].includes(t.status)) ||
-    record.tools?.some(t=>t.kind==="project_mcp_runtime"&&t.requests?.some(r=>!r.originalRequestId&&["pending","outcome_unknown"].includes(r.status))) ||
-    record.work?.helpers?.some((h) => !h.stoppedAt) ||
-    record.tools?.some((t) => (t.nativeBackground || t.kind === "employee_script_result" || t.kind === "project_plugin_runtime" || t.kind === "project_mcp_runtime" && t.containerId) && !t.stoppedAt)
-  )
-    evidence.unknown = true;
-  evidence.unknownIdentities = [
-    ...new Set(
-      requests
-        .filter((r) => r.sent && r.status === "outcome_unknown")
-        .map((r) => r.actualModel?.modelId ?? r.requestedModel?.modelId)
-        .filter(Boolean),
-    ),
-  ];
-  let v;
-  try {
-    if (!w?.root)
-      throw Error(record.error ?? "No managed file work was recorded");
-    if (realpathSync(w.root) !== repo || w.backend !== "agent-sync")
-      throw Error("Work did not use the authorized repository");
-    v = await createVersioning({
-      home,
-      project: repo,
-      backend: "agent-sync",
-      readOnly: true,
-    });
-    const f = await v.inspect();
-    evidence.formalVersion = f.version;
-    evidence.integrationRef = f.integrationRef;
-    const ids = [
-      ...new Set(
-        [
-          ...(w.requests ?? []),
-          ...(w.acceptance ?? []),
-          ...(record.tools ?? []).filter((t) => t.kernelInput),
-          ...(w.helpers ?? []).map((h) => h.import),
-          ...(record.tools ?? []).map((t) => t.import),
-        ]
-          .map((x) => x?.requestId)
-          .filter(Boolean),
-      ),
-    ];
-    const facts = [];
-    for (const id of ids)
-      facts.push({ id, fact: await v.inspect({ requestId: id }) });
-    const undispatched = new Set((w.requests ?? []).filter(r => r.dispatched === false).map(r => r.requestId));
-    evidence.kernelRequests = facts.map(({ id, fact }) => ({
-      requestId: id,
-      status: fact.status === "not_found" && undispatched.has(id) ? "not_sent" : fact.status,
-    }));
-    if (
-      evidence.kernelRequests.some(r =>
-        ["unknown", "outcome_unknown", "pending", "not_found"].includes(r.status),
-      )
-    )
-      evidence.unknown = true;
-    // The immutable public accept receipts bind each new formal tip to its parent.
-    // A check from this task alone does not authorize somebody else's intervening commit.
-    const parents = new Map(
-      facts
-        .filter(
-          ({ fact }) => fact.status === "accepted" && fact.acceptedVersion,
-        )
-        .map(({ fact }) => [fact.acceptedVersion, fact.expectedTip]),
-    );
-    let version = f.version;
-    for (let i = 0; version !== attempt.startVersion && i < parents.size; i++)
-      version = parents.get(version);
-    evidence.ownedLine = version === attempt.startVersion;
-    const check = facts.find((x) => x.id === w.finalCheck?.requestId)?.fact;
-    evidence.check = check ?? null;
-    if (
-      !evidence.ownedLine ||
-      w.startVersion !== attempt.startVersion ||
-      w.integrationRef !== f.integrationRef
-    )
-      throw Error(
-        "Input version or formal ref differs from the authorized intent",
-      );
-    if (record.status !== "completed")
-      throw Error(record.error ?? "Task did not complete");
-    if (evidence.unknown)
-      throw Error("Outstanding request or writer; inspect the original task");
-    if (
-      !check ||
-      check.status !== "passed" ||
-      check.verification !== "passed" ||
-      check.version !== f.version ||
-      check.binding?.version !== f.version ||
-      w.version !== f.version ||
-      check.checks?.length !== step.checks.length ||
-      !check.checks.every(
-        (c, i) =>
-          c.exitCode === 0 &&
-          !c.sourceChanged &&
-          c.command === step.checks[i].command &&
-          JSON.stringify(c.args) === JSON.stringify(step.checks[i].args ?? []),
-      )
-    )
-      throw Error(
-        "No passing fixed normal-entry check on the current formal version",
-      );
-    const output = await v.inspect({ changeId: w.resultChangeId });
-    if (
-      output.baseVersion !== f.version ||
-      !output.readOnly ||
-      output.workspace !== w.resultWorkspace
-    )
-      throw Error("Result projection is not bound to the checked version");
-    for (const path of step.deliverables) {
-      const item = await v.read({ version: f.version, path });
-      if (!item.contentHash || item.version !== f.version)
-        throw Error("Missing deliverable at checked version: " + path);
-      evidence.artifacts.push({ path, sha256: item.contentHash });
-    }
-    const reviews = await reviewEvidence(v, home, state, step, f.version, record, facts);
-    if (reviews.length) evidence.reviewReceipts = reviews;
-  } catch (e) {
-    evidence.error = e.message;
-  } finally {
-    await v?.close();
-  }
-  return evidence;
-}
-
-async function provePrevious(home, s, version, dependencyIds, deliveryReviews) {
-  const needed = new Set(dependencyIds ?? s.steps.map((x) => x.id));
-  for (let i = 0; i < s.steps.length; i++)
-    for (const step of s.steps)
-      if (needed.has(step.id))
-        for (const parent of step.dependsOn) needed.add(parent);
-  const completed = s.steps.filter(
-    (step) => step.status === "completed" && needed.has(step.id),
-  );
-  if (!completed.length) return [];
-  const inputs = [];
-  let v;
-  try {
-    v = await createVersioning({
-      home,
-      project: s.repo,
-      backend: "agent-sync",
-      readOnly: true,
-    });
-    for (const step of completed) {
-      if (deliveryReviews && (step.works.some(work => work.independentReview) ||
-          Object.values(s.staffAssignments ?? {}).some(a => a.reviewReceipts?.length))) {
-        const task = readTask(home,step.attempts.at(-1).taskId);
-        deliveryReviews.push(...await reviewEvidence(v,home,s,step,version,task));
-      }
-      for (const artifact of step.attempts.at(-1).artifacts) {
-        const previous = step.attempts.at(-1);
-        const original = await v.read({
-          version: previous.version,
-          path: artifact.path,
-        });
-        const actual = await v.read({ version, path: artifact.path });
-        if (original.contentHash !== artifact.sha256 || !actual.contentHash)
-          throw Error(
-            "Missing previous deliverable or invalid receipt: " +
-              step.id +
-              " / " +
-              artifact.path,
-          );
-        inputs.push({
-          stepId: step.id,
-          path: artifact.path,
-          deliveredVersion: previous.version,
-          deliveredHash: artifact.sha256,
-          inputVersion: version,
-          inputHash: actual.contentHash,
-        });
-      }
-    }
-    return inputs;
-  } finally {
-    await v?.close();
-  }
-}
-async function verifyDelivery(host, s, signal) {
-  const f = await formal(host.home, s.repo);
-  if (f.version !== s.version || f.integrationRef !== s.integrationRef)
-    throw Error("Formal tip changed since project acceptance");
-  const reviewReceipts = [];
-  const artifacts = await provePrevious(host.home, s, f.version, undefined, reviewReceipts);
-  const matches = () => {
-    const state = host.read();
-    return (
-      !signal.aborted &&
-      state.status === "active" &&
-      state.revision === s.revision
-    );
-  };
-  if (!matches()) return;
-  const receipts = s.steps.map((step) => step.attempts.at(-1).check);
-  if (
-    receipts.every(
-      (r) => r?.version === f.version && r.verification === "passed",
-    )
-  ) {
-    host.update((state) => {
-      state.delivery = {
-        version: f.version,
-        revision: s.revision,
-        artifacts,
-        ...(reviewReceipts.length ? {reviewReceipts} : {}),
-        requestIds: receipts.map((r) => r.requestId),
-      };
-    });
-    return;
-  }
-  const checks = s.steps.flatMap((step) => step.checks);
-  const execution = s.steps[0].attempts.at(-1).execution;
-  if (
-    !execution ||
-    s.steps.some(
-      (step) =>
-        JSON.stringify(step.attempts.at(-1).execution) !==
-        JSON.stringify(execution),
-    )
-  )
-    throw Error(
-      "Combined verification needs the same recorded fixed execution environment for all steps",
-    );
-  const previous = s.finalChecks?.findLast(
-    (x) => x.revision === s.revision && x.version === f.version,
-  );
-  const reuse = previous && previous.check?.status !== "cancelled";
-  const requestId = reuse ? previous.requestId : randomUUID();
-  if (!reuse)
-    host.update((state) => {
-      (state.finalChecks ??= []).push({
-        revision: s.revision,
-        version: f.version,
-        requestId,
-        at: now(),
-      });
-    });
-  const controller = new AbortController();
-  host.finalController = controller;
-  let v;
-  try {
-    v = await createVersioning({
-      home: host.home,
-      project: s.repo,
-      checks,
-      execution,
-      signal: AbortSignal.any([signal, controller.signal]),
-    });
-    const authorized = await v.inspect();
-    if (
-      authorized.version !== f.version ||
-      authorized.integrationRef !== s.integrationRef
-    )
-      throw Error("Formal tip moved during delivery verification");
-    if (!matches() || controller.signal.aborted) return;
-    let fact = await v.inspect({ requestId });
-    if (fact.status === "not_found")
-      fact = await v.checkCurrent({ requestId, signal: controller.signal });
-    host.update((state) => {
-      const row = state.finalChecks.find((x) => x.requestId === requestId);
-      row.check = fact;
-    });
-    if (!matches()) return;
-    if (
-      fact.version !== f.version ||
-      fact.binding?.version !== f.version ||
-      fact.status !== "passed" ||
-      fact.verification !== "passed" ||
-      fact.checks.length !== checks.length ||
-      !fact.checks.every(
-        (c, i) =>
-          c.exitCode === 0 &&
-          !c.sourceChanged &&
-          c.command === checks[i].command &&
-          JSON.stringify(c.args) === JSON.stringify(checks[i].args ?? []),
-      )
-    )
-      throw Error(
-        "Combined delivery checks did not pass at " +
-          f.version +
-          " (" +
-          fact.status +
-          ", request " +
-          requestId +
-          ")",
-      );
-    host.update((state) => {
-      state.delivery = {
-        version: f.version,
-        revision: s.revision,
-        artifacts,
-        ...(reviewReceipts.length ? {reviewReceipts} : {}),
-        requestIds: [requestId],
-      };
-    });
-  } catch (e) {
-    if (matches() && !controller.signal.aborted) throw e;
-  } finally {
-    await v?.close();
-    host.finalController = null;
-  }
 }
 function nextConfig(home, step, frozen) {
   const loaded = frozen ? structuredClone(frozen) : loadConfig(home);
@@ -1077,8 +638,9 @@ function snapshot(s, step, attempt, home) {
     stepId: step.id,
     subgoal: step.goal,
     scope: step.scope,
-    readScope: s.readScope??["."],
+    readScope: attempt.readScope ?? s.readScope ?? ["."],
     startVersion: attempt.startVersion,
+    ...(attempt.checkPolicy ? {checkPolicy:attempt.checkPolicy} : {}),
     inputArtifacts: attempt.inputArtifacts,
     deliverables: step.deliverables,
     checks: step.checks,
@@ -1098,14 +660,6 @@ function snapshot(s, step, attempt, home) {
     }),
     ...(step.route ? { route: step.route } : {}),
   };
-}
-function savedTask(home, id) {
-  try {
-    return readTask(home, id);
-  } catch (e) {
-    if (e.code === "ENOENT") return null;
-    throw e;
-  }
 }
 async function reconcileAttempt(
   host,
@@ -1200,7 +754,7 @@ async function reconcileAttempt(
       throw Error("Formal ref changed");
     if (
       proof.ownedLine &&
-      [a.startVersion, proof.formalVersion].includes(s.version)
+      (a.checkPolicy ? proof.advancesProject : [a.startVersion, proof.formalVersion].includes(s.version))
     ) {
       s.version = proof.formalVersion;
       s.integrationRef = proof.integrationRef;
@@ -1252,10 +806,22 @@ async function reconcileAttempt(
   return "settled";
 }
 async function revisit(host) {
-  for (const step of host.read().steps) {
+  const state = host.read();
+  for (const step of state.steps) {
     for (const a of step.attempts) {
       if (a.status !== "intent" && a.status !== "unknown") continue;
-      await reconcileAttempt(host, step, a, { recovery: true });
+      const outcome = await reconcileAttempt(host, step, a, { recovery: true });
+      if (outcome !== "unsent" || a.status !== "intent" || state.stepScheduling !== "dependencies-v1" ||
+          !host.unified || a.rootTaskId === host.unified.rootTaskId) continue;
+      // A stop may land after registering a ready attempt and before the first
+      // send. Preserve that identity and only let the new explicit root admit
+      // remaining work after recovery proves that the old attempt did not send.
+      host.update(current => {
+        const row = current.steps.find(x => x.id === step.id), old = row.attempts.find(x => x.taskId === a.taskId);
+        old.status = "not_sent";
+        old.endedAt ??= now();
+        if (row.attempts.at(-1) === old && ["running", "blocked"].includes(row.status)) row.status = "pending";
+      });
     }
   }
 }
@@ -1297,145 +863,221 @@ async function autoReview(host) {
     }
   }
 }
-async function schedule(host, signal, uiContext) {
-  const { home } = host;
-  await revisit(host);
-  for (;;) {
-    await host.drain();
-    if (host.read().status === "paused" || signal.aborted) return;
-    await autoReview(host);
-    const s = host.read(),
-      step = nextStep(s);
-    if (!step) {
-      const complete = s.steps.every((x) => x.status === "completed");
-      if (complete) await verifyDelivery(host, s, signal);
-      const result = host.read();
-      if (result.revision !== s.revision) continue;
-      if (result.status === "paused" || signal.aborted) return;
-      if (complete && result.delivery?.revision !== s.revision)
-        throw Error("No project delivery verification is available");
-      host.update((state) => {
-        if (state.status !== "paused")
-          state.status = complete ? "completed" : "blocked";
-      });
-      return;
+// The existing project host owns one queue for the formal ref and one pool
+// for actual HTTP sends. Worker sessions keep their own local work queues.
+export function requestSeats(limit) {
+  const waiters = [];
+  let occupied = 0;
+  const grant = () => {
+    while (occupied < limit && waiters.length) {
+      const waiter = waiters.shift();
+      waiter.signal.removeEventListener('abort',waiter.cancel);
+      if (waiter.signal.aborted) { waiter.reject(waiter.signal.reason); continue; }
+      occupied++;
+      let released = false;
+      waiter.resolve(() => { if (!released) { released = true; occupied--; grant(); } });
     }
-    const f = await formal(home, s.repo);
-    if (
-      (s.integrationRef && f.integrationRef !== s.integrationRef) ||
-      (s.version && s.version !== f.version)
-    )
-      throw Error(
-        "Formal line changed outside the saved project decision; inspect before resuming",
-      );
-    let inputArtifacts;
-    try {
-      inputArtifacts = await provePrevious(home, s, f.version, step.dependsOn);
-    } catch (e) {
-      host.update((state) => {
-        const job = state.steps.find((x) => x.id === step.id);
-        if (job.revision === step.revision) {
-          job.status = "blocked";
-          job.error = e.message;
-        }
-      });
-      continue;
-    }
-    let config = nextConfig(home, step, host.unified?.frozenConfig);
-    const current = host.read();
-    const latest = current.steps.find((x) => x.id === step.id);
-    if (
-      current.status !== "active" ||
-      latest.revision !== step.revision ||
-      latest.status !== step.status
-    )
-      continue;
-    const pending = step.attempts.findLast(
-      (a) => a.status === "intent" && a.revision === step.revision,
-    );
-    if (step.route?.status === "repair" && step.route.candidate !== f.version) {
-      host.update((state) => {
-        const job = state.steps.find((x) => x.id === step.id);
-        job.status = "review";
-        job.error =
-          "The reviewed private candidate requires its original draft; no new task was sent";
-      });
-      continue;
-    }
-    if (!pending)
-      host.update((state) => {
-        const job = state.steps.find((x) => x.id === step.id);
-        const attempt = {
-          ...(host.unified ? {rootTaskId:host.unified.rootTaskId,commandId:host.unified.commandId,frozenConfig:structuredClone(config),constraints:host.unified.rootOwner.rootTask.record.constraints,contextRef:structuredClone(host.unified.contextRef)} : {}),
-          taskId: randomUUID(),
-          submissionId: randomUUID(),
-          revision: job.revision,
-          startVersion: f.version,
-          inputArtifacts,
-          execution: config.work.execution ?? null,
-          projectPluginRuntime: config.work.projectPluginRuntime ?? null,
-          status: "intent",
-          createdAt: now(),
-        };
-        job.attempts.push(attempt);
-        job.status = "running";
-        state.version = f.version;
-        state.integrationRef = f.integrationRef;
-      });
-    const active = host.read(),
-      job = active.steps.find((x) => x.id === step.id),
-      attempt = job.attempts.at(-1);
-    if (attempt.startVersion !== f.version || attempt.status !== "intent")
-      throw Error("Saved start intent does not match the current version");
-    if(host.unified && attempt.rootTaskId!==host.unified.rootTaskId)throw Error("Unsettled attempt belongs to an earlier root; inspect its original result before resuming");
-    if(attempt.frozenConfig)config=structuredClone(attempt.frozenConfig);
-    // A proven-unsent restart retains its authorized checks and execution environment.
-    if (attempt.execution) config.work.execution = attempt.execution;
-    config.work.projectPluginRuntime = attempt.projectPluginRuntime ?? undefined;
-    const binding = snapshot(active, job, attempt, home);
-    const staff = createProjectStaff(host);
-    const projectPolicy = createProjectPolicy({ host, binding, staff, home });
-    const controller = new AbortController();
-    host.live = { stepId: job.id, revision: job.revision, taskId:attempt.taskId, projectPolicy, controller };
+  };
+  return signal => new Promise((resolve,reject) => {
+    signal.throwIfAborted();
+    const waiter = {signal,resolve,reject,cancel:()=>{
+      const i = waiters.indexOf(waiter);
+      if (i !== -1) waiters.splice(i,1);
+      reject(signal.reason);
+    }};
+    waiters.push(waiter);
+    signal.addEventListener('abort',waiter.cancel,{once:true});
+    grant();
+  });
+}
+
+function plannedReads(state, step) {
+  return [...new Set([...step.scope,...step.deliverables,...state.steps
+    .filter(other=>step.dependsOn.includes(other.id)).flatMap(other=>other.deliverables)])]
+    .filter(path=>inScope(path,state.readScope));
+}
+function overlapSteps(state,a,b) {
+  return projectScopesOverlap(a.scope,b.scope) || projectScopesOverlap(a.scope,plannedReads(state,b)) ||
+    projectScopesOverlap(b.scope,plannedReads(state,a));
+}
+
+async function launchStep(host, signal, uiContext, s, step) {
+  const {home} = host;
+  const f = host.kernel ? await host.kernel.inspect() : await formal(home,s.repo);
+  if ((s.integrationRef && f.integrationRef !== s.integrationRef) ||
+      (s.version && s.version !== f.version && (!host.kernel ||
+        !onOwnedLine(await ownedParents(host.kernel,home,s),f.version,s.version))))
+    throw Error("Formal line changed outside the saved project decision; inspect before resuming");
+  let inputArtifacts;
+  try {
+    inputArtifacts = await provePrevious(home,s,f.version,step.dependsOn);
+    if (host.kernel && inputArtifacts.some(artifact=>!inScope(artifact.path,s.readScope)))
+      throw Error('Dependency artifact is outside the approved read scope');
+  } catch (e) {
+    host.update(state => {
+      const job = state.steps.find(x => x.id === step.id);
+      if (job.revision === step.revision) { job.status = 'blocked'; job.error = e.message; }
+    });
+    return;
+  }
+  if (host.kernel) {
+    const registered = host.checkedDefinitions.get(step.id);
+    if (registered?.revision !== step.revision || !isDeepStrictEqual(registered?.checks,step.checks))
+      throw Error('The current step revision was not registered with the project owner');
+  }
+  let config = nextConfig(home,step,host.unified?.frozenConfig);
+  const current = host.read(), latest = current.steps.find(x => x.id === step.id);
+  if (signal.aborted || current.status !== 'active' || latest.revision !== step.revision || latest.status !== step.status) return;
+  const pending = step.attempts.findLast(a => a.status === 'intent' && a.revision === step.revision);
+  if (step.route?.status === 'repair' && step.route.candidate !== f.version) {
+    host.update(state => {
+      const job = state.steps.find(x => x.id === step.id);
+      job.status = 'review';
+      job.error = 'The reviewed private candidate requires its original draft; no new task was sent';
+    });
+    return;
+  }
+  if (!pending) host.update(state => {
+    const job = state.steps.find(x => x.id === step.id);
+    job.attempts.push({
+      ...(host.unified ? {rootTaskId:host.unified.rootTaskId,commandId:host.unified.commandId,frozenConfig:structuredClone(config),constraints:host.unified.rootOwner.rootTask.record.constraints,contextRef:structuredClone(host.unified.contextRef)} : {}),
+      taskId:randomUUID(), submissionId:randomUUID(), revision:job.revision,
+      startVersion:f.version, inputArtifacts,
+      ...(host.kernel ? {checkPolicy:host.policy('step-'+step.id),
+        readScope:plannedReads(s,step)} : {}),
+      execution:config.work.execution ?? null,
+      projectPluginRuntime:config.work.projectPluginRuntime ?? null,
+      status:'intent', createdAt:now(),
+    });
+    job.status = 'running'; state.version = f.version; state.integrationRef = f.integrationRef;
+  });
+  const active = host.read(), job = active.steps.find(x => x.id === step.id), attempt = job.attempts.at(-1);
+  if (attempt.startVersion !== f.version || attempt.status !== 'intent')
+    throw Error('Saved start intent does not match the current version');
+  if (host.unified && attempt.rootTaskId !== host.unified.rootTaskId)
+    throw Error('Unsettled attempt belongs to an earlier root; inspect its original result before resuming');
+  if (attempt.frozenConfig) config = structuredClone(attempt.frozenConfig);
+  if (attempt.execution) config.work.execution = attempt.execution;
+  config.work.projectPluginRuntime = attempt.projectPluginRuntime ?? undefined;
+  const binding = snapshot(active,job,attempt,home), staff = createProjectStaff(host);
+  const projectPolicy = createProjectPolicy({host,binding,staff,home}), controller = new AbortController();
+  const ready = Promise.withResolvers(), observer = {};
+  if (host.acquireRequestSeat) Object.assign(projectPolicy,{
+    acquireRequestSeat:host.acquireRequestSeat,maxConcurrentRequests:host.maxConcurrentRequests,
+  });
+  if (host.kernel) Object.assign(projectPolicy, {
+    kernel:host.kernel,withFormal:host.withFormal,
+    attachOperationObserver:onOperation=>{observer.onOperation=onOperation;},initialProjectionSettled:ready.resolve,
+  });
+  const live = {stepId:job.id,revision:job.revision,taskId:attempt.taskId,projectPolicy,controller};
+  host.live.set(attempt.taskId,live);
+  const run = async () => {
     let error;
     try {
-      await host.drain();
-      if (
-        host.read().status === "paused" ||
-        controller.signal.aborted ||
-        signal.aborted ||
-        host.read().steps.find((x) => x.id === job.id).revision !== job.revision
-      )
-        continue;
+      if (host.read().status === 'paused' || controller.signal.aborted || signal.aborted ||
+          host.read().steps.find(x => x.id === job.id).revision !== job.revision) return;
       await runTurn({
-        home,
-        cwd: s.repo,
-        input: binding.handoffContext?.input ?? s.originalGoal,
-        config,
-        id: attempt.taskId,
-        submissionId: attempt.submissionId,
-        project: binding,
-        workRequest:binding.workRequest,
-        projectPolicy,
-        ...(host.unified?{rootOwner:host.unified.rootOwner,rootTaskId:host.unified.rootTaskId,frozenSkillSource:host.unified.rootOwner.rootTask.record,packageSnapshot:host.unified.rootOwner.rootTask.record.packageSnapshot,frozenPackageSnapshot:host.unified.rootOwner.rootTask.record.packageSnapshot}:{}),
-        ...(uiContext?{uiContext,uiMode:'rpc'}:{}),
-        signal: AbortSignal.any([controller.signal, signal]),
+        home,cwd:s.repo,input:binding.handoffContext?.input ?? s.originalGoal,config,
+        id:attempt.taskId,submissionId:attempt.submissionId,project:binding,workRequest:binding.workRequest,projectPolicy,
+        ...(host.unified ? {rootOwner:host.unified.rootOwner,rootTaskId:host.unified.rootTaskId,frozenSkillSource:host.unified.rootOwner.rootTask.record,packageSnapshot:host.unified.rootOwner.rootTask.record.packageSnapshot,frozenPackageSnapshot:host.unified.rootOwner.rootTask.record.packageSnapshot} : {}),
+        ...(uiContext ? {uiContext,uiMode:'rpc'} : {}),
+        signal:AbortSignal.any([controller.signal,signal]),
       });
-    } catch (e) {
-      error = e.message;
-    } finally {
-      host.live = null;
+    } catch (e) { error = e.message; }
+    finally { ready.resolve(); }
+    const settle = async () => {
+      if (!savedTask(home,attempt.taskId)) {
+        host.update(state => {
+          const row = state.steps.find(x => x.id === job.id);
+          row.error = error ?? 'No task record'; row.status = 'blocked';
+          if (!host.kernel && state.status !== 'paused') state.status = 'blocked';
+        });
+      } else await reconcileAttempt(host,job,attempt);
+    };
+    await (host.kernel ? host.withFormal(settle) : settle());
+  };
+  live.done = (host.operationObservers ? host.operationObservers.run(observer,run) : run()).finally(()=>host.live.delete(attempt.taskId));
+  // Keep failures available to the scheduler even when initial projection ends first.
+  live.done.catch(()=>{});
+  if (host.kernel) await ready.promise;
+  return live;
+}
+
+async function schedule(host, signal, uiContext) {
+  const parallel = host.read().stepScheduling === 'dependencies-v1';
+  let lastFailure;
+  try {
+    await revisit(host);
+    if (host.read().stepScheduling && !signal.aborted && host.read().status === 'active') {
+      const s = host.read(), config = nextConfig(host.home,s.steps[0],host.unified?.frozenConfig);
+      host.maxConcurrentRequests = config.work.maxConcurrentRequests ?? 2;
+      const ordinarySeat=requestSeats(host.maxConcurrentRequests),checkSeat=requestSeats(1);
+      // The request policy has already checked the host-issued stage before fetch.
+      host.acquireRequestSeat=(signal,stage)=>stage?.phase==='process-check'?checkSeat(signal):ordinarySeat(signal);
     }
-    if (!savedTask(home, attempt.taskId)) {
-      host.update((state) => {
-        const row = state.steps.find((x) => x.id === job.id);
-        row.error = error ?? "No task record";
-        row.status = "blocked";
-        if (state.status !== "paused") state.status = "blocked";
+    if (parallel && !signal.aborted && host.read().status === 'active') {
+      const s = host.read(), config = nextConfig(host.home,s.steps[0],host.unified?.frozenConfig);
+      const execution = config.work.execution;
+      if (!execution || s.steps.some(step => step.attempts.some(a => a.checkPolicy &&
+        !isDeepStrictEqual(a.execution,execution))))
+        throw Error('The fixed execution environment differs from the saved project');
+      host.withFormal = fn => withChangeQueue(host,'formal',fn);
+      host.operationObservers = new AsyncLocalStorage();
+      host.checkedDefinitions = new Map(s.steps.map(step=>[step.id,{revision:step.revision,checks:step.checks}]));
+      host.kernel = await createVersioning({home:host.home,project:s.repo,execution,signal,
+        checkPolicies:{...Object.fromEntries(s.steps.map(step=>['step-'+step.id,step.checks])),
+          'project-final':s.steps.flatMap(step=>step.checks)},
+        onOperation:e=>host.operationObservers.getStore()?.onOperation?.(e),
       });
+      const catalog = (await host.kernel.inspect()).checkPolicies;
+      host.policy = id => ({id,digest:catalog[id]});
+    }
+    for (;;) {
+      await host.drain();
+      if (host.read().status === 'paused' || signal.aborted) return;
+      await autoReview(host);
+      const s = host.read();
+      const live = [...host.live.values()];
+      const step = parallel ? s.steps.find(step =>
+        ['pending','running'].includes(step.status) &&
+        step.dependsOn.every(id=>s.steps.find(other=>other.id===id)?.status==='completed') &&
+        !live.some(active=>active.stepId===step.id) &&
+        !s.steps.some(other=>other.id!==step.id && (other.status==='unknown'||live.some(active=>active.stepId===other.id)) &&
+          overlapSteps(s,step,other))) : nextStep(s);
+      if (step && (!parallel || live.length < host.maxConcurrentRequests)) {
+        const launched = await (host.kernel ? host.withFormal(()=>launchStep(host,signal,uiContext,s,step)) : launchStep(host,signal,uiContext,s,step));
+        if (launched) {
+          if (!parallel) await launched.done;
+          else launched.done.catch(error=>{lastFailure ??= error;});
+        }
+        if (lastFailure) throw lastFailure;
+        if (!parallel && host.read().status === 'blocked') return;
+        continue;
+      }
+      if (live.length) { await Promise.race(live.map(entry=>entry.done)); continue; }
+      if (lastFailure) throw lastFailure;
+      const complete = s.steps.every(x=>x.status==='completed');
+      if (complete) {
+        await verifyDelivery(host,s,signal);
+        const accepted = host.read();
+        if (host.unified && s.workRequest && accepted.status === "active" &&
+            accepted.delivery?.revision === s.revision && !signal.aborted)
+          await verifyProjectVisual(host, accepted, s.delivery?.visual, signal);
+      }
+      const result = host.read();
+      if (result.revision !== s.revision) continue;
+      if (result.status === 'paused' || signal.aborted) return;
+      if (complete && result.delivery?.revision !== s.revision)
+        throw Error('No project delivery verification is available');
+      host.update(state=>{if(state.status!=='paused')state.status=complete?'completed':'blocked';});
       return;
     }
-    await reconcileAttempt(host, job, attempt);
+  } finally {
+    const live = [...host.live.values()];
+    for (const entry of live) entry.controller.abort();
+    await Promise.allSettled(live.map(entry=>entry.done));
+    await host.kernel?.close();
+    host.kernel = null;
   }
 }
 
@@ -1559,12 +1201,19 @@ export async function runProjectCommand({
       assertConfirmedProjectState(proposal,{repo:loc.repo,version:observed.version,state:current,expectedRevision});
       signal.throwIfAborted();
     }
-    const state = action === "start" ? initialState(plan, loc) : stored(loc);
+    const state = action === "start" ? compileProjectPlan(plan, loc).state : stored(loc);
     host = ownHost(home, loc, writer, state);
     if(unified){
       host.unified=unified;
       host.update(s=>{
+        const scheduling=unified.rootOwner.rootTask.record.proposal.stepScheduling;
+        if(action==='start'&&['dependencies-v1','sequential-v1'].includes(scheduling))
+          s.stepScheduling=scheduling;
         if(action!=="start")control(s,command);
+        if (action !== "resume" && s.workRequest) {
+          const record = unified.rootOwner.rootTask.record;
+          s.visualContract = { originalTask: record.handoffContext.input, networkMode: record.constraints.networkMode ?? null };
+        }
         assertProjectReviewRequirement(s,unified.rootOwner.rootTask.record.constraints);
         s.entryPolicy="unified";s.readScope??=s.scope;s.commands[command.id]={status:"in_flight",rootTaskId:unified.rootTaskId,operationDigest:unified.operationDigest,at:now()};
       });
@@ -1576,7 +1225,7 @@ export async function runProjectCommand({
           s.status = "paused";
         });
       } finally {
-        host.live?.controller.abort();
+        for (const live of host.live.values()) live.controller.abort();
       }
     };
     signal.addEventListener("abort", onStop, { once: true });
@@ -1587,7 +1236,7 @@ export async function runProjectCommand({
     if (action === "start") host.runRequested = true;
     timer = setInterval(() => {
       void host.drain().catch((e) => {
-        host.live?.controller.abort(e);
+        for (const live of host.live.values()) live.controller.abort(e);
       });
     }, 40);
     do {
@@ -1616,7 +1265,14 @@ export async function runProjectCommand({
       if(!reviews.length)throw problem('PROJECT_REVIEW_REQUIRED','当前交付缺少可核验的异型号独立评审证据。');
       if(signal.aborted)onStop();
     }
-    if(unified)host.update(s=>{if(s.delivery){s.delivery.taskIds=s.steps.filter(step=>step.status==="completed").map(step=>step.attempts.at(-1).taskId);(s.deliveries??={})[s.delivery.revision]=structuredClone(s.delivery);}s.commands[command.id]={...s.commands[command.id],status:"settled",resultStatus:s.status,endedAt:now()};});
+    if(unified)host.update(s=>{
+      if(s.delivery){
+        s.delivery.taskIds=s.steps.filter(step=>step.status==="completed").map(step=>step.attempts.at(-1).taskId);
+        (s.deliveries??={})[s.delivery.revision]=structuredClone(s.delivery);
+      }
+      s.commands[command.id]={...s.commands[command.id],status:"settled",resultStatus:s.status,endedAt:now(),
+        ...(s.delivery?.visual?{visual:structuredClone(s.delivery.visual)}:{})};
+    });
     const result = host.read();
     return finish(
       result,

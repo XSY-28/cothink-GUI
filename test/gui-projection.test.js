@@ -165,6 +165,90 @@ test("projection reports physical request model and member participation without
   );
 });
 
+test("new ordinary conversation labels unused models as candidates and preserves historical reviewer roles", () => {
+  const models={main:{provider:"p",modelId:"main"},secondary:[{provider:"p",modelId:"secondary"}]};
+  const history={id:"turn",flow:"unified",status:"completed",models,stages:[]};
+  assert.equal(projection.projectGuiTask(history).participants[1].role,"reviewer-1");
+  const current=projection.projectGuiTask({...history,turnIntent:{fileRequired:false}});
+  assert.deepEqual(current.participants,[]);
+  assert.deepEqual(current.rosterCandidates,[models.main,models.secondary[0]]);
+});
+
+test("formal GUI process separates roles sharing one model and exposes only the saved role grant", () => {
+  const model = {provider:"fixture",modelId:"main",apiKey:"DO_NOT_PROJECT"};
+  const record = {
+    id:"child",rootTaskId:"root",project:{rootTaskId:"root",commandId:"command"},status:"partial",
+    models:{main:model,secondary:[{provider:"fixture",modelId:"spare"}]},
+    stages:[
+      {id:"leader-stage",role:"main",phase:"work",sessionId:"leader-session",callIds:["leader"]},
+      {id:"worker-stage",role:"member:worker",phase:"worker",sessionId:"worker-session",callIds:["worker-call"]},
+    ],
+    members:[
+      {memberId:"lead",staffId:"implementation",model,assignment:"Coordinate the file boundary",status:"queued"},
+      {memberId:"worker",supervisorMemberId:"lead",staffId:"inspection",workId:"scope-a",model,
+        assignment:"Read the approved file",reason:"Reads the approved format",readOnly:true,scope:[],readScope:["a.txt"],
+        status:"failed",pause:{status:"unknown",reason:"Collect the original request",unresolvedRequestIds:["worker-call"]},
+        materialGrant:{sources:[{id:"PRIVATE_INPUT"}],attachments:[],summary:{text:"PRIVATE_SUMMARY"}}},
+      {memberId:"audit",reviewKind:"independent",reviewVersion:"candidate",model,status:"queued"},
+    ],
+    tools:[{kind:"skill_resource_read",resourceName:"review",resourcePath:"SKILL.md",resourceHash:"known-hash",
+      actor:"member:worker",stageId:"worker-stage",status:"completed",content:"PRIVATE_SKILL"}],
+    work:{},
+  };
+  const requests = [
+    {id:"leader",stageId:"leader-stage",role:"main",sent:true,actualModel:model,status:"completed",
+      response:{content:[{type:"toolCall",id:"unknown-tool",name:"delegate",arguments:{context:"PRIVATE_TOOL_ARGS"}}]}},
+    {id:"worker-call",stageId:"worker-stage",role:"member:worker",sent:true,actualModel:model,status:"failed",
+      context:{body:"PRIVATE_REQUEST"},limits:{maxOutputTokens:700},error:"provider refused"},
+  ];
+  const view = projection.projectGuiTask(record,requests);
+  assert.deepEqual(view.participants.map(p=>[p.id,p.position,p.participated]),[
+    ["main","manager",true],["lead","supervisor",false],["worker","employee",true],["audit","independent-review",false],
+  ]);
+  const worker = view.participants.find(p=>p.id==="worker");
+  assert.deepEqual(worker.readScope,["a.txt"]);
+  assert.equal(worker.reason,"Reads the approved format");
+  assert.equal(worker.pause.status,"unknown");
+  assert.equal(view.messages[1].sessionId,"worker-session");
+  assert.equal(view.messages[1].maxOutputTokens,700);
+  assert.equal(view.messages[1].error,"provider refused");
+  assert.equal(view.skillReads[0].hash,"known-hash");
+  assert.doesNotMatch(JSON.stringify(view),/PRIVATE_|DO_NOT_PROJECT/);
+});
+
+test("process check projects bound requests, covered workers and forwarded issues from the saved observation", () => {
+  const actualModel = {provider:"fixture",modelId:"served"};
+  const record = {id:"root",processCheck:{
+    interval:60000,status:"outcome_unknown",gap:{code:"STOP_UNKNOWN",message:"stop not confirmed"},
+    observations:[
+      {id:"observation",taskId:"step",stageId:"checker",sessionId:"checker-session",requestId:"checked-request",
+        sequence:1,kind:"periodic",delayMs:5000,missedIntervals:1,status:"completed",
+        members:[
+          {memberId:"worker",taskId:"step",leaderId:"lead",attempt:0,status:"waiting",blockers:1,evidenceIds:["evidence"],assignment:"PRIVATE_SNAPSHOT"},
+          {memberId:"queued",taskId:"step",leaderId:"lead",attempt:0,status:"queued",evidenceIds:[]},
+        ],
+        covered:[{memberId:"worker",taskId:"step",attempt:0,evidenceIds:["evidence"]}]},
+      {id:"lost",taskId:"step",stageId:"checker",sessionId:"checker-session",requestId:"missing",
+        sequence:2,status:"completed",members:[{memberId:"queued",taskId:"step",attempt:0,evidenceIds:["evidence"]}],
+        covered:[{memberId:"queued",taskId:"step",attempt:0,evidenceIds:["evidence"]}]},
+    ],
+    reports:[{id:"issue",observationId:"observation",memberId:"worker",taskId:"step",attempt:0,leaderId:"lead",
+      kind:"blocker",status:"forwarded",reason:"Waiting on the tool",evidenceIds:["evidence"]}],
+  }};
+  const view = projection.projectGuiProcessCheck(record,[
+    {id:"checked-request",taskId:"step",stageId:"checker",sessionId:"checker-session",role:"process-check",
+      status:"completed",sent:true,actualModel,usage:{input:12,output:6},text:"PRIVATE_RAW_REPORT"},
+  ]);
+  assert.equal(view.status,"outcome_unknown");
+  assert.equal(view.gap.message,"stop not confirmed");
+  assert.deepEqual(view.observations[0].actualModel,actualModel);
+  assert.deepEqual(view.observations[0].members.map(p=>[p.memberId,p.covered]),[["worker",true],["queued",false]]);
+  assert.equal(view.observations[0].reports[0].reason,"Waiting on the tool");
+  assert.equal(view.observations[1].status,"unverified");
+  assert.equal(view.observations[1].members[0].covered,false);
+  assert.doesNotMatch(JSON.stringify(view),/PRIVATE_/);
+});
+
 test('work preserves actual failed tool diagnostics as activities without returning request context',()=>{
  const record={id:'t',sessionId:'s',status:'partial',models:{main:{provider:'p',modelId:'m'},secondary:[]},stages:[],work:{}};
  const calls=[{id:'c',response:{content:[{type:'toolCall',id:'tool',name:'accept_change',arguments:{}}]},context:{headers:{authorization:'must-not-appear'}}}];
@@ -223,4 +307,7 @@ test("result revision tracks the visible delivery but ignores timers, usage and 
   assert.equal(revision({status:"running",stages:[]},[]),null);
   assert.match(revision({status:"partial",stages:[]},[]),/^[0-9a-f]{64}$/);
   assert.notEqual(revision({status:"partial",stages:[]},[]),revision({status:"outcome_unknown",stages:[]},[]));
+  const root={status:"completed",flow:"unified",stages:[],deliveryRef:{version:"v1",checksRef:[{requestId:"check-1"}]}};
+  assert.notEqual(revision(root),revision({...root,deliveryRef:{...root.deliveryRef,version:"v2"}}));
+  assert.notEqual(revision(root),revision({...root,deliveryRef:{...root.deliveryRef,checksRef:[{requestId:"check-2"}]}}));
 });

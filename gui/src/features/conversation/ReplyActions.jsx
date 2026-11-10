@@ -20,8 +20,18 @@ export function StopButton({stopping, activeStatus, onClick}) {
 
 export function WorkProposal({turn, disabled, onConfirm}) {
   const blocker=turn.confirmationBlocker;
+  const collaboration=turn.proposal?.collaboration;
   return <>
     <pre className={styles.proposalText}>{turn.finalText}</pre>
+    {!!collaboration?.length && <ul className="field-note" aria-label="协作要求">
+      {collaboration.map((item,index)=><li key={index}>{[
+        item.source.kind==="user"?"用户要求":"计划承诺",
+        `至少 ${item.workers} 名员工`,
+        item.parallel&&"实际并行请求",
+        item.distinctModels&&"使用不同模型",
+        item.stepIds?.length&&`步骤 ${item.stepIds.join("、")}`,
+      ].filter(Boolean).join(" · ")}</li>)}
+    </ul>}
     {!turn.confirmationIntent?.consumedByTaskId && <>
       {blocker && <p className="field-note">{blocker}</p>}
       <button type="button" disabled={disabled||!!blocker} onClick={onConfirm}>确认上述计划并执行</button>

@@ -10,11 +10,12 @@ import { saveConfig } from "../src/config.js";
 import { startGuiServer } from "../src/gui-server.js";
 import { createGuiController } from "../src/gui-controller.js";
 import { payloadImageHashes } from "../src/visual-preview.js";
-import { editorTurnInput } from "../src/gui-turn-options.js";
+import { editorTurnInput, GUI_INPUT_VERSION } from "../src/gui-turn-options.js";
 import { readTask } from "../src/task.js";
 import { invalidUtf8Tree } from "../packages/agent-sync/test/helpers/repository.js";
 import { listGuiProjectMaterials, readGuiProjectMaterial } from "../src/gui-materials.js";
 import { readProjectContext } from "../src/versioning.js";
+import { fixtureConversation, fixtureWorkspace, seedFixtureConversationRepository } from "./helpers/gui-controller-fixture.js";
 
 const hash=bytes=>createHash("sha256").update(bytes).digest("hex");
 const png=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAFElEQVR42mNklAtgYGBgYmBgQFAACEIAdYij2wsAAAAASUVORK5CYII=","base64");
@@ -34,7 +35,7 @@ async function setup(t,controllerOptions={}, modelHandler){
     const controller=await createGuiController({home:f.home,cwd:f.cwd,...controllerOptions});
     host=await startGuiServer({home:f.home,cwd:f.cwd,open:false,assetDirectory:assets,controller});
     origin=new URL(host.url).origin;
-    headers={Authorization:`Bearer ${host.token}`,Origin:origin,"X-CoThink-GUI-Input":"2"};
+    headers={Authorization:`Bearer ${host.token}`,Origin:origin,"X-CoThink-GUI-Input":GUI_INPUT_VERSION};
   }
   await restart();t.after(()=>host.close());
   const request=(path,opts={})=>fetch(origin+path,{...opts,headers:{...headers,...opts.headers}});
@@ -43,7 +44,10 @@ async function setup(t,controllerOptions={}, modelHandler){
   const ok=async response=>{const r=await response;assert.equal(r.status,200,await r.clone().text());return r.json();};
   const begin=(ownerId,bytes,name,mediaType,uploadId=randomUUID())=>({ownerId,uploadId,byteLength:bytes.length,sha256:hash(bytes),name,mediaType});
   const upload=(intent,bytes,more={})=>request("/api/materials?"+new URLSearchParams({ownerId:intent.ownerId,uploadId:intent.uploadId}),{method:"POST",headers:{"Content-Type":"application/octet-stream",...more},body:bytes});
-  const open=(id,project=null)=>ok(action("session.create",{sessionId:id,project}));
+  const api={action:(name,args)=>ok(action(name,args))};
+  const workspace=()=>fixtureWorkspace(t,api,{defaultRosterId:config.teams[0].id});
+  const open=(sessionId,project)=>fixtureConversation(t,api,{sessionId,defaultRosterId:config.teams[0].id})
+    .then(room=>project?seedFixtureConversationRepository(project,room):room);
   async function complete(id){
     for(let attempt=0;attempt<500;attempt++){
       const result=await ok(get("task",{id}));
@@ -52,7 +56,7 @@ async function setup(t,controllerOptions={}, modelHandler){
     }
     throw Error("task unsettled");
   }
-  return {...f,restart,request,get,action,ok,begin,upload,open,complete};
+  return {...f,restart,request,get,action,ok,begin,upload,open,workspace,complete};
 }
 
 test("authenticated HTTP upload is recoverable across restart and home transfer, with immutable task refs",async t=>{
@@ -72,19 +76,22 @@ test("authenticated HTTP upload is recoverable across restart and home transfer,
  assert.equal((await f.ok(f.get("materials",{ownerId:draftId}))).find(r=>r.uploadId===image.uploadId).id,ready.id);
  const ref={id:ready.id,sha256:ready.sha256},wanted=editor([ref]);
  home=await f.ok(f.action("home.draft",{draftId,expectedRevision:home.revision,editor:wanted}));
- home=await f.ok(f.action("home.reserve",{draftId,expectedRevision:home.revision,sessionId,workspaceId:null}));
- await f.ok(f.action("session.create",{sessionId,workspaceId:null,homeDraftId:draftId}));
+ const {id:workspaceId}=await f.workspace();
+ home=await f.ok(f.action("home.reserve",{draftId,expectedRevision:home.revision,sessionId,workspaceId}));
+ await f.ok(f.action("session.create",{sessionId,workspaceId,homeDraftId:draftId}));
  const session=await f.ok(f.action("home.transfer",{draftId,expectedRevision:home.revision,sessionId}));
  assert.deepEqual(session.editor.materials,[ref]);assert.equal(session.materials[0].name,"proof.png");
  assert.equal((await f.get("materials",{ownerId:draftId,id:ref.id})).status,404);
  assert.deepEqual(Buffer.from(await (await f.get("materials",{ownerId:sessionId,id:ref.id})).arrayBuffer()),png);
  const id=randomUUID(),submit={sessionId,submissionId:id,protocolVersion:1,input:"",editorEditId:wanted.editId,materials:[ref]};
  const changed=await f.action("task.submit",{...submit,materials:[]});assert.equal(changed.status,409);
+ assert.equal((await changed.json()).code,"DRAFT_CONFLICT");
  const accepted=await f.ok(f.action("task.submit",submit)),result=await f.complete(accepted.taskId);
  assert.equal(result.status,"completed",result.error);assert.equal(result.materials[0].id,ref.id);
  assert.ok(payloadImageHashes(f.calls[0].body).has(ref.sha256));
  assert.equal((await f.ok(f.action("task.submit",submit))).taskId,accepted.taskId);
- assert.equal((await f.action("task.submit",{...submit,input:"changed"})).status,409);
+ const replay=await f.action("task.submit",{...submit,input:"changed"});assert.equal(replay.status,409);
+ assert.equal((await replay.json()).code,"SUBMISSION_CONFLICT");
  assert.equal(f.calls.length,1);
  const other=randomUUID();await f.open(other);
  assert.equal((await f.get("materials",{ownerId:other,id:ref.id,taskId:accepted.taskId})).status,404);
@@ -94,8 +101,7 @@ test("authenticated HTTP upload is recoverable across restart and home transfer,
 
 test("project copy import checks exact preview bytes and folder identity; fixed selection rejects version drift",async t=>{
  const f=await setup(t),repo=repository(t),sessionId=randomUUID();
- const path=realpathSync(repo.project);
- await f.open(sessionId,path);
+ const {project:path}=await f.open(sessionId,repo.project);
  const current=join(path,"a.txt");writeFileSync(current,"uncommitted preview\n");
  const select={ownerId:sessionId,source:"current",path:"a.txt"};
  const list=await f.ok(f.action("project.materials",{ownerId:sessionId,source:"current"}));
@@ -122,26 +128,26 @@ test("project copy import checks exact preview bytes and folder identity; fixed 
  await f.ok(f.action("session.draft",{sessionId,...chosen,expectedDraftRevision:session.draftRevision,branchAnchor:session.branchAnchor}));
  git(path,"add","a.txt");git(path,"commit","-m","advance fixture only");
  const send=await f.action("task.submit",{sessionId,input:chosen.text,submissionId:randomUUID(),protocolVersion:1,editorEditId:chosen.editId,
-  constraints:{readOnly:false,allowedSubtasks:["review","work"],requireDifferentModelReview:false},budget:{maxCalls:null},readAuthorization:{paths:["a.txt"],version:saved.version}});
+  ...editorTurnInput(chosen.turnOptions,{project:path,workspaceId:session.workspaceId})});
  assert.equal(send.status,409,await send.clone().text());
  assert.equal((await send.json()).code,"READ_VERSION");assert.equal(f.calls.length,0);
 });
 
 test("fixed-version selection preserves literal paths and text; binary context reads are refused",async t=>{
- const repo=repository(t),root=realpathSync(repo.project),sessionId=randomUUID();
+ const repo=repository(t),seed=realpathSync(repo.project),sessionId=randomUUID();
  const chosenPath=" docs/example.py",differentPath="docs/private.txt",commaPath="guide,notes.txt",imagePath=" docs/pixel.png";
  const input="Read the authorized fixed version",source="\n    print('fixture')\n";
- mkdirSync(join(root," docs"));mkdirSync(join(root,"docs"));
+ mkdirSync(join(seed," docs"));mkdirSync(join(seed,"docs"));
  for(const [path,body] of [[chosenPath,source],[differentPath,"PRIVATE_MARKER"],[commaPath,"comma-name fixture"],[imagePath,png]])
-   writeFileSync(join(root,path),body);
- git(root,"status","--porcelain");
- git(root,"add","--",chosenPath,differentPath,commaPath,imagePath);
- git(root,"commit","-m","audit fixture with exact path spellings");
+   writeFileSync(join(seed,path),body);
+ git(seed,"status","--porcelain");
+ git(seed,"add","--",chosenPath,differentPath,commaPath,imagePath);
+ git(seed,"commit","-m","audit fixture with exact path spellings");
  const paths=[chosenPath,differentPath,commaPath,imagePath];
  const f=await setup(t,{},(_,n)=>n===1?{toolCalls:paths.map(path=>({
    name:"read_project_context",args:{operation:"read",paths:[path]},
  }))}:{text:"fixture answer"});
- const session=await f.open(sessionId,root);
+ const session=await f.open(sessionId,seed),root=session.project;
  const saved=await f.ok(f.action("project.materials",{ownerId:sessionId,source:"saved"}));
  const scoped=await f.ok(f.action("project.materials",{ownerId:sessionId,source:"saved",path:" docs",version:saved.version}));
  assert.ok(saved.entries.some(entry=>entry.path===commaPath));
@@ -219,15 +225,18 @@ test("a lost ready response is recoverable, while a removed attachment never rea
 });
 
 test("replacing a selected directory with identical file bytes invalidates its current-copy preview",async t=>{
- const f=await setup(t),sessionId=randomUUID(),root=join(realpathSync(f.home),"project");
- mkdirSync(root);writeFileSync(join(root,"a.txt"),"same");
- await f.open(sessionId,root);
+ const f=await setup(t),sessionId=randomUUID();
+ const {project:root}=await f.open(sessionId);
+ writeFileSync(join(root,"a.txt"),"same");
  const preview=await f.get("project-material",{ownerId:sessionId,source:"current",path:"a.txt"});
  assert.equal(preview.status,200,await preview.clone().text());
  const row={path:"a.txt",sha256:preview.headers.get("x-cothink-content-hash"),sourceToken:preview.headers.get("x-cothink-material-source"),uploadId:randomUUID()};
  renameSync(root,root+"-old");mkdirSync(root);writeFileSync(join(root,"a.txt"),"same");
  const result=await f.action("project.material.import",{ownerId:sessionId,source:"current",paths:[row]});
- assert.equal(result.status,409,await result.clone().text());
+ assert.equal(result.status,400,await result.clone().text());
+ assert.equal((await result.json()).code,"MATERIAL_SOURCE");
+ assert.deepEqual((await f.ok(f.get("session",{id:sessionId}))).materials,[]);
+ assert.equal(readFileSync(join(root,"a.txt"),"utf8"),"same");
 });
 
 test("settings actions expose local skill, execution and fake OAuth states through authenticated HTTP",async t=>{

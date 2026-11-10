@@ -1,176 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Markdown } from "./Markdown.js";
-import {
-  modelName,
-  statusLabel,
-  phaseLabel,
-  checkLabel,
-  revisionExplanation,
-  outputReferences,
-  elapsedLabel,
-} from "./view.js";
+import { modelName, statusLabel, phaseLabel, revisionExplanation, elapsedLabel } from "./view.js";
+import { ActualExecution, MemberConflicts, Participant, ProcessChecks, WorkActivities } from "./CollaborationExecution.jsx";
+import { Checks } from "./CollaborationEvidence.jsx";
+export { VisualEvidence } from "./CollaborationEvidence.jsx";
 
-function Participant({ p, onSelect }) {
-  return (
-    <button type="button" className="participant" onClick={onSelect}>
-      <span
-        className={`participant-mark ${p.status === "running" ? "live" : ""}`}
-      >
-        {p.role === "main" ? "主" : p.role === "member" ? "工" : "评"}
-      </span>
-      <span>
-        <strong>
-          {p.role === "main"
-            ? "主答"
-            : p.role === "member"
-              ? "成员 " + p.id
-              : "评审 " + p.role.replace("reviewer-", "")}
-        </strong>
-        <small>{modelName(p.model)}</small>
-      </span>
-      <em>{statusLabel(p.status)}</em>
-    </button>
-  );
-}
-function VisualFrame({image,taskId,commands,entry}) {
-  const [src,setSrc]=useState(null),[error,setError]=useState('');
-  const current=useRef(commands);current.current=commands;
-  useEffect(()=>{let active=true,url;setSrc(null);setError('');current.current.readImage({id:taskId,ref:image.ref,index:image.index}).then(value=>{url=value;if(active)setSrc(value);else URL.revokeObjectURL(value);}).catch(e=>{if(active)setError(e.message);});return ()=>{active=false;if(url)URL.revokeObjectURL(url);};},[taskId,image.ref,image.index]);
-  return <figure className="visual-frame">{src?<a href={src} target="_blank" rel="noreferrer"><img src={src} alt={`${entry}，采样 ${Math.round(image.capturedAtMs??0)} 毫秒`}/></a>:<p>{error||'读取截图…'}</p>}<figcaption>{Math.round(image.capturedAtMs??0)} ms · PNG</figcaption></figure>;
-}
-export function VisualEvidence({work,commands,taskId}) {
-  if (!work.visualEvidence?.length) return null;
-  const verdict = {match:'模型判断符合',mismatch:'模型判断不符合',uncertain:'证据不足，判断不确定'};
-  return <section className="visual-evidence"><h3>视觉检查</h3>
-    <p className="muted">接纳表示版本已保存；图片发送、审查完成和模型判断分别记录。模型判断不等于客观证明。</p>
-    {work.visualEvidence.map(e => <details key={e.toolCallId} open={!!e.review || e.result==='failed'}>
-      <summary>{e.entry} · {e.result==='failed'?'截图失败':e.checked?'最终版本审查完成':e.review?'审查未完成或版本已过期':e.imageRequestCompleted?'图像请求已完成':e.imageRequestId?'图像已发送，请求未完成':'尚未回传模型'}</summary>
-      <p>{e.actor} · {e.viewport?.width} × {e.viewport?.height}</p>
-      {e.review && <div className="prose"><strong>{e.checked ? verdict[e.review.verdict] : '未获得当前版本的有效判断'}</strong>
-        <Markdown text={[e.review.observation,e.review.reasons,e.review.text].filter(Boolean).join('\n\n')}/>
-        {e.review.error && <p role="alert" className="error-text">{e.review.error}</p>}
-      </div>}
-      <div className="visual-frames">{e.images.map(i=><VisualFrame key={i.index} image={i} taskId={taskId} commands={commands} entry={e.entry}/>)}</div>
-      {e.error&&<p role="alert" className="error-text">{e.error}</p>}
-      <details><summary>版本与诊断</summary><pre>{JSON.stringify({sourceVersion:e.sourceVersion,privateVersion:e.privateVersion,integrationVersion:e.integrationVersion,imageRequestId:e.imageRequestId,imageRequestCompleted:e.imageRequestCompleted,review:e.review,diagnostics:e.diagnostics},null,2)}</pre></details>
-    </details>)}
-  </section>;
-}
-function MemberConflicts({members}) {
-  return members?.filter(m=>m.taskConflict).map(m=><section key={m.id} className="work-detail">
-    <h3>成员题意冲突 · {m.taskConflict.unresolved?'尚未解决':'成员已确认更正'}</h3>
-    <p>{modelName(m.model)}</p><Markdown text={m.taskConflict.message}/>
-    {m.feedback?.map((text,i)=><details key={i}><summary>主模型具体反馈 {i+1}</summary><Markdown text={text}/></details>)}
-    {m.taskConflict.resolution&&<Markdown text={m.taskConflict.resolution}/>}
-    <small>确认表示冲突处理步骤完成，不证明理解必然正确。</small>
-  </section>);
-}
-function Checks({ work, commands, taskId }) {
-  const [log, setLog] = useState(null),
-    [error, setError] = useState(""),
-    [loading, setLoading] = useState(false);
-  const refs = [
-    ...new Set([...(work.outputRefs || []), ...outputReferences(work)]),
-  ];
-  async function load(ref, offset = 0) {
-    setLoading(true);
-    setError("");
-    try {
-      const page = await commands.readOutput({
-        id: taskId,
-        ref,
-        offset,
-        limit: 65536,
-      });
-      setLog((prior) => ({
-        ...page,
-        ref,
-        text: offset && prior?.ref === ref ? prior.text + page.text : page.text,
-      }));
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-  return (
-    <div className="work-detail">
-      <VisualEvidence work={work} commands={commands} taskId={taskId}/>
-      <h3>检查与执行记录</h3>
-      <div
-        className={`check-outcome ${work.finalCheck?.status === "passed" && work.finalCheck?.verification === "passed" ? "verified" : ""}`}
-      >
-        <strong>{checkLabel(work.finalCheck)}</strong>
-        <p>检查只证明记录中对应版本的结果。</p>
-      </div>
-      <dl className="facts">
-        <dt>正式版本</dt>
-        <dd>{work.version || "未记录"}</dd>
-        <dt>检查版本</dt>
-        <dd>
-          {work.finalCheck?.version ||
-            work.finalCheck?.candidateVersion ||
-            "以下原始回执为准"}
-        </dd>
-      </dl>
-      {work.finalCheck?.checks?.map((check, i) => (
-        <section className="check-card" key={i}>
-          <strong>{check.command || check.name || `检查 ${i + 1}`}</strong>
-          <pre>{JSON.stringify(check, null, 2)}</pre>
-          {check.outputRef && (
-            <button disabled={loading} onClick={() => load(check.outputRef)}>
-              读取检查日志
-            </button>
-          )}
-        </section>
-      ))}
-      <details>
-        <summary>检查与接纳原始回执</summary>
-        <pre>
-          {JSON.stringify(
-            { finalCheck: work.finalCheck, acceptance: work.acceptance },
-            null,
-            2,
-          )}
-        </pre>
-      </details>
-      <h4>只读日志</h4>
-      {refs.length ? (
-        refs.map((ref) => (
-          <button
-            className="log-ref"
-            key={ref}
-            disabled={loading}
-            onClick={() => load(ref)}
-          >
-            {ref}
-          </button>
-        ))
-      ) : (
-        <p className="muted">此任务没有已保存的日志引用。</p>
-      )}
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
-      {log && (
-        <section className="log-output">
-          <div className="small-label">{log.ref}</div>
-          <pre tabIndex={0}>{log.text || "（空日志）"}</pre>
-          {!log.eof && (
-            <button
-              disabled={loading}
-              onClick={() => load(log.ref, log.nextOffset)}
-            >
-              继续读取日志
-            </button>
-          )}
-        </section>
-      )}
-    </div>
-  );
-}
 export function Collaboration({
   task,
   expanded,
@@ -251,12 +85,23 @@ export function Collaboration({
             {task.usage?.nativeTools&&`；原生工具 ${task.usage.nativeTools.count} 次（扩展用量独立，未知不计为零）`}
             · {elapsedLabel(task, now)}
           </div>
+          {task.actualRoles && task.budget && <p className="field-note">{task.projectOperation ? "执行" : "本轮"}请求上限 {task.budget.maxCalls ?? "不限"}{task.budget.maxCost != null && ` · 费用上限 ${task.budget.maxCost}`}</p>}
+          {task.executionError&&<p role="alert" className="error-text">{task.executionError}</p>}
+          {!!task.activities?.length&&<details><summary>本轮工具与拒绝记录</summary>{task.activities.map(activity=><section key={activity.toolCallId}><strong>{activity.action} · {statusLabel(activity.status)}</strong><Markdown text={activity.text??''}/></section>)}</details>}
+          {task.workPlanError&&!task.activities?.some(activity=>activity.toolCallId===task.workPlanError.toolCallId)&&<p className="error-text">文件计划未获准：{task.workPlanError.message}</p>}
+          <ProcessChecks task={task}/>
+          {task.actualRoles && <ActualExecution task={task} checkShown={!!task.processCheck}/>}
           {task.executionTasks?.map(source=><details key={source.id}><summary>{source.stepId} · {source.relation==='inherited'?'沿用已有交付':'本轮实际执行'} · {statusLabel(source.status)}</summary>
             <p>来源任务 {source.id} · 已发 {source.usage?.calls??'未知'} 次请求</p>
-            {source.messages.map(message=><div key={message.id}><p>{message.role} · {modelName(message.model)}</p><Markdown text={message.text??''}/></div>)}
+            {source.error&&<p className="error-text">{source.error}</p>}
+            {source.actualRoles ? <ActualExecution task={source} checkShown={!!task.processCheck}/> :
+              source.messages.map(message=><div key={message.id}><p>{message.role} · {modelName(message.model)}</p><Markdown text={message.text??''}/></div>)}
             {source.work&&<Checks work={source.work} taskId={source.id} commands={commands}/>}</details>)}
           {task.workRequest && <details className="field-note"><summary>制作HTML/SVG · 本条冻结技能</summary>{task.answerSkills?.map(s=><p key={s.hash}>{s.name}<br/><code>{s.hash}</code></p>)}</details>}
-          <details className="roster"><summary>参与者与冻结阵容</summary>
+          {task.actualRoles ? <details className="roster">
+            <summary>本轮冻结阵容</summary>
+            {(task.rosterCandidates ?? []).map((model,i) => <p key={i}>{i === 0 ? "主模型" : "候选副模型"} · {modelName(model)}</p>)}
+          </details> : <details className="roster"><summary>参与者与冻结阵容</summary>
             <div className="roster-title">
               <strong>{task.team?.name || "当时未记录阵容"}</strong>
               <span>{task.mode === "one" ? "ONE" : "CoThink"}</span>
@@ -272,7 +117,7 @@ export function Collaboration({
                   <div className="inactive-member" key={p.id}>
                     <strong>{modelName(p.model)}</strong>
                     <small>
-                      本轮未参与 ·{" "}
+                      {p.role.startsWith("candidate-")?"候选副模型 · ":""}本轮未参与 ·{" "}
                       {p.status === "not_called"
                         ? "尚未调用"
                         : statusLabel(p.status)}
@@ -281,7 +126,7 @@ export function Collaboration({
                 ))}
               </details>
             )}
-          </details>
+          </details>}
           {!expanded ? (
             <div className="compact-actions">
               <p>
@@ -290,7 +135,7 @@ export function Collaboration({
                     task.status === "running" ? "status-dot live" : "status-dot"
                   }
                 />
-                {statusLabel(task.status)} · {phaseLabel(task.phase)}
+                {statusLabel(task.status)} · {phaseLabel(task.managerFlow&&task.phase==="draft"?"answer":task.phase)}
               </p>
               <button
                 onClick={() => {
@@ -341,10 +186,8 @@ export function Collaboration({
               <div className="detail-scroll">
                 {tab === "collaboration" && (
                   <>
-                    <p className="detail-caption">
-                      以下均为已有调用原文。主答的处理说明不等于评审确认最终稿。
-                    </p>
-                    <div className="discussion-thread">
+                    {!task.actualRoles && <p className="detail-caption">以下均为已有调用原文。</p>}
+                    {!task.actualRoles && <div className="discussion-thread">
                       {task.messages.map((message) => {
                         const explanation =
                           message.phase === "revision"
@@ -359,7 +202,7 @@ export function Collaboration({
                             <header>
                               <span className="thread-node" />
                               <div>
-                                <strong>{phaseLabel(message.phase)}</strong>
+                                <strong>{phaseLabel(task.managerFlow&&message.phase==="draft"?"answer":message.phase)}</strong>
                                 <small>{modelName(message.model)}</small>
                               </div>
                               <span className="message-status">
@@ -405,35 +248,11 @@ export function Collaboration({
                           </article>
                         );
                       })}
-                    </div>
-                    {task.work && <MemberConflicts members={task.work.members}/>}
-                    {task.work && (
-                      <details className="activities">
-                        <summary>
-                          执行记录 · {task.work.activities.length} 条
-                        </summary>
-                        {task.work.activities.map((activity, i) => (
-                          <section key={i}>
-                            <div className="small-label">
-                              {activity.type === "handoff"
-                                ? "已保存交接"
-                                : "活动记录"}{" "}
-                              · {activity.action} ·{" "}
-                              {statusLabel(activity.status)}
-                            </div>
-                            {activity.memberId && (
-                              <p>关联成员 {activity.memberId}</p>
-                            )}
-                            {activity.text && (
-                              <div className="prose">
-                                <Markdown text={activity.text} />
-                              </div>
-                            )}
-                            <pre>{JSON.stringify(activity, null, 2)}</pre>
-                          </section>
-                        ))}
-                      </details>
-                    )}
+                    </div>}
+                    {!task.actualRoles && task.work && <>
+                      <MemberConflicts members={task.work.members}/>
+                      <WorkActivities activities={task.work.activities} legacy/>
+                    </>}
                     {task.error && <p className="error-text">{task.error}</p>}
                     <details>
                       <summary>用量记录</summary>

@@ -10,16 +10,19 @@ import {createRequire} from 'node:module';
 import {randomUUID} from 'node:crypto';
 import {createGuiController} from '../src/gui-controller.js';
 import {startGuiServer} from '../src/gui-server.js';
+import {fixtureConversation,prepareSubmit} from './helpers/gui-controller-fixture.js';
 
 function home(t) { const p=mkdtempSync(join(tmpdir(),'cothink-desktop-test-'));t.after(()=>rmSync(p,{recursive:true,force:true}));return p; }
 test('desktop shutdown freezes writes but keeps authenticated history and draft persistence until final close', async t=>{
  const controller=await createGuiController({home:home(t),suggestedProject:null,installation:'desktop'});
  const h=await startGuiServer({controller,open:false});t.after(()=>h.close());
- const headers={Authorization:`Bearer ${h.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"2"};
+ const headers={Authorization:`Bearer ${h.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"3"};
  const origin=new URL(h.url).origin;
  const read=()=>fetch(origin+'/api/bootstrap',{headers});
  const action=(action,args={})=>fetch(origin+'/api/action',{method:'POST',headers,body:JSON.stringify({action,args})});
- const s=await (await action('session.create',{sessionId:randomUUID(),workspaceId:null})).json();
+ const api={action:async(name,args)=>{const r=await action(name,args);assert.equal(r.status,200,await r.clone().text());return r.json();}};
+ const s=await fixtureConversation(t,api,{defaultRosterId:null});
+ const submit=await prepareSubmit(controller,{sessionId:s.id,input:'must not send',protocolVersion:1,submissionId:randomUUID()});
  const boot=await (await read()).json();
  assert.equal(boot.suggestedProject,null);
  assert.equal(boot.installation,'desktop');
@@ -27,8 +30,11 @@ test('desktop shutdown freezes writes but keeps authenticated history and draft 
  assert.equal(typeof h.beginShutdown,'function');
  assert.equal((await h.beginShutdown()).settled,true);
  assert.equal((await read()).status,200);
- assert.equal((await action('task.submit',{sessionId:s.id,input:'must not send',protocolVersion:1, submissionId:randomUUID()})).status,409);
- const saved=await action('session.draft',{sessionId:s.id,text:'keep on close',expectedDraftRevision:s.draftRevision,branchAnchor:s.branchAnchor,workRequest:null,selectionId:null,editId:randomUUID()});
+ const stopped=await action('task.submit',submit);
+ assert.equal(stopped.status,409);
+ assert.equal((await stopped.json()).code,'HOST_SHUTTING_DOWN');
+ const current=await controller.session(s.id);
+ const saved=await action('session.draft',{...current.editor,sessionId:s.id,text:'keep on close',expectedDraftRevision:current.draftRevision,branchAnchor:current.branchAnchor,editId:randomUUID()});
  assert.equal(saved.status,200,await saved.clone().text());
  await h.close();assert.equal(h.server.listening,false);
 });
@@ -100,11 +106,14 @@ test('IPC parent loss cancels an in-flight real HTTP fixture request and persist
  const {saveConfig}=await import('../src/config.js');const {createTeamConfig}=await import('../src/teams.js');
  const {readTask}=await import('../src/task.js');
  const model=await fixture(t,async()=>{await new Promise(resolve=>setTimeout(resolve,800));return {text:'late fixture'};});
- saveConfig(model.home,createTeamConfig({formatVersion:2,...model.models},'Fixture',randomUUID()));
+ const defaultRosterId=randomUUID();
+ saveConfig(model.home,createTeamConfig({formatVersion:2,...model.models},'Fixture',defaultRosterId));
  const f=await childHost(t,{COTHINK_HOME:model.home});const ready=await f.next('ready');
- const action=async(action,args)=>{const r=await fetch(ready.origin+'/api/action',{method:'POST',headers:{Authorization:`Bearer ${ready.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"2"},body:JSON.stringify({action,args})});assert.equal(r.status,200,await r.clone().text());return r.json();};
- const session=await action('session.create',{project:null});
- const submitted=await action('task.submit',{sessionId:session.id,input:'local fixture only',protocolVersion:1, submissionId:randomUUID()});
+ const action=async(action,args)=>{const r=await fetch(ready.origin+'/api/action',{method:'POST',headers:{Authorization:`Bearer ${ready.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"3"},body:JSON.stringify({action,args})});assert.equal(r.status,200,await r.clone().text());return r.json();};
+ const session=await fixtureConversation(t,{action},{defaultRosterId});
+ const input='local fixture only';
+ const savedDraft=await action('session.draft',{sessionId:session.id,text:input,expectedDraftRevision:session.draftRevision,branchAnchor:session.branchAnchor,workRequest:null,selectionId:null,editId:randomUUID()});
+ const submitted=await action('task.submit',{sessionId:session.id,input,protocolVersion:1,submissionId:randomUUID(),editorEditId:savedDraft.editor.editId});
  for(let n=0;n<500&&!model.calls.length;n++)await new Promise(resolve=>setTimeout(resolve,10));
  assert.equal(model.calls.length,1);f.child.disconnect();
  assert.equal((await f.exited)[0],0);

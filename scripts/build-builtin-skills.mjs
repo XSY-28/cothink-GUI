@@ -49,7 +49,7 @@ try {
  chmodSync(outputFile,0o755);
  const bundler=JSON.parse(readFileSync(join(root,'node_modules/rolldown/package.json')));
  json(join(doc,'assets/source.json'),{...source,bundler:{name:'rolldown',version:bundler.version,format:'esm',codeSplitting:false,comments:false},dependencies,checker:{path:'scripts/doc-maintenance.mjs',sha256:sha(code)}});
- const skills=[['doc-maintenance','0.1.0-cothink.1'],['context-management','0.1.0']].map(([name,version])=>{
+ const skills=[['doc-maintenance','0.1.0-cothink.1'],['context-management','0.1.1']].map(([name,version])=>{
   const directory=join(base,name);for(const file of inventory(directory)){if(!file.path.startsWith('build-input/'))chmodSync(join(directory,file.path),file.path.startsWith('scripts/')?0o755:0o644);}
   return {name,version,files:inventory(directory).filter(f=>!f.path.startsWith('build-input/'))};});
  json(join(base,'manifest.json'),{schemaVersion:1,skills});

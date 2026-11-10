@@ -1,7 +1,7 @@
 /** Isolated localhost demo. --package-root MUST point at the installed candidate for installed QA.
  * --empty starts with no model catalog/config; configure two custom providers using control.json.
  * Prompts: GUI_NORMAL (math/code/GFM), GUI_WORK (real read/edit/Docker/accept),
- * GUI_CANCEL_REVIEW, GUI_CANCEL_MEMBER (30 second fixture delay; Cancel stops the task).
+ * GUI_CANCEL_MANAGER, GUI_CANCEL_MEMBER (30 second fixture delay; Cancel stops the task).
  * Control file intentionally carries ephemeral credentials, mode 0600; ordinary stdout redacts URL fragment.
  */
 import { resolve, join } from "node:path";
@@ -49,8 +49,7 @@ f = await fixture(lifecycle, async (call, n, req, res) => {
     JSON.stringify({ calls: trace.length, trace }, null, 2),
   );
   if (
-    member &&
-    (/GUI_CANCEL_REVIEW/.test(text) || /GUI_CANCEL_MEMBER/.test(text))
+    member ? /GUI_CANCEL_MEMBER/.test(text) : /GUI_CANCEL_MANAGER/.test(text)
   ) {
     await new Promise((done) => {
       const timer = setTimeout(done, 30000);
@@ -128,7 +127,6 @@ f = await fixture(lifecycle, async (call, n, req, res) => {
       text: "# 项目成果\n\n已通过本地 Docker fixture 检查，独立成果中的 a.txt 已更新。原项目目录没有写回。",
     };
   }
-  if(/GUI_CANCEL_REVIEW/.test(text) && body.tools?.some(x=>x.function?.name==='request_review') && !text.includes('saved review draft'))return tool('request_review',{reason:'fixture review cancellation',draft:'saved review draft\n'+normal});
   return { text: normal };
 });
 if (args.includes("--empty")) rmSync(join(f.home, "pi/models.json"));
@@ -203,7 +201,7 @@ function writeControl() { writeFileSync(
         "GUI_FILES",
         "GUI_NORMAL",
         "GUI_WORK",
-        "GUI_CANCEL_REVIEW",
+        "GUI_CANCEL_MANAGER",
         "GUI_CANCEL_MEMBER",
       ],
     },

@@ -3,31 +3,8 @@ import assert from "node:assert/strict";
 import React, { act } from "react";
 import { Window } from "happy-dom";
 import { Composer } from "../gui/src/Composer.js";
-import { build } from "vite";
-import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
-const bundleDirectory = resolve("work/gui/component-build");
-const previousNodeEnv = process.env.NODE_ENV;
-await build({
-  configFile: false,
-  logLevel: "silent",
-  build: {
-    lib: {
-      entry: resolve("test/helpers/gui-components.jsx"),
-      formats: ["es"],
-      fileName: "components",
-    },
-    outDir: bundleDirectory,
-    emptyOutDir: true,
-    minify: false,
-    rolldownOptions: { external: ["react", "react/jsx-runtime"] },
-  },
-});
-if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
-else process.env.NODE_ENV = previousNodeEnv;
-const componentUrl = pathToFileURL(
-  resolve(bundleDirectory, "components.js"),
-).href;
+import { fixtureConversation } from "./helpers/gui-controller-fixture.js";
+import { componentUrl, modalEnvironment } from "./gui-modal.fixture.js";
 
 test('skill settings show host capabilities and save only explicit disabled names',async()=>{
  await modalEnvironment(async({root,container,Settings})=>{
@@ -72,60 +49,6 @@ test('formal capability panel labels coordinator and executor permissions separa
   assert.equal(container.querySelector('[aria-label="能力来源 所属执行者 main"]'),null);assert.match(container.textContent,/尚无已绑定的活动执行者/);assert.equal(reads,2);
  });
 });
-
-async function modalEnvironment(run) {
-  const win = new Window({ url: "http://localhost/" }),
-    prior = {};
-  Object.defineProperty(win.document, "compatMode", { value: "CSS1Compat" });
-  for (const key of [
-    "window",
-    "document",
-    "navigator",
-    "HTMLElement",
-    "Event",
-    "KeyboardEvent",
-    "CompositionEvent",
-    "DOMParser",
-  ]) {
-    prior[key] = Object.getOwnPropertyDescriptor(globalThis, key);
-    Object.defineProperty(globalThis, key, {
-      configurable: true,
-      value: win[key],
-    });
-  }
-  // happy-dom has no layout: model only the browser's rendered-box boundary.
-  // Disabled fieldset semantics, focus, events and our trap remain actual DOM behavior.
-  win.HTMLElement.prototype.getClientRects = function () {
-    if (this.closest("[hidden]")) return [];
-    for (let node = this; node; node = node.parentElement) {
-      if (win.getComputedStyle(node).display === "none") return [];
-      if (
-        node.tagName === "DETAILS" &&
-        !node.open &&
-        !node.querySelector("summary")?.contains(this)
-      )
-        return [];
-    }
-    return [{ width: 20, height: 20 }];
-  };
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const components = await import(componentUrl),
-    { createRoot } = await import("react-dom/client");
-  const container = win.document.createElement("div");
-  win.document.body.append(container);
-  const root = createRoot(container);
-  try {
-    await run({ win, container, root, ...components });
-  } finally {
-    await act(() => root.unmount());
-    win.happyDOM.abort();
-    for (const [key, descriptor] of Object.entries(prior)) {
-      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-      else delete globalThis[key];
-    }
-    delete globalThis.IS_REACT_ACT_ENVIRONMENT;
-  }
-}
 
 test("Settings contains Tab focus while work fields are disabled by an active task or a pending save", async () => {
   await modalEnvironment(async ({ win, container, root, Settings }) => {
@@ -378,6 +301,8 @@ test("turn limit details report unknown output policy when the model catalog is 
   await modalEnvironment(async({root,container,TurnLimits})=>{
     const team={main:{provider:"p",modelId:"main"},secondary:[]};
     await act(()=>root.render(React.createElement(TurnLimits,{available:true,team,models:[],onClose(){}})));
+    assert.equal(container.querySelectorAll('input[type="checkbox"]').length,2,"only read-only and delegation are regular turn controls");
+    assert.doesNotMatch(container.textContent,/必须由不同型号独立评审/);
     await act(()=>container.querySelector("summary").click());
     assert.match(container.querySelector("details").textContent,/模型目录不可用，输出额度要求未知/);
     assert.doesNotMatch(container.querySelector("details").textContent,/未设本地输出上限/);
@@ -826,6 +751,43 @@ test('a model used as a work member is not also labeled unused because its revie
  });
 });
 
+test("new process view distinguishes assigned scopes, actual requests and checker coverage", async () => {
+  await modalEnvironment(async ({root,container,Collaboration})=>{
+    const model={provider:"fixture",modelId:"shared"};
+    const source={id:"child",stepId:"step",relation:"owned",status:"partial",actualRoles:true,
+      scope:{assignment:"Verify the file boundary",read:["notes.md"],write:[]},
+      participants:[{id:"member",staffId:"file-checker",role:"member",position:"employee",requestRole:"member:member",
+        assignment:"核对指定材料",reason:"熟悉此格式",readScope:["notes.md"],scope:[],selectedModel:model,model,
+        status:"outcome_unknown",pause:{status:"unknown",unresolvedRequestIds:["worker-call"]}}],
+      messages:[{id:"worker-call",role:"member:member",phase:"worker",actualModel:model,status:"outcome_unknown",sent:true,
+        error:"响应未确认",maxOutputTokens:700}],
+      skillReads:[{name:"doc-maintenance",path:"SKILL.md",hash:"skill-hash",role:"member:member",stageId:"worker"}],
+    };
+    const task={id:"root",actualRoles:true,managerFlow:true,participants:[],messages:[],budget:{maxCalls:8},
+      usage:{calls:3},status:"partial",executionTasks:[source],rosterCandidates:[model],
+      processCheck:{status:"blocked",interval:60000,gap:{code:"PROCESS_BUDGET",message:"本轮检查额度耗尽"},observations:[
+        {id:"observation",kind:"periodic",sequence:1,status:"completed",delayMs:1000,missedIntervals:1,actualModel:model,
+          usage:{input:12,output:6},members:[{taskId:"child",memberId:"member",status:"waiting",covered:true,blockers:1},
+            {taskId:"child",memberId:"queued",status:"queued",covered:false}],
+          reports:[{id:"issue",taskId:"child",memberId:"member",leaderId:"main",kind:"blocker",reason:"等待文件读取",status:"forwarded"}]},
+      ]},
+    };
+    await act(()=>root.render(React.createElement(Collaboration,{task,expanded:true,tab:"collaboration",setTab(){},onExpand(){},onClose(){},commands:{}})));
+    assert.match(container.textContent,/本轮请求上限 8/);
+    assert.match(container.textContent,/员工 · file-checker/);
+    assert.match(container.textContent,/选人理由：熟悉此格式/);
+    assert.match(container.textContent,/读取范围：notes\.md/);
+    assert.match(container.textContent,/停止未确认/);
+    assert.match(container.textContent,/700 tokens/);
+    assert.match(container.textContent,/已读取技能.*doc-maintenance/s);
+    assert.match(container.textContent,/覆盖 1 \/ 2/);
+    assert.match(container.textContent,/跳过 1 个间隔/);
+    assert.match(container.textContent,/等待文件读取.*已送直属负责人/s);
+    assert.match(container.textContent,/本轮检查额度耗尽/);
+    assert.doesNotMatch(container.textContent,/独立评审|主答初稿/);
+  });
+});
+
 test('update settings keep controls disabled during a check and show a save failure without claiming success', async () => {
   await modalEnvironment(async ({container,root,Settings})=>{
     const {createUpdateService,formatUpdateStatus,updateInstructions}=await import('../src/updates.js');
@@ -978,7 +940,7 @@ test("delayed new-chat preserves the old draft and a newer navigation wins",asyn
       action:async(name,args)=>{
         if(name === "session.fork"){const wait=deferred();forks.push({wait,args});return wait.promise;}
         if(name !== "session.create")return {};
-        const wait=deferred();creates.push({wait,project:args.project});return wait.promise;
+        const wait=deferred();creates.push({wait,workspaceId:args.workspaceId});return wait.promise;
       },
     };
     function Harness(){
@@ -987,8 +949,8 @@ test("delayed new-chat preserves the old draft and a newer navigation wins",asyn
       return React.createElement("div",null,
         ...["a","b","c"].map(id=>React.createElement("button",{key:id,onClick:()=>run(commands.openSession(id))},"open "+id)),
         React.createElement("button",{onClick:()=>run(commands.selectProject("/b"))},"project B"),
-        React.createElement("button",{onClick:()=>run(commands.createSession({project:"/a"}))},"new A"),
-        React.createElement("button",{onClick:()=>run(commands.createSession({project:"/b"}))},"new B"),
+        React.createElement("button",{onClick:()=>run(commands.createSession({workspaceId:"team-a"}))},"new A"),
+        React.createElement("button",{onClick:()=>run(commands.createSession({workspaceId:"team-b"}))},"new B"),
         React.createElement("button",{onClick:()=>commands.setDraft("a","unsent source draft")},"edit A"),
         React.createElement("button",{onClick:()=>run(commands.forkSession({sessionId:"a",taskId:"task-a"}))},"fork A"),
         React.createElement("textarea",{readOnly:true,disabled:!state.session,value:state.draft}),
@@ -1021,9 +983,10 @@ test("delayed new-chat preserves the old draft and a newer navigation wins",asyn
       await click("new A"); await click("new A");
       assert.equal(creates.length,2,"repeat activation in one Team must not allocate another session");
       await click("new B");
+      assert.deepEqual(creates.map(item=>item.workspaceId),["team-a","team-a","team-b"]);
       assert.equal(state().id,"c");
       assert.equal(container.querySelector("textarea").value,"draft C");
-      records.nb={id:"nb",workspaceId:"team-nb",project:"/b",draft:"new B draft",turns:[]};records.na={id:"na",workspaceId:"team-na",project:"/a",draft:"new A draft",turns:[]};
+      records.nb={id:"nb",workspaceId:"team-b",project:"/b",draft:"new B draft",turns:[]};records.na={id:"na",workspaceId:"team-a",project:"/a",draft:"new A draft",turns:[]};
       await act(async()=>creates[2].wait.resolve(records.nb));
       await act(async()=>creates[1].wait.resolve(records.na));
       assert.equal(state().id,"nb"); assert.equal(state().project,"/b");
@@ -1082,6 +1045,8 @@ test("Team panel preserves exchanged model settings, dirty edits and saved facts
     await act(async()=>{const select=container.querySelector('[aria-label="此对话的思考设置"]');select.value="";select.dispatchEvent(new win.Event("change",{bubbles:true}));});
     assert.deepEqual(changes,[["session.thinking",{},"session"]]);
     await click("按当前快照另存");
+    assert.match(container.textContent,/协作候选/);
+    assert.doesNotMatch(container.textContent,/普通问答的评审模型/);
     await act(()=>{const select=container.querySelector('[aria-label="主模型"]');select.value=JSON.stringify(["p","reviewer"]);select.dispatchEvent(new win.Event("change",{bubbles:true}));});
     assert.equal(container.querySelector('[aria-label="主模型输出额度"]').value,"456");
     assert.equal(container.querySelector('[aria-label="副模型 1输出额度"]').value,"123");
@@ -1335,7 +1300,7 @@ test("Team creation requires a folder even without a default roster",async()=>{
     const commands={inspectProject:async canonicalPath=>({canonicalPath,directoryAvailable:true}),
       createWorkspace:async args=>{requests.push(args);return {id:"new",...args};}};
     await act(()=>root.render(React.createElement(ProjectDialog,{commands,onSaved:value=>saved.push(value),onClose(){}})));
-    assert.match(container.textContent,/暂无默认阵容/);
+    assert.match(container.textContent,/不设默认，每条对话单独选择/);
     await act(()=>{const input=container.querySelector("input");Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(input,"课程笔记");input.dispatchEvent(new win.Event("input",{bubbles:true}));});
     const submit=()=>act(async()=>container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true})));
     await submit();
@@ -1361,6 +1326,22 @@ test("reply branch action targets its own completed reply and compact composer o
   assert.deepEqual(forks,['first']);
   await act(()=>root.render(React.createElement(Conversation,{...props,state:{...state,session:{...state.session,turns:[{...state.session.turns[0],canFork:false,status:'running'}]}}})));
   assert.equal(fork().disabled,true);
+ });
+});
+
+test("file proposal shows the frozen collaboration requirements beside confirmation",async()=>{
+ await modalEnvironment(async({root,container,Conversation})=>{
+  const turn={taskId:"proposal",input:"Compare the two outputs",finalText:"Work proposal",status:"blocked",
+    proposalRef:{sourceTaskId:"proposal"},proposal:{collaboration:[
+      {workers:2,parallel:true,distinctModels:true,stepIds:["compare-a","compare-b"],source:{kind:"plan"}},
+    ]}};
+  const state={bootstrap:{protocol:{unified:1},teams:[],models:[],sessions:[],active:null},
+    session:{id:"a",title:"Title",turns:[turn]},draft:"",ready:true,errors:[]};
+  await act(()=>root.render(React.createElement(Conversation,{state,commands:{}})));
+  const requirements=container.querySelector('[aria-label="协作要求"]');
+  assert.ok(requirements);
+  assert.match(requirements.textContent,/至少 2 名员工.*并行.*不同模型.*compare-a.*compare-b/);
+  assert.ok([...container.querySelectorAll("button")].some(button=>button.textContent==="确认上述计划并执行"&&!button.disabled));
  });
 });
 
@@ -1750,148 +1731,21 @@ test("a confirmed workspace default stays visible during and after a stale boots
   });
 });
 
-test("damaged Pi affiliation keeps history readable and requires an explicit context for creation", async t => {
-  const {fixture}=await import("./helpers/pi-fixture.js");
-  const {createGuiController}=await import("../src/gui-controller.js");
-  const {saveConfig}=await import("../src/config.js");
-  const {createTeamConfig}=await import("../src/teams.js");
-  const {readFileSync,readdirSync,writeFileSync}=await import("node:fs");
-  const {join}=await import("node:path");
-  const f=await fixture(t,()=>({text:"保存的答复"}));
-  saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},"Fixture",crypto.randomUUID()));
-  const controller=await createGuiController({home:f.home,cwd:f.cwd});
-  t.after(()=>controller.close());
-  const generic=await controller.action("session.create",{sessionId:crypto.randomUUID(),workspaceId:null});
-  const damaged=await controller.action("session.create",{sessionId:crypto.randomUUID(),workspaceId:null});
-
-  await controller.action("session.name",{sessionId:damaged.id,title:"归属异常夹具"});
-  const {taskId}=await controller.action("task.submit",{sessionId:damaged.id,input:"保存的问题",protocolVersion:1, submissionId:"unknown-affiliation"});
-  for (let i=0;i<200 && (await controller.task(taskId)).status==="running";i++)
-    await new Promise(resolve=>setTimeout(resolve,10));
-  assert.equal((await controller.task(taskId)).status,"completed");
-  const {draftRevision,branchAnchor}=await controller.session(damaged.id);
-  await controller.action("session.draft",{sessionId:damaged.id,text:"保存的草稿",expectedDraftRevision:draftRevision,
-    branchAnchor,editId:crypto.randomUUID(),workRequest:null,selectionId:null});
-  const dir=join(f.home,"pi/sessions/main");
-  const path=join(dir,readdirSync(dir).find(name=>name.endsWith(damaged.id+".jsonl")));
-  const entries=readFileSync(path,"utf8").trimEnd().split("\n").map(JSON.parse);
-  entries.find(entry=>entry.customType==="cothink-gui-workspace").data={workspaceId:"bad"};
-  let bytes=entries.map(JSON.stringify).join("\n")+"\n";
-  writeFileSync(path,bytes);
-
-  try {
-    const projected=await controller.session(damaged.id);
-    assert.equal(projected.workspaceId,undefined);
-    assert.equal(projected.readOnly,true);
-    assert.match(projected.workspaceError,/归属损坏/);
-    const globalPage=await controller.sessions();
-    const damagedRow=globalPage.items.find(row=>row.id===damaged.id);
-    assert.equal(damagedRow.workspaceId,undefined);
-    assert.equal(damagedRow.workspaceError,projected.workspaceError);
-    assert.equal(damagedRow.readOnly,true);
-    assert.deepEqual((await controller.sessions({workspaceId:null})).items.map(row=>row.id),[generic.id]);
-
-    await modalEnvironment(async ({root,container,win,useGuiWorkspace,Conversation,ConversationPicker,Navigation}) => {
-      const previous=Object.getOwnPropertyDescriptor(globalThis,"sessionStorage");
-      Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
-      win.sessionStorage.setItem("cothink.session",damaged.id);
-      const reads=[], creates=[];
-      let gui;
-      const waitList=async()=>{for (let i=0;i<50 && gui.state.navigationLoading;i++) await act(async()=>new Promise(resolve=>setTimeout(resolve,10)));};
-      const api={
-        subscribe:()=>()=>{},
-        read:async (kind,args={})=>{
-          reads.push({kind,args});
-          if (kind==="session" || kind==="task") return controller[kind](args.id);
-          return controller[kind]({...args,...(args.workspaceId==="" ? {workspaceId:null} : {})});
-        },
-        action:async (name,args)=>{
-          if (name==="session.create") creates.push(args);
-          return controller.action(name,args);
-        },
-      };
-      function Harness() {
-        gui=useGuiWorkspace(api);
-        const {state,commands}=gui;
-        return React.createElement(React.Fragment,null,
-          React.createElement(Navigation,{workspaceId:state.workspaceId,ready:state.ready,connection:state.connection,
-            workspaces:state.bootstrap.workspaces,onOpenWorkspace:commands.selectWorkspace}),
-          React.createElement(Conversation,{state,commands}),
-          React.createElement(ConversationPicker,{state,commands,scope:state.navigationQuery.scope,onOpenSession:commands.openSession}));
-      }
-      try {
-        await act(async()=>root.render(React.createElement(Harness)));
-        for (let i=0;i<50 && !gui.state.ready;i++) await act(async()=>new Promise(resolve=>setTimeout(resolve,10)));
-        assert.equal(gui.state.ready,true);
-        assert.equal(gui.state.workspaceId,undefined);
-        assert.match(container.querySelector("h1").textContent,/归属待核对/);
-        assert.equal(container.querySelector("nav [aria-current=page]"),null);
-        assert.match(container.querySelector(".composer").textContent,/会话的 Team 归属损坏；原记录保留。/);
-        assert.doesNotMatch(container.querySelector(".composer").textContent,/若被其他 CLI|发送前请在顶部选择阵容/);
-        assert.match(container.textContent,/保存的答复/);
-        assert.equal(container.querySelector("textarea").value,"保存的草稿");
-        assert.equal(container.querySelector("textarea").disabled,true);
-        assert.equal(reads.filter(row=>row.kind==="sessions").length,0,"unknown group cannot make a scoped listing");
-        const newChat=[...container.querySelectorAll("button")].find(button=>button.textContent.includes("新建对话"));
-        assert.equal(newChat.disabled,true);
-        for (const options of [undefined,{workspaceId:undefined},{workspaceId:null}])
-          await assert.rejects(gui.commands.createSession(options),/请先.*选择/);
-        assert.equal(creates.length,0);
-
-        await act(async()=>gui.commands.searchSessions({scope:"all",query:"保存的问题"}));
-        await waitList();
-        assert.equal(reads.at(-1).kind,"sessions");
-        assert.equal(Object.hasOwn(reads.at(-1).args,"workspaceId"),false);
-        assert.equal(gui.state.sessions.find(row=>row.id===damaged.id).match.taskId,taskId);
-        assert.match(container.textContent,/归属待核对.*保存的问题/s);
-        assert.ok(reads.some(row=>row.kind==="task" && row.args.id===taskId));
-        assert.equal(readFileSync(path,"utf8"),bytes);
-
-        // A well-formed ID with no Team row is also unknown, even for a live holder.
-        entries.find(entry=>entry.customType==="cothink-gui-workspace").data={workspaceId:crypto.randomUUID()};
-        bytes=entries.map(JSON.stringify).join("\n")+"\n";
-        writeFileSync(path,bytes);
-        await act(async()=>gui.commands.refresh());
-        assert.equal(gui.state.workspaceId,undefined);
-        assert.match(gui.state.session.workspaceError,/归属无法确认/);
-        assert.match(container.querySelector(".composer").textContent,/归属无法确认/);
-        assert.equal(gui.state.sessions.find(row=>row.id===damaged.id).workspaceId,undefined);
-        assert.equal(container.querySelector("textarea").value,"保存的草稿");
-
-        await act(async()=>gui.commands.searchSessions({scope:"all",query:""}));
-        await waitList();
-        const genericEntry=container.querySelector(`[title="${generic.title}"]`);
-        assert.ok(genericEntry,"ungrouped history remains reachable through global search");
-        await act(async()=>genericEntry.click());
-        for (let i=0;i<50 && gui.state.session?.id!==generic.id;i++) await act(async()=>new Promise(resolve=>setTimeout(resolve,10)));
-        assert.equal(gui.state.workspaceId,null);
-        assert.equal(container.querySelector(`[title="${generic.title}"]`).getAttribute("aria-current"),"page");
-        assert.equal(gui.state.session.id,generic.id);
-        await act(async()=>gui.commands.searchSessions({scope:"project",query:""}));
-        await waitList();
-        assert.deepEqual(gui.state.sessions.map(row=>row.id),[generic.id]);
-        await act(async()=>gui.commands.createSession({workspaceId:null}));
-        assert.equal(creates.length,1);
-        assert.equal(creates[0].workspaceId,null);
-        assert.equal(gui.state.session.workspaceId,null);
-      } finally {
-        await act(()=>root.unmount());
-        if(previous)Object.defineProperty(globalThis,"sessionStorage",previous);else delete globalThis.sessionStorage;
-      }
-    });
-    assert.equal(readFileSync(path,"utf8"),bytes);
-    assert.equal(f.calls.length,1);
-  } finally {
-    await controller.close();
-  }
-});
-
 test('versioned per-session turn options survive reopen and unknown submit without granting another project access',async t=>{
- const {fixture}=await import('./helpers/pi-fixture.js');const {repository,git}=await import('./helpers/git-fixture.js');
+ const {fixture}=await import('./helpers/pi-fixture.js');const {git}=await import('./helpers/git-fixture.js');
+ const {writeFileSync}=await import('node:fs');const {join}=await import('node:path');
  const {createGuiController}=await import('../src/gui-controller.js');const {saveConfig}=await import('../src/config.js');const {createTeamConfig}=await import('../src/teams.js');const {readTask}=await import('../src/task.js');const {randomUUID}=await import('node:crypto');
- const f=await fixture(t),repoA=repository(t),repoB=repository(t);saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Options fixture',randomUUID()));
+ const f=await fixture(t),rosterId=randomUUID();saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Options fixture',rosterId));
  let controller=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>controller.close());
- const a=await controller.action('session.create',{project:repoA.project}),b=await controller.action('session.create',{project:repoB.project});
+ const a=await fixtureConversation(t,controller,{defaultRosterId:rosterId});
+ const b=await fixtureConversation(t,controller,{defaultRosterId:rosterId});
+ for (const room of [a,b]) {
+   git(room.project,'init','-b','main');
+   writeFileSync(join(room.project,'a.txt'),'base A\n');
+   git(room.project,'status','--porcelain');
+   git(room.project,'add','--','a.txt');
+   git(room.project,'commit','-m','fixture base');
+ }
  await modalEnvironment(async({root,win,useGuiWorkspace})=>{
   const oldStorage=Object.getOwnPropertyDescriptor(globalThis,'sessionStorage');Object.defineProperty(globalThis,'sessionStorage',{configurable:true,value:win.sessionStorage});
   let workspace,loseSubmit=false,submitted;
@@ -1902,7 +1756,7 @@ test('versioned per-session turn options survive reopen and unknown submit witho
   try{
    await act(async()=>root.render(React.createElement(Harness)));
    await act(async()=>workspace.commands.openSession(a.id));
-   await act(()=>{workspace.commands.setDraft(a.id,'question with saved limits');workspace.commands.setTurnOptions(a.id,{maxCalls:'3',readOnly:true,delegate:false,readAllowed:true,readPaths:'a.txt',readVersion:git(repoA.project,'rev-parse','HEAD')});});
+   await act(()=>{workspace.commands.setDraft(a.id,'question with saved limits');workspace.commands.setTurnOptions(a.id,{maxCalls:'3',readOnly:true,delegate:false,readAllowed:true,readPaths:'a.txt',readVersion:git(a.project,'rev-parse','HEAD')});});
    await act(async()=>workspace.commands.flushAllDrafts());const savedA=await controller.session(a.id);assert.equal(savedA.editor.turnOptions.maxCalls,'3');assert.equal(savedA.editor.turnOptions.readProject,savedA.project);
    await act(async()=>workspace.commands.openSession(b.id));assert.equal(workspace.state.turnOptions,null,'A opt-in never becomes B consent');
    await act(()=>workspace.commands.setTurnOptions(b.id,{maxCalls:'1'}));await act(async()=>workspace.commands.flushAllDrafts());
@@ -1918,141 +1772,6 @@ test('versioned per-session turn options survive reopen and unknown submit witho
    const task=readTask(f.home,submitted.taskId);assert.equal(task.budget.maxCalls,3);assert.equal(task.constraints.readOnly,true);assert.equal(task.readAuthorization.canonicalRepo,savedA.project);assert.equal(task.readAuthorization.source.editorEditId,savedA.editor.editId);assert.equal(f.calls.length,1);
   }finally{await act(()=>root.render(null));if(oldStorage)Object.defineProperty(globalThis,'sessionStorage',oldStorage);else delete globalThis.sessionStorage;}
  });
-});
-
-
-test("Team navigation keeps project identity and distinguishes empty, archived and unavailable lists",async()=>{
- await modalEnvironment(async({root,container,Navigation})=>{
-  const rows=[{id:"a",name:"CoThink 开发"},{id:"b",name:"LLM 学习",attention:{kind:"unread"}},{id:"c",name:"课程笔记"}];
-  const props={workspaces:rows,workspaceId:"b",ready:true,connection:"connected"};
-  await act(()=>root.render(React.createElement(Navigation,{...props,sessions:[{id:"s",workspaceId:"b",title:"Only in picker",navigation:{}}]})));
-  assert.equal(container.querySelector('[aria-label="新建"]').textContent,"");
-  assert.equal(container.querySelector('[aria-label="最近对话"],[title="Only in picker"],[aria-label*="中新建对话"]'),null);
-  const selectedTeam=container.querySelector('[aria-current="page"]');
-  assert.equal(selectedTeam.getAttribute("aria-label"),"LLM 学习");
-  assert.equal(selectedTeam.title,"");
-  assert.match(selectedTeam.getAttribute("aria-description"),/有新结果/);
-  assert.doesNotMatch(selectedTeam.textContent,/LLM 学习/);
-  await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:[]})));
-  assert.match(container.textContent,/创建第一个 Team，开始持续的工作。/);
-  await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:rows.map(row=>({...row,archived:true}))})));
-  assert.match(container.textContent,/已归档 Team 可在搜索或设置中恢复/);
-  assert.doesNotMatch(container.textContent,/创建第一个/);
-  await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:null})));
-  assert.match(container.textContent,/工作列表暂不可用/);
-  assert.doesNotMatch(container.textContent,/创建第一个/);
-  await act(()=>root.render(React.createElement(Navigation,{...props,workspaces:[],connection:"reconnecting"})));
-  assert.doesNotMatch(container.textContent,/创建第一个/);
- });
-});
-
-
-test("saved Team survives rejected or unknown first conversation creation without automatic recreation",async()=>{
- for (const unknown of [false,true]) await modalEnvironment(async({root,container,win,useGuiWorkspace,Conversation})=>{
-  const previous=Object.getOwnPropertyDescriptor(globalThis,"sessionStorage");
-  Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
-  let gui;const workspaces=[],actions=[],reads=[];
-  const api={subscribe:()=>()=>{},read:async(kind,args)=>{
-    reads.push({kind,args});
-    if(kind==="bootstrap")return {protocol:{unified:1},teams:[],models:[],providers:[],sessions:[],workspaces,work:{},active:null};
-    if(kind==="sessions")return {items:[],workspaces};
-    throw Error("Original session cannot yet be read");
-  },action:async(name,args)=>{
-    actions.push({name,args});
-    if(name==="workspace.create") {const row={id:args.workspaceId,name:args.name,project:null,revision:1};workspaces.push(row);return row;}
-    if(name==="session.create")throw Object.assign(Error(unknown?"lost acknowledgement":"creation rejected"),{unknown});
-  }};
-  function Harness(){gui=useGuiWorkspace(api);return React.createElement(Conversation,{state:gui.state,commands:gui.commands,workspace:gui.state.bootstrap.workspaces?.[0],onConversations(){}});}
-  try {
-    await act(async()=>root.render(React.createElement(Harness)));
-    let saved;await act(async()=>{saved=await gui.commands.createWorkspace({name:"未发消息的 Team",project:null,defaultRosterId:null});});
-    assert.equal(saved.id,workspaces[0].id);
-    assert.equal(gui.state.workspaceId,saved.id);
-    assert.equal(gui.state.bootstrap.workspaces.length,1);
-    assert.equal(actions.filter(row=>row.name==="workspace.create").length,1);
-    const creates=actions.filter(row=>row.name==="session.create");assert.equal(creates.length,1);
-    assert.match(container.textContent,/Team 已保存/);
-    if(unknown){
-      assert.match(container.textContent,/创建结果尚未确认/);
-      assert.ok(container.textContent.includes(creates[0].args.sessionId));
-      assert.deepEqual(reads.filter(row=>row.kind==="session").map(row=>row.args.id),[creates[0].args.sessionId]);
-      assert.doesNotMatch(container.textContent,/从‘对话’中新建/);
-    } else assert.match(container.textContent,/creation rejected/);
-  } finally {
-    if(previous)Object.defineProperty(globalThis,"sessionStorage",previous);else delete globalThis.sessionStorage;
-  }
- });
-});
-
-test("stale homepage reservation and transfer expose draft recovery and keep the original creation ID",async()=>{
-  for(const phase of ["reserve","transfer"]) await modalEnvironment(async({root,container,win,useGuiWorkspace,Conversation})=>{
-    const previous=Object.getOwnPropertyDescriptor(globalThis,"sessionStorage");
-    Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
-    const draftId=crypto.randomUUID(), sessionId=crypto.randomUUID();
-    const editor={editorVersion:2,text:"Local saved text",editId:crypto.randomUUID(),workRequest:null,
-      selectionId:null,turnOptions:null,materials:[{id:crypto.randomUUID(),sha256:"a".repeat(64)}]};
-    const material=editor.materials.map(ref=>({...ref,status:"ready",name:"fixture.txt",mediaType:"text/plain",byteLength:12}));
-    const initial={draftId,revision:1,editor,materials:material,pendingCreateSessionId:phase==="transfer"?sessionId:null,targetWorkspaceId:null};
-    let host=structuredClone(initial), gui;
-    const requests=[];
-    const savedSession=()=>({id:sessionId,project:null,workspaceId:null,team:null,turns:[],
-      editor:host.editor,materials:material,draftRevision:"transferred",branchAnchor:"transferred"});
-    const conflict=()=>Object.assign(Error("首页保存稿已变化"),{code:"DRAFT_CONFLICT"});
-    const api={subscribe:()=>()=>{},read:async(kind,args)=>{
-      if(kind==="bootstrap")return {protocol:{unified:1,guiInput:2},homeDraft:structuredClone(host),
-        teams:[],models:[],providers:[],sessions:[],workspaces:[],work:{},active:null};
-      if(kind==="sessions")return {items:[]};
-      if(kind==="session-creation"){
-        requests.push({name:"query",id:args.id});
-        return {status:"confirmed",session:savedSession()};
-      }
-    },action:async(name,args)=>{
-      requests.push({name,...args});
-      if(name==="home.reserve")throw conflict();
-      if(name==="home.draft"){
-        assert.equal(args.expectedRevision,host.revision);
-        host={...host,editor:args.editor,revision:host.revision+1};
-        return structuredClone(host);
-      }
-      if(name==="home.transfer"){
-        if(args.expectedRevision!==host.revision)throw conflict();
-        const result=savedSession();
-        host=null;
-        return result;
-      }
-      throw Error("Unexpected mutation: "+name);
-    }};
-    function Harness(){
-      gui=useGuiWorkspace(api);
-      return React.createElement(Conversation,{state:gui.state,commands:gui.commands});
-    }
-    const button=label=>[...container.querySelectorAll("button")].find(node=>node.textContent===label);
-    try {
-      await act(async()=>root.render(React.createElement(Harness)));
-      host={...host,revision:2,pendingCreateSessionId:sessionId,
-        editor:{...editor,text:"Other window's saved text",editId:crypto.randomUUID()}};
-      if(phase==="reserve")await act(async()=>gui.commands.submit());
-      else await act(async()=>button("查询原会话").click());
-      assert.equal(gui.state.draftConflict,true,phase);
-      assert.equal(container.querySelector("textarea").value,editor.text);
-      assert.ok(button("读取保存稿"));
-      assert.ok(button("以本机稿再保存"));
-      await act(async()=>button(phase==="reserve"?"读取保存稿":"以本机稿再保存").click());
-      assert.equal(gui.state.draftConflict,false);
-      assert.equal(gui.state.homeDraft.pendingCreateSessionId,sessionId);
-      assert.deepEqual(gui.state.homeDraft.editor.materials,editor.materials);
-      const expected=phase==="reserve"?"Other window's saved text":editor.text;
-      assert.equal(container.querySelector("textarea").value,expected);
-      await act(async()=>button("查询原会话").click());
-      assert.equal(gui.state.session.id,sessionId);
-      assert.equal(container.querySelector("textarea").value,expected);
-      assert.ok(requests.filter(row=>row.name==="query").every(row=>row.id===sessionId));
-      assert.ok(requests.every(row=>!["session.create","task.submit"].includes(row.name)));
-    } finally {
-      await act(()=>root.unmount());
-      if(previous)Object.defineProperty(globalThis,"sessionStorage",previous);else delete globalThis.sessionStorage;
-    }
-  });
 });
 
 test("execution settings keep a read-only Docker diagnosis separate from an explicit probe", async () => {

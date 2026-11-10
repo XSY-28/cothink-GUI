@@ -1,4 +1,4 @@
-import {resolveDelivery} from "./project-turn.js";
+import {resolveDeliveryEvidence,resolveManagerFinal} from "./project-delivery.js";
 import { readFileSync } from "node:fs";
 import { readTask, readRequests, taskDisplayStatus } from "./task.js";
 import { finalAnswerText, safeText } from "./terminal.js";
@@ -52,8 +52,23 @@ export function finalText(record, requests, {localArtifacts=true, hostFooter=tru
       JSON.stringify(proposal.plan,null,2),
     ].join("\n");
   }
-  if(record.deliveryRef && home){try{return resolveDelivery(home,record).map(source=>source.stepId+"\n\n"+finalAnswerText(source.call.text??"")).join("\n\n");}catch(error){return "交付来源尚不能核验："+error.message;}}
-  if (record.status !== "completed") return "";
+  if(record.deliveryRef && home){
+    const managerDelivery=Object.hasOwn(record,"managerFinal");
+    let delivery;
+    try {delivery=resolveDeliveryEvidence(home,record);}
+    catch(error){return "交付来源尚不能核验："+error.message;}
+    let missing;
+    if(record.status==="completed"&&record.managerFinal){
+      try{return finalAnswerText(resolveManagerFinal(home,record,delivery).text);}
+      catch(error){missing="经理终稿尚不能核验："+error.message;}
+    }
+    return [missing??(managerDelivery?"经理终稿尚不可用。以下为已核验步骤的报告。":""),...delivery.sources.map(source=>
+      (managerDelivery?"步骤 "+source.stepId+" · "+[source.call.actualModel?.provider,source.call.actualModel?.modelId].filter(Boolean).join("/"):source.stepId)
+      +"\n\n"+finalAnswerText(source.call.text??""))].filter(Boolean).join("\n\n");
+  }
+  const retainedPartialAnswer = !hostFooter && record.flow==="unified" && record.status==="partial" &&
+    (record.turnIntent?.fileRequired || record.collaborationResult?.length);
+  if (record.status !== "completed" && !retainedPartialAnswer) return "";
   const text = finalAnswerText(
     requests.find((c) => c.id === record.finalCallId)?.text ?? "",
   );

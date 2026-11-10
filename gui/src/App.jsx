@@ -106,9 +106,6 @@ export function App() {
   const overlayRef = useRef(overlay); overlayRef.current = overlay;
   const workspace = boot.workspaces?.find(row=>row.id === state.workspaceId);
   const projects = boot.projects ?? [];
-  const rosterId = [session?.team?.id,workspace?.defaultRosterId,boot.currentTeamId]
-    .find(id=>boot.teams.some(roster=>roster.id === id));
-  const defaultRoster = boot.teams.find(roster=>roster.id === rosterId);
   const safely = operation => Promise.resolve(operation).catch(e => commands.setError(e.message));
   const setOverlay = value => {
     if (overlayRef.current?.kind === "picker" && value?.kind !== "picker")
@@ -405,7 +402,7 @@ export function App() {
       {overlay.error && <p className="error-text" role="alert">{overlay.error}</p>}
     </Modal>}
     {["create-team","bind-team"].includes(overlay?.kind) && <ProjectDialog key={overlay.kind}
-      commands={commands} projects={projects} defaultRoster={defaultRoster} workspace={overlay.kind === "bind-team" ? workspace : null}
+      commands={commands} projects={projects} rosters={boot.teams} recentRosterId={boot.currentTeamId} workspace={overlay.kind === "bind-team" ? workspace : null}
       onOpenExisting={row=>{setOverlay(null);openWorkspace(boot.workspaces?.find(item=>item.id === row.id) ?? row);}}
       onSaved={closeOverlay}
       onClose={closeOverlay} />}

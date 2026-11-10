@@ -1,5 +1,7 @@
 // Pure editor schema shared by the versioned draft and its renderer. This is not an authority store.
+export const GUI_INPUT_VERSION = "3";
 export const defaultTurnOptions = () => ({id:null,readOnly:false,delegate:true,review:false,maxCalls:'',readAllowed:false,readPaths:[],readProject:null,readWorkspaceId:null,readVersion:null});
+export const retiredReviewOption = value => value?.review === true || value?.delegate === "review-only";
 
 // Old pickers wrote comma-separated paths and did not allow commas in names.
 // Do not trim path spellings: leading spaces can distinguish sibling entries.
@@ -30,8 +32,7 @@ function requestLines(input) {
   });
 }
 
-export function isGuiFileTask(input, { fileWork = false, readOnly = false } = {}) {
-  if (readOnly) return false;
+export function isGuiFileTask(input, { fileWork = false } = {}) {
   if (fileWork) return true;
   const lines=requestLines(input);
   if (lines.some(line=>inlineOnly.test(line))) return false;
@@ -73,11 +74,50 @@ export function guiNetworkChoice(input, {networkMode} = {}) {
   return networkProhibited ? "choose" : null;
 }
 
-export function guiNetworkBlocker(input, options) {
-  const mode=guiNetworkChoice(input,options);
-  if(mode==="whole-turn-offline")return "整轮离线：当前阵容无法保证离线运行，未发送模型请求。";
-  if(mode==="choose"&&!isGuiFileTask(input,options))return "此条要求不联网，当前阵容无法保证离线运行，未发送模型请求。";
-  return null;
+// Recognize direct commands at the start of a user's own line. Leave indirect,
+// optional and embedded language to the manager's ordinary request.
+const collaborationPrefix = /^(?:(?:本轮|请(?:你)?|务必|必须|实际|真正)\s*|(?:for this turn,?|please|you must|actually)\s+)*/iu;
+const teamCommand = /^(?<parallel>并行\s*)?(?:组队|派工)(?=[，,\s]|$|并行|完成|执行|处理|分析|调查|做|制作|实现|开展|协作)|^(?:form|assemble)\s+(?:a\s+)?team(?=\s+to\s+|[,:]\s*$|\s*$)/iu;
+const workerCommandZh = /^(?<parallel>并行\s*)?(?:用|让|安排|派出|派遣|委派|分派)\s*(?:至少\s*)?(?<count>\d+|[一二两三四五六七八九十])\s*(?:个|位|名)\s*(?<distinct>不同(?:的)?\s*)?(?<type>副模型|模型|员工|成员|执行者|子代理)/u;
+const workerCommandEn = /^(?:(?:use|assign|have|run)\s+|delegate\s+.+?\s+to\s+|(?:form|assemble)\s+(?:a\s+)?team\s+of\s+)(?:(?:at least\s+)?(?<count>\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(?:(?<distinct>different|distinct)\s+)?(?<type>models?|workers?|agents?|subagents?)\b/iu;
+const optionalCollaboration = /(?:可选|可以考虑|视情况|酌情|如果可行|如果需要|(?:有|如有)?必要时|也可以|或(?:者)?直接)|\b(?:if (?:possible|needed|necessary|useful|helpful|appropriate|available)|optional(?:ly)?|or (?:work alone|answer directly|do it yourself))\b/iu;
+const workerNumbers = new Map([
+  ...["one","two","three","four","five","six","seven","eight","nine","ten"].map((word,i)=>[word,i+1]),
+  ...Array.from("一二三四五六七八九十",(word,i)=>[word,i+1]),["两",2],
+]);
+function directCollaboration(input) {
+  return requestLines(input).flatMap(source=>{
+    if (/[?？]\s*$/u.test(source)||explanation.test(source)) return [];
+    const command=source.replace(/“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"|\x60[^\x60]*\x60/gu,"[quote]")
+      .split(/[。！？!?；;]|\.(?=\s|$)/u,1)[0].replace(collaborationPrefix,"");
+    if (optionalCollaboration.test(command)) return [];
+    const match=command.match(workerCommandZh)??command.match(workerCommandEn)??command.match(teamCommand);
+    if (!match) return [];
+    const count=match.groups?.count?.toLowerCase();
+    const workers=count ? workerNumbers.get(count)??Number(count) : 1;
+    if (!Number.isSafeInteger(workers)||workers<1) return [];
+    const remaining=command.slice(match[0].length);
+    const parallel=!!match.groups?.parallel||/^[\s,，]*(?:并行|同时(?:执行|工作)|in parallel\b|concurrently\b)/iu.test(remaining);
+    // Generic "use models" can describe the user's subject, such as fitting data.
+    if (!parallel&&/^(?:模型|models?)$/iu.test(match.groups?.type??"")&&/^(?:用|(?:use|run)\b)/iu.test(command)) return [];
+    const distinctModels=!!match.groups?.distinct&&/(?:模型|^models?$)/iu.test(match.groups.type);
+    return [{text:source,workers:Math.max(workers,parallel||distinctModels?2:1),parallel,distinctModels}];
+  });
+}
+
+export function guiTurnIntent(input, {fileWork=false, readOnly=false, networkMode, workRequest, allowedSubtasks} = {}) {
+  const fileRequired = isGuiFileTask(input,{fileWork:fileWork||!!workRequest});
+  const choice = guiNetworkChoice(input,{networkMode});
+  const collaboration=directCollaboration(input);
+  const collaborationConflict=collaboration.length>0&&allowedSubtasks&&!allowedSubtasks.includes("work");
+  const blockerCode=collaborationConflict&&choice!=="whole-turn-offline"&&!(choice==="choose"&&!fileRequired)?"TURN_CONSTRAINTS":null;
+  const blocker = choice==="whole-turn-offline"
+    ? "整轮离线：当前阵容无法保证离线运行，未发送模型请求。"
+    : choice==="choose"&&!fileRequired
+      ? "此条要求不联网，当前阵容无法保证离线运行，未发送模型请求。"
+      : collaborationConflict ? "此条明确要求协作，但草稿禁止派工。请调整要求或限制后发送。"
+      : fileRequired&&readOnly ? "此条要求交付文件，但草稿设为只分析、不修改。请调整限制后发送。" : null;
+  return {fileRequired,networkMode:choice==="choose"&&fileRequired?"artifact-offline":choice,blocker,...(blockerCode?{blockerCode}:{}),...(workRequest?{workRequest}:{}),...(collaboration.length?{collaboration}:{})};
 }
 
 export function validateEditorTurnOptions(value) {
@@ -105,9 +145,7 @@ export function editorTurnInput(value,{project,workspaceId=null}={}) {
     throw Object.assign(Error('原草稿缺少当时选择的固定版本，请重新选择项目文件。'),{code:'READ_VERSION'});
   const maxCalls=options.maxCalls===''?null:Number(options.maxCalls);
   if(maxCalls!==null&&(!/^\d+$/.test(options.maxCalls)||!Number.isSafeInteger(maxCalls)))throw Error('本轮请求上限必须是非负整数，或留空不设上限。');
-  // An older draft with delegate:false permits review only when explicitly required.
-  const allowedSubtasks=options.delegate===false&&!options.review?[]:['review'];
-  if(options.delegate===true)allowedSubtasks.push('work');
-  return {constraints:{readOnly:options.readOnly,allowedSubtasks,requireDifferentModelReview:options.review,...(options.networkMode?{networkMode:options.networkMode}:{})},budget:{maxCalls},
+  const allowedSubtasks=options.delegate===true?['review','work']:[];
+  return {constraints:{readOnly:options.readOnly,allowedSubtasks,...(options.networkMode?{networkMode:options.networkMode}:{})},budget:{maxCalls},
     ...(options.readAllowed?{readAuthorization:{paths:editorReadPaths(options.readPaths),version:options.readVersion}}:{})};
 }

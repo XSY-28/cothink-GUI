@@ -56,7 +56,9 @@ export function validateConfig(config) {
         positiveInteger(ref.maxOutputTokens, "maxOutputTokens");
     }
     if (config.work !== undefined) {
-      const { checks, execution } = config.work;
+      const { checks, execution, maxConcurrentRequests } = config.work;
+      if (maxConcurrentRequests !== undefined && (!Number.isSafeInteger(maxConcurrentRequests) || maxConcurrentRequests < 1))
+        throw new Error("work.maxConcurrentRequests must be a positive integer");
       if (config.work.projectPluginRuntime !== undefined && (typeof config.work.projectPluginRuntime !== "string" || !isAbsolute(config.work.projectPluginRuntime)))
         throw new Error("work.projectPluginRuntime must be an absolute prepared Linux runtime directory");
       if (

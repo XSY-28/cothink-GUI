@@ -1,0 +1,24 @@
+{
+  "budgets": [
+    {
+      "path": "AGENTS.md",
+      "unit": "characters",
+      "limit": 3173
+    },
+    {
+      "path": "DESIGN_BASELINE.md",
+      "unit": "characters",
+      "limit": 15787
+    },
+    {
+      "path": "README.md",
+      "unit": "characters",
+      "limit": 33911
+    },
+    {
+      "path": "docs/gui/PROJECT_TEAM_RUNTIME_ALIGNMENT_PLAN.md",
+      "unit": "characters",
+      "limit": 18929
+    }
+  ]
+}

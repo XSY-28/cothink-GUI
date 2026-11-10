@@ -303,3 +303,20 @@ export async function diff(root, from, to) {
       .map((l) => l.slice(4)),
   };
 }
+
+export async function verifyCommit(root, version, ref = false) {
+  if (
+    !ref &&
+    (typeof version !== "string" || !/^([0-9a-f]{20,128})$/.test(version))
+  )
+    throw problem("VERSION", "Opaque version identifier required");
+  try {
+    return await textGit(root, [
+      "rev-parse",
+      "--verify",
+      version + "^{commit}",
+    ]);
+  } catch {
+    throw problem("VERSION", "Unknown or missing project version");
+  }
+}

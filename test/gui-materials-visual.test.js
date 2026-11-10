@@ -26,13 +26,14 @@ async function usabilityPage(t,host,width,height) {
   return {page,errors};
 }
 
-async function saveTeam(page, name, path) {
+async function saveTeam(page, name, path, rosterId) {
   const create=page.getByRole("dialog",{name:"新建 Team",exact:true});
   await create.getByLabel("名称",{exact:true}).fill(name);
   await create.getByText("手动输入路径",{exact:true}).click();
   await create.getByLabel("项目绝对路径").fill(path);
   await create.getByRole("button",{name:"只读检查目录",exact:true}).click();
   await create.getByText("可以使用这个文件夹。",{exact:true}).waitFor();
+  await create.getByLabel("默认阵容").selectOption(rosterId);
   const child=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==="/api/action"&&response.request().method()==="POST"&&
     response.request().postDataJSON()?.action==="session.create");
   await create.getByRole("button",{name:"创建",exact:true}).click();
@@ -98,7 +99,7 @@ test("desktop browser imports, previews and sends materials while keeping menus 
   const team="材料验证 Team",draft="这段首页草稿进入 Team 后仍可编辑";
   await editor.fill(draft);
   await send.click();
-  const session=await saveTeam(page,team,repository(t).project);
+  const session=await saveTeam(page,team,repository(t).project,"7c8094cd-3476-4bfa-8f53-055d87972896");
   assert.equal(await editor.inputValue(),draft);
   assert.equal(f.calls.length,0,"creating the Team only carries the draft, never sends it");
   await editor.fill("");
@@ -173,7 +174,7 @@ test("desktop browser imports, previews and sends materials while keeping menus 
   host=await startGuiServer({home:f.home,cwd:f.cwd,open:false});
   assert.notEqual(host.origin,previousOrigin);
   await page.goto(host.url);
-  await button(team).click();
+  await page.getByRole("navigation",{name:"工作导航"}).getByRole("button",{name:team,exact:true}).click();
   await unknown.getByRole("button",{name:"查询",exact:true}).waitFor();
   assert.equal(await send.isDisabled(),true);
   await unknown.getByRole("button",{name:"查询",exact:true}).click();
@@ -261,7 +262,7 @@ test("desktop browser imports, previews and sends materials while keeping menus 
   assert.equal(await editor.inputValue(),"/skill:doc-maintenance 查看文档检查的用途");
   const followupSubmission=page.waitForRequest(request=>request.method()==="POST"&&new URL(request.url()).pathname==="/api/action"&&request.postDataJSON()?.action==="task.submit");
   await send.click();
-  assert.deepEqual((await followupSubmission).postDataJSON().args.constraints.allowedSubtasks,["review"]);
+  assert.deepEqual((await followupSubmission).postDataJSON().args.constraints.allowedSubtasks,[]);
   await page.getByText("已使用选择的技能",{exact:true}).waitFor();
   await button("修改禁止派工").waitFor({state:"detached"});
   assert.equal(f.calls.length,2);
@@ -279,7 +280,7 @@ test("compact browser chooses current project bytes and a pinned saved range; na
   await button("切换导航").click();
   await chooseRailCreation(page, "新建 Team");
   const team="固定材料的中文长团队名字——需要在紧凑窗口仍可操作";
-  const session=await saveTeam(page,team,repo.project);
+  const session=await saveTeam(page,team,repo.project,"7c8094cd-3476-4bfa-8f53-055d87972896");
   const child=session.project;
   assert.equal(child,join(realpathSync(repo.project),"对话-"+session.id));
   git(child,"init","-b","main");
