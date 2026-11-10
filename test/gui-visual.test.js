@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
@@ -15,8 +16,22 @@ const {startGuiServer}=await load("src/gui-server.js");
 import { execution } from "./helpers/agent-sync-fixture.js";
 const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
 
+async function saveTeam(page, name, path) {
+  const dialog=page.getByRole("dialog",{name:"新建 Team",exact:true});
+  await dialog.getByLabel("名称",{exact:true}).fill(name);
+  await dialog.getByText("手动输入路径",{exact:true}).click();
+  await dialog.getByLabel("项目绝对路径").fill(path);
+  await dialog.getByRole("button",{name:"只读检查目录",exact:true}).click();
+  await dialog.getByText("可以使用这个文件夹。",{exact:true}).waitFor();
+  const child=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==="/api/action"&&
+    response.request().method()==="POST"&&response.request().postDataJSON()?.action==="session.create");
+  await dialog.getByRole("button",{name:"创建",exact:true}).click();
+  await dialog.waitFor({state:"hidden"});
+  return (await child).json();
+}
+
 test(
-  "actual unified GUI preserves unbound draft, confirms formal HTML and shows authenticated final screenshots at three widths",
+  "actual unified GUI preserves a home draft, places formal HTML in its conversation folder and shows authenticated screenshots",
   { timeout: 60000 },
   async (t) => {
     const f = await fixture(t, (c, n) =>
@@ -93,12 +108,6 @@ test(
     await dismissNotes.click();
     assert.equal(await page.getByText("查看本次更新").count(),0);
     assert.equal(f.calls.length,0,"dismissing the notice does not generate");
-    await page.getByRole("button", {name:"对话",exact:true}).click();
-    const conversationPicker=page.getByRole("dialog",{name:"对话",exact:true});
-    await conversationPicker.getByRole("button",{name:"新建对话",exact:true}).click();
-    // The picker makes the previous homepage inert while the new conversation is
-    // being saved and opened. Playwright fill can otherwise hit the old editor.
-    await conversationPicker.waitFor({state:"hidden"});
     const editor=page.getByLabel("输入问题");
     await editor.waitFor({state:"visible"});
     assert.equal(await editor.evaluate(node=>!!node.closest("[inert]")),false);
@@ -112,15 +121,11 @@ test(
       "Keep my draft",
     );
     assert.equal(f.calls.length, 0);
-    await chooseRailCreation(page, "新建 Team");
-    const create = page.getByRole("dialog", {name:"新建 Team",exact:true});
-    await create.getByLabel("名称",{exact:true}).fill("Visual project");
-    await create.getByText("手动输入路径",{exact:true}).click();
-    await create.getByLabel("项目绝对路径").fill(repo.project);
-    await create.getByRole("button", {name:"只读检查目录",exact:true}).click();
-    await create.getByText(/目录可以关联/).waitFor();
-    await create.getByRole("button", {name:"创建",exact:true}).click();
-    await create.waitFor({state:"hidden"});
+    await page.getByRole("button",{name:"发送",exact:true}).click();
+    const session=await saveTeam(page,"Visual project",repo.project);
+    assert.equal(session.project,join(realpathSync(repo.project),"对话-"+session.id));
+    assert.equal(await editor.inputValue(),"Keep my draft");
+    assert.equal(f.calls.length,0,"Team creation preserves the draft without sending");
     assert.equal(await page.getByLabel("对话模式").count(),0);
     await page.getByLabel("输入问题").fill("制作一个蓝色矩形");
     await page.getByRole('button',{name:/^对话操作：/}).click();
@@ -147,6 +152,9 @@ test(
     };
     const deliveredTask = await get('/api/task?id=' + deliveredRef.taskId);
     const deliveredSession = await get('/api/session?id=' + deliveredTask.sessionId);
+    assert.equal(deliveredSession.id,session.id);
+    assert.match(readFileSync(join(session.project,"index.html"),"utf8"),/<h1>蓝色作品<\/h1>/);
+    assert.equal(existsSync(join(repo.project,"index.html")),false);
     // Formal execution has its own same-title session; label the user conversation
     // by its durable ID so the search assertion cannot accidentally open that child.
     const renamed = await fetch(h.origin + '/api/action',{
@@ -195,10 +203,8 @@ test(
     await page.keyboard.press('Escape');
     await page.getByRole('region',{name:'成果文件阅读'}).waitFor({state:'hidden'});
     await chooseRailCreation(page, "新建 Team");
-    const otherTeam = page.getByRole('dialog',{name:'新建 Team',exact:true});
-    await otherTeam.getByLabel('名称',{exact:true}).fill('搜索起点 Team');
-    await otherTeam.getByRole('button',{name:'创建',exact:true}).click();
-    await otherTeam.waitFor({state:'hidden'});
+    const searchFolder=join(repo.root,"search-team");mkdirSync(searchFolder);
+    await saveTeam(page,"搜索起点 Team",searchFolder);
     await page.locator('h1').filter({hasText:'搜索起点 Team'}).waitFor();
     const beforeSearch = f.calls.length;
     await page.getByRole('button',{name:'搜索',exact:true}).click();
@@ -262,13 +268,17 @@ test('actual browser preserves startup draft and refuses unmanaged native comman
   assert.equal((await runPackageCommand({home:f.home,cwd:f.cwd,command:'install',source:root})).exitCode,0);
   saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Plugin fixture','7c8094cd-3476-4bfa-8f53-055d87972896'));
   const h=await startGuiServer({home:f.home,cwd:f.cwd,open:false});t.after(()=>h.close());
+  const startupDraft="插件完成后我还要编辑这份草稿";
+  const saved=await fetch(h.origin+"/api/action",{method:"POST",headers:{
+    Authorization:`Bearer ${h.token}`,"Content-Type":"application/json","X-CoThink-GUI-Input":"2",
+  },body:JSON.stringify({action:"home.draft",args:{draftId:randomUUID(),expectedRevision:null,
+    editor:{editorVersion:2,text:startupDraft,editId:randomUUID(),materials:[],workRequest:null,selectionId:null}}})});
+  assert.equal(saved.status,200);
   const browser=await chromium.launch({headless:true});t.after(()=>browser.close());
   const page=await browser.newPage({viewport:{width:1280,height:800}}),errors=[];
   page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&!m.text().includes('status of 400'))errors.push(m.text());});
   const rejected=[];page.on('response',async response=>{if(response.status()===400)rejected.push(await response.json());});
-  // A user may create a conversation before the initial host snapshot arrives.
-  // Deliver that stale snapshot while holding refreshes, so configuration is
-  // still unknown in the UI rather than silently racing this assertion.
+  // Hold the first host snapshot so the startup state can be checked before loading a draft.
   const initialBootstrap=Promise.withResolvers(), refreshedBootstrap=Promise.withResolvers();
   let bootstrapReads=0;
   await page.route('**/api/bootstrap',async route=>{
@@ -279,19 +289,20 @@ test('actual browser preserves startup draft and refuses unmanaged native comman
   await page.goto(h.url);
   const input = page.getByLabel('输入问题');
   try {
-    await page.getByRole('button',{name:'对话',exact:true}).click();
-    await page.getByRole('dialog',{name:'对话',exact:true})
-      .getByRole('button',{name:'新建对话',exact:true}).click();
-    await input.fill('插件完成后我还要编辑这份草稿');
+    await input.waitFor();
+    assert.equal(await page.getByRole('dialog',{name:'设置',exact:true}).count(),0,'unknown configuration must not trigger onboarding');
     const initialResponse=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/bootstrap');
     initialBootstrap.resolve();
     await (await initialResponse).finished();
-    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-    assert.equal(await page.getByRole('dialog',{name:'设置',exact:true}).count(),0,'unknown configuration must not trigger onboarding');
+    await page.waitForFunction(text=>document.querySelector("#message-input")?.value===text,startupDraft);
   } finally {
     initialBootstrap.resolve();refreshedBootstrap.resolve();
     await page.unrouteAll({behavior:'wait'});
   }
+  await chooseRailCreation(page,"新建 Team");
+  const team=await saveTeam(page,"插件测试 Team",repository(t).project);
+  assert.equal(await input.inputValue(),startupDraft);
+  assert.ok(team.project.endsWith("对话-"+team.id));
   await page.getByRole('button',{name:'添加本次操作'}).click();
   assert.equal(await page.getByRole('button',{name:'插件命令',exact:true}).count(),0,'clean unified host does not offer arbitrary native commands');
   await page.keyboard.press('Escape');

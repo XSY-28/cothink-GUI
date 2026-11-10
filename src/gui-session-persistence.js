@@ -4,7 +4,7 @@ import { SessionManager, CURRENT_SESSION_VERSION } from "@earendil-works/pi-codi
 import { writePrivateBytes } from "./storage.js";
 import { sessionStateError } from "./session-ui-state.js";
 import { existingNeutralDirectory } from "./conversation.js";
-import { isWorkspaceId, isWorkspaceProject } from "./gui-workspace-state.js";
+import { isWorkspaceId, isWorkspaceProject, sameWorkspaceDirectory, workspaceError } from "./gui-workspace-state.js";
 
 // Summaries deliberately omit unidentifiable histories. Creation must also inspect
 // UUID-bearing filenames, so a damaged header cannot make an occupied ID look free.
@@ -25,15 +25,16 @@ export function assertNewGuiSessionId(directory, id) {
 }
 
 /** Only the first GUI publication; all later appends belong to the public SDK. */
-export function persistNewGuiSession({manager,directory,assertOwned}) {
-  const path = manager.getSessionFile(), header = manager.getHeader(), entries = manager.getEntries();
+export function persistNewGuiSession({manager,directory,assertOwned,parentSession}) {
+  const header = manager.getHeader(), entries = manager.getEntries();
+  const path = parentSession ? join(directory,header.timestamp.replace(/[:.]/g,"-")+"_"+header.id+".jsonl") : manager.getSessionFile();
   if (!path || resolve(dirname(path)) !== resolve(directory) || realpathSync(dirname(path)) !== realpathSync(directory) ||
       header?.type !== "session" || header.version !== CURRENT_SESSION_VERSION || header.id !== manager.getSessionId() ||
-      entries.some(entry => entry.type === "message") || !entries.some(entry => entry.type === "custom" && entry.customType === "cothink-gui-workspace"))
+      !parentSession && entries.some(entry => entry.type === "message") || !entries.some(entry => entry.type === "custom" && entry.customType === "cothink-gui-workspace"))
     throw sessionStateError("SESSION_STATE_UNAVAILABLE","不是可首次发布的 GUI 会话。");
   assertOwned();
   assertNewGuiSessionId(directory,header.id);
-  const bytes=[header,...entries].map(entry=>JSON.stringify(entry)).join("\n")+"\n";
+  const bytes=[parentSession?{...header,parentSession}:header,...entries].map(entry=>JSON.stringify(entry)).join("\n")+"\n";
   writePrivateBytes(path,bytes,()=>{
     assertOwned();
     if (existsSync(path)) throw sessionStateError("SESSION_STATE_CONFLICT","会话文件已存在，请按原 ID 读取核对；未覆盖。");
@@ -79,4 +80,36 @@ export function scopeAfterTruncatedTail(lines, home, protocolVersion) {
     }
     return [{sessionId:header.id,project,marker}];
   } catch { return undefined; }
+}
+
+export function freezeWorkspaceHistory(directory,infos,table,current,nextPath,{signature,projectMembership,inspectWorkspaceProject,assertIdle}) {
+  const directoryFiles=()=>readdirSync(directory).filter(name=>name.endsWith(".jsonl")).sort().map(name=>join(directory,name));
+  const files=directoryFiles(), found=new Map(infos.map(info=>[info.path,info]));
+  const related=new Set(), legacyBindings=[];
+  const directoryStamp=nextPath===null?null:signature(nextPath);
+  const affects=branch=>projectMembership(branch,table).workspaceId===current.id ||
+    sameWorkspaceDirectory(branch.project,current.project) || sameWorkspaceDirectory(branch.project,nextPath);
+  const unverified=branch=>branch.associationError ||
+    branch.marker!==undefined && projectMembership(branch,table).workspaceError;
+  const snapshot=files.map(path=>{
+    const info=found.get(path);
+    if (!info || signature(path)!==info.stamp || !info.branches ||
+        info.branches.some(branch=>unverified(branch) || info.error && affects(branch)))
+      throw workspaceError("WORKSPACE_CONFLICT","有旧会话的分支归属无法核对，目录未变更。",current);
+    for (const branch of info.branches) {
+      if (affects(branch)) related.add(info.id);
+      if (branch.marker===undefined && branch.project!==null)
+        legacyBindings.push({sessionId:info.id,project:branch.project});
+    }
+    return [path,info.stamp];
+  });
+  const verify=()=>{
+    if (JSON.stringify(directoryFiles())!==JSON.stringify(files) ||
+        snapshot.some(([path,stamp])=>signature(path)!==stamp))
+      throw workspaceError("WORKSPACE_CONFLICT","旧会话在核对期间变化，目录未变更。",current);
+    assertIdle(related);
+    if (nextPath!==null && (inspectWorkspaceProject(nextPath)!==nextPath || signature(nextPath)!==directoryStamp))
+      throw workspaceError("WORKSPACE_CONFLICT","新目录在核对期间改变。",current);
+  };
+  return {legacyBindings,verify};
 }

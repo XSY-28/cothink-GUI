@@ -257,6 +257,12 @@ export function useGuiWorkspace(api) {
   }
   function setDraft(sessionId, text) {
     sessionId=homeEditorId(sessionId);
+    const priorError=submissionError.current;
+    if (priorError?.clearOnEdit && priorError.sessionId===sessionId &&
+        priorError.errorRevision===errorRevision.current && book.current.snapshot(sessionId).text!==text) {
+      submissionError.current=null;
+      setError("");
+    }
     book.current.edit(sessionId, text);
     syncEditor(sessionId); scheduleDraft(sessionId);
   }
@@ -464,9 +470,11 @@ export function useGuiWorkspace(api) {
       return {...current,workspaces:prior ? current.workspaces.map(row=>row.id===id ? value : row) : [...current.workspaces,value]};
     });
     if (open && request === selectionRequest.current) {
+      const homeText=!selected.current && workspaceRef.current===null ? book.current.snapshot(HOME).text : null;
       selectWorkspaceId(id);
       try {
-        await createSession({workspaceId:id});
+        if (homeText) await flushDraft(HOME);
+        await createSession({workspaceId:id,...(homeText&&saved.project?{handoff:{project:saved.project,text:homeText}}:{})});
       } catch (error) {
         const message = `Team 已保存。第一条对话未能确认：${error.message}`;
         setError(message);
@@ -674,7 +682,7 @@ export function useGuiWorkspace(api) {
         if(result.status!=="confirmed")throw Error(`创建结果尚未确认，请按原会话 ID ${sessionId} 查询。不会自动重建。`);
         const original=unknown.options?.handoff, requested=options.handoff;
         if ((original || requested) && (original?.project!==requested?.project ||
-            original?.text!==requested?.text || requested?.project!==value.project)) {
+            original?.text!==requested?.text || requested?.project!==(value.teamDirectory??value.project))) {
           rememberCreation(createScope,null);setCreationNotice(null);
           await refresh();
           throw Error("上一次新建已保存，可在对话列表打开。目录或草稿已变化，请重新确认本次新建。");
@@ -1114,7 +1122,11 @@ export function useGuiWorkspace(api) {
       return result;
     } catch (e) {
       if (submitted && !e.unknown) { storePending(null); setPendingStatus(""); }
-      setError(e.message);
+      const draftError=submitted&&!e.unknown&&["NETWORK_POLICY","PROJECT_NOT_PREPARED","PROJECT_EXECUTION_REQUIRED"].includes(e.code);
+      if (!draftError || book.current.snapshot(sessionId).editId===snapshot.editId) {
+        setError(e.message);
+        if (draftError) submissionError.current={sessionId,errorRevision:errorRevision.current,clearOnEdit:true};
+      }
       if (submitted && e.code === "PROJECT_NOT_PREPARED") await refresh().catch(()=>{});
       if (submitted && e.unknown) {
         submissionError.current = {sessionId:pendingRef.current?.sessionId, submissionId:pendingRef.current?.submissionId, errorRevision:errorRevision.current};
@@ -1172,30 +1184,6 @@ export function useGuiWorkspace(api) {
       setError(e.message);
       submissionError.current = {sessionId:association.sessionId,submissionId:association.submissionId,errorRevision:errorRevision.current};
     }
-  }
-  async function continuePrepared(turn) {
-    if (!session?.id || selected.current!==session.id || session.readOnly || bootstrap.active || pendingRef.current || submissionBusy.current) return;
-    submissionBusy.current=true;
-    setSubmitting(true);
-    const association={sessionId:session.id,submissionId:crypto.randomUUID(),sourceTaskId:turn.taskId,kind:"prepared-continuation"};
-    storePending(association);
-    try {
-      const result=await api.action("task.continuePrepared",{sessionId:association.sessionId,
-        submissionId:association.submissionId,sourceTaskId:turn.taskId,protocolVersion:1});
-      storePending(null);
-      if (selected.current===association.sessionId) await selectTask(result.taskId,association.sessionId);
-      await refresh();
-      return result;
-    } catch(error) {
-      if (!error.unknown) storePending(null);
-      else setPendingStatus("续作响应未知，请查询原提交。");
-      setError(error.message);
-    } finally { submissionBusy.current=false;setSubmitting(false); }
-  }
-  async function prepareProject(args) {
-    const result=await api.action("project.prepare",args);
-    if (["confirm","finish"].includes(args.action)) await refresh().catch(()=>{});
-    return result;
   }
   async function confirmWork(turn) {
     if(bootstrap.active||pendingRef.current||submissionBusy.current)return;
@@ -1282,7 +1270,7 @@ export function useGuiWorkspace(api) {
       bindWorkspace: (workspace,path) => manageWorkspace("workspace.rebind",{workspaceId:workspace.id,expectedRevision:workspace.revision,path,operationId:crypto.randomUUID()}),
       queryWorkspaceRebind: args => api.action("workspace.rebind.query",args),
       queryWorkspaceCreation: async id => (await readWorkspaces()).find(row=>row.id===id),
-      clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, recoverCreation, showHome, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, continuePrepared, recoverSubmission, abandonSubmission,
+      clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, recoverCreation, showHome, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, recoverSubmission, abandonSubmission,
       selectTask, changeSession, recordView, refresh, cancelTask, acknowledgeNotes, setWorkRequest,setTurnOptions, refreshTeams,
       saveTeam: args => manageTeam("team.save", args),
       removeTeam: args => manageTeam("team.remove", args),
@@ -1314,7 +1302,6 @@ export function useGuiWorkspace(api) {
       inspectProject: (path,purpose) => api.action("project.inspect", {path,purpose}),
       browseProject: path => api.action("project.browse",{path}),
       mkdirProject: args => api.action("project.mkdir",args),
-      prepareProject,
       readOutput: args => api.read("output", args),
       readImage: args => api.image(args),
       selectTeam: ({sessionId, teamId}) => changeSession("session.team", {teamId}, sessionId),

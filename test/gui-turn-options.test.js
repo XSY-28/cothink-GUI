@@ -95,7 +95,7 @@ test("file preflight reads explicit multiline requests without treating examples
   ]) assert.equal(isGuiFileTask(chat), false, chat);
 });
 
-test("network consent is explicit and offline work never dispatches a model request", async t => {
+test("whole-turn offline requests dispatch no models and older explicit choices still work", async t => {
   const {editorTurnInput,guiNetworkChoice}=await load("src/gui-turn-options.js");
   const f=await fixture(t), c=await controller(t,f), session=await c.action("session.create",{project:null});
   const submit=(input,extra={})=>c.action("task.submit",{sessionId:session.id,input,submissionId:randomUUID(),protocolVersion:1,...extra});
@@ -107,7 +107,7 @@ test("network consent is explicit and offline work never dispatches a model requ
   }
   for(const question of ["禁止联网是什么意思？","禁止联网的设置在什么地方？","不要联网是个什么概念？","禁止联网模式如何运行？"])
     assert.equal(guiNetworkChoice(question),null);
-  await assert.rejects(submit("请解释 CSS，不允许联网。"), /成品.*整轮|整轮.*成品/);
+  await assert.rejects(submit("请解释 CSS，不允许联网。"), {code:"NETWORK_POLICY"});
   assert.equal(f.calls.length,0);
   const mode={id:randomUUID(),networkMode:"artifact-offline"};
   const text="请解释 CSS，不允许联网。";

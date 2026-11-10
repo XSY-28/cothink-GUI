@@ -1,5 +1,5 @@
 import {validateEditorTurnOptions} from "./gui-turn-options.js";
-import { join, resolve, isAbsolute } from "node:path";
+import { dirname, join, resolve, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
@@ -70,6 +70,16 @@ export function readSessionProject(manager) {
   )
     throw Error("会话项目关联损坏；保留原记录。");
   return project;
+}
+export const conversationFolderName = id => "对话-" + id;
+export function readManagedDirectory(manager) {
+  const data=manager.getBranch().findLast(e=>e.type==="custom" && e.customType==="cothink-project")?.data;
+  if (data?.managedDirectory===undefined) return undefined;
+  const path=readSessionProject(manager), identity=data.managedDirectory;
+  if (!path || path!==join(dirname(path),conversationFolderName(manager.getSessionId())) ||
+      !Array.isArray(identity) || identity.length!==2 || identity.some(part=>typeof part!=="string" || !/^\d+$/.test(part)))
+    throw Error("无法核对对话文件夹的身份，原有文件已保留。");
+  return identity;
 }
 function neutralPaths(home) {
   const root = join(realpathSync(tmpdir()), "cothink-chat");

@@ -5,11 +5,10 @@ import { useGuiWorkspace } from "./useGuiWorkspace.js";
 import { initialView, workspaceViewReducer, readDisplayPreferences, useDisplayTheme } from "./workspace-view.js";
 import { Navigation, ConversationPicker, ConversationRename } from "./features/navigation/Navigation.jsx";
 import { Conversation } from "./features/conversation/Conversation.jsx";
-import { NewConversationDialogs } from "./features/conversation/NewConversationDialogs.jsx";
 import { ConversationActionDialogs, useConversationActions } from "./features/conversation/ConversationMenu.jsx";
 import { Collaboration } from "./Collaboration.jsx";
 import { Settings } from "./Settings.jsx";
-import { ProjectDialog, ProjectPreparationDialog } from "./ProjectDialog.jsx";
+import { ProjectDialog } from "./ProjectDialog.jsx";
 import { TeamPanel } from "./features/teams/TeamPanel.jsx";
 import { Modal } from "./Modal.jsx";
 import { MaterialPicker, MaterialPreview } from "./MaterialPicker.jsx";
@@ -106,7 +105,6 @@ export function App() {
   const modalOpen = !!(overlay || prompt);
   const overlayRef = useRef(overlay); overlayRef.current = overlay;
   const workspace = boot.workspaces?.find(row=>row.id === state.workspaceId);
-  const targetWorkspace = boot.workspaces?.find(row=>row.id===overlay?.workspaceId&&!row.archived);
   const projects = boot.projects ?? [];
   const rosterId = [session?.team?.id,workspace?.defaultRosterId,boot.currentTeamId]
     .find(id=>boot.teams.some(roster=>roster.id === id));
@@ -190,24 +188,15 @@ export function App() {
     else if(name==="settings"||name==="help")setOverlay({kind:name});
   }
   async function createConversation(workspaceId) {
-    const prior=overlayRef.current;
-    if(!prior||prior.busy)return;
-    const saving={...prior,workspaceId,busy:true,error:null};
-    setOverlay(saving);
-    try {
-      const handoff=prior.kind==="use-project-directory";
-      if(handoff && (prior.sourceSessionId!==(session?.id??null) || state.draftConflict))
-        throw Error("原草稿已变化，请重新核对。");
-      const created=await commands.createSession({workspaceId,
-        ...(handoff?{handoff:{project:prior.project,text:state.draft}}:{})});
-      if(overlayRef.current===saving)setOverlay(created?null:prior);
-    }catch(error){if(overlayRef.current===saving)setOverlay({...saving,busy:false,error:error.message});}
+    closeNavigation();
+    const row=boot.workspaces?.find(item=>item.id===workspaceId&&!item.archived);
+    if (!row?.project) {
+      setOverlay({kind:row?"bind-team":"create-team"});
+      return;
+    }
+    await safely(commands.createSession({workspaceId}));
   }
-  const useTeamDirectory = row => setOverlay({kind:"use-project-directory",workspaceId:row.id,project:row.project,sourceSessionId:session?.id??null});
-  const canUseTeamDirectory = !!workspace?.project && workspace.project !== session?.project &&
-    workspace.projectAvailable !== false && !workspace.archived;
   const navigationCommands = {...commands, requestRename:row=>setOverlay({kind:"rename",sessionId:row.id,title:row.title})};
-  const prepareProject = (path,preparation) => setOverlay({kind:"prepare-project",path,preparation});
   const closeNavigation = () => dispatch({type: "navigation", change: {mobileOpen: false}});
   function dismissNavigation() {
     closeNavigation();
@@ -317,22 +306,21 @@ export function App() {
     {commands.resumeMaterial&&<input type="file" hidden ref={resumeInput} onChange={onResumeFile} onCancel={()=>{resumeChoice.current=null;document.querySelector("#message-input")?.focus();}}/>}
     {navOpen && <button className="nav-scrim" aria-label="关闭导航" onClick={dismissNavigation} />}
     <Navigation workspaces={boot.workspaces} workspaceId={state.workspaceId} ready={state.ready} mobileOpen={navOpen}
-      onOpenWorkspace={openWorkspace} onNewConversation={workspaceId=>{closeNavigation();setOverlay({kind:"new-conversation",workspaceId});}} onSearch={()=>openPicker("all")} onCreate={()=>setOverlay({kind:"create-team"})}
+      onOpenWorkspace={openWorkspace} onNewConversation={createConversation} onSearch={()=>openPicker("all")} onCreate={()=>setOverlay({kind:"create-team"})}
       onSettings={()=>setOverlay({kind:"settings"})} connection={state.connection}
       updateLabel={boot.updates?.status === "available" ? "有新版本" : boot.releaseNotes?.unread ? "更新记录未读" : null}
       inert={modalOpen || (mobile && !navOpen) || (compact && detailOpen && !navOpen)} />
     <Conversation state={state} workspace={workspace} commands={{...commands, openSession}} inert={modalOpen || navOpen || (compact && detailOpen)}
       showNotes={showNotes} onHideNotes={()=>setNotesHidden(true)}
       onSettings={section => section === "teams" ? openTeam() : setOverlay({kind:"settings", section})}
-      onWorkspaceMenu={()=>setOverlay({kind:"workspace"})} onPrepareProject={prepareProject} onConversations={()=>openPicker("project")} onRoster={openTeam}
+      onWorkspaceMenu={()=>setOverlay({kind:"workspace"})} onConversations={()=>openPicker("project")} onRoster={openTeam}
       onAttention={()=>workspace && safely(commands.openWorkspaceAttention(workspace.id))}
       onToggleNavigation={() => dispatch({type:"navigation",change:{mobileOpen:!navOpen}})}
       onPlugins={session?.pluginCommands?.length&&!session.readOnly&&!boot.active ? ()=>showPlugins(session.id):undefined}
       onLocalCommand={openLocal}
+      onCreateTeam={()=>setOverlay({kind:"create-team"})}
       {...conversationActions.controls}
       onChooseProjectFiles={commands.listProjectMaterials&&session?.projectDirectoryAvailable!==false?()=>setOverlay({kind:"project-materials",sessionId:session?.id}):undefined}
-      onAssociateProject={()=>canUseTeamDirectory ? useTeamDirectory(workspace) : setOverlay({kind:workspace?"bind-team":"create-team"})}
-      onUseTeamDirectory={canUseTeamDirectory ? ()=>useTeamDirectory(workspace) : undefined}
       onChooseSkill={boot.protocol?.capabilities===1&&commands.listSkills?showSkills:undefined}
       onPreviewMaterial={commands.previewMaterial?showMaterial:undefined}
       onRetryMaterial={commands.queryMaterial&&commands.resumeMaterial?checkMaterial:undefined}
@@ -373,11 +361,8 @@ export function App() {
       <TeamPanel ref={teamPanel} session={session} workspace={workspace} teams={boot.teams} models={boot.models} providers={boot.providers}
         busy={!!(state.submitting || boot.active || boot.extensionUI?.command)} commands={commands} onClose={()=>{if(overlayRef.current === overlay)setOverlay(null);}} />
     </Modal>}
-    <NewConversationDialogs overlay={overlay} workspace={targetWorkspace} session={session} draft={state.draft}
-      creating={state.creating} conflict={state.draftConflict} onCreate={createConversation} onClose={closeOverlay}
-      onHome={state.homeDraft&&!state.homeReady?()=>{commands.showHome();closeOverlay();}:undefined} />
     <ConversationActionDialogs state={state} overlay={overlay} actions={conversationActions} setOverlay={setOverlay}
-      onRename={navigationCommands.requestRename} onPrepareProject={prepareProject} onClose={closeOverlay}
+      onRename={navigationCommands.requestRename} onClose={closeOverlay}
       onChangeTurnLimits={change=>commands.setTurnOptions(session?.id,change)} onOrganize={()=>void safely(commands.organizeContext())} />
     {overlay?.kind==="project-materials"&&(session?.project&&session.id===overlay.sessionId?<MaterialPicker key={state.editorKey??session.id} project={session.project} commands={commands}
       sessionId={session.id} capabilities={state.materialCapabilities} onClose={closeOverlay}
@@ -409,6 +394,7 @@ export function App() {
         onOpenSession={openFromPicker} onOpenWorkspace={row=>{setOverlay(null);openWorkspace(row);}}
         onCreateSession={async ()=>{
           if (overlayRef.current?.busy) return;
+          if (!workspace?.project) return createConversation(workspace?.id);
           const saving = {...overlay,busy:true,error:null};
           setOverlay(saving);
           try {
@@ -421,25 +407,16 @@ export function App() {
     {["create-team","bind-team"].includes(overlay?.kind) && <ProjectDialog key={overlay.kind}
       commands={commands} projects={projects} defaultRoster={defaultRoster} workspace={overlay.kind === "bind-team" ? workspace : null}
       onOpenExisting={row=>{setOverlay(null);openWorkspace(boot.workspaces?.find(item=>item.id === row.id) ?? row);}}
-      onSaved={saved=>{
-        if(overlay.kind==="bind-team" && saved.project && session?.project!==saved.project) useTeamDirectory(saved);
-        else closeOverlay();
-      }}
+      onSaved={closeOverlay}
       onClose={closeOverlay} />}
-    {overlay?.kind === "prepare-project" && <ProjectPreparationDialog key={overlay.path} commands={commands} path={overlay.path}
-      initialPreparation={overlay.preparation} onClose={closeOverlay} onReady={()=>safely(commands.refresh())} />}
     {overlay?.kind === "workspace" && <Modal title={workspace?.name || (state.workspaceId === null ? "未分组对话" : "归属待核对")} onClose={closeOverlay}>
       {!workspace ? <p>{state.workspaceId === null ? "这里保存不属于项目的历史和随手提问。" :
         session?.workspaceError || "Team 归属暂时无法确认，仍可阅读已保存的历史。"}</p> : <>
-        <p>Team 默认目录</p>
-        <p className="workspace-directory">{workspace.project || "未关联目录，可用于问答与讨论。"}</p>
-        {session && canUseTeamDirectory && <p className="workspace-directory">当前对话目录：{session.project || "未关联"}</p>}
+        <p className="workspace-directory">{workspace.project || "未关联文件夹。"}</p>
         {workspace.project && workspace.projectAvailable === false && <p className="error-text">目录不可用。仍可阅读历史。</p>}
         <div className="form-actions">
           {!workspace.archived && <button onClick={()=>{setTitle(workspace.name);setOverlay({kind:"rename-team"});}}>重命名</button>}
-          {!workspace.archived && <button onClick={()=>setOverlay({kind:"bind-team"})}>{workspace.project?"更换或解除目录":"关联目录"}</button>}
-          {canUseTeamDirectory && <button onClick={()=>useTeamDirectory(workspace)}>用新目录继续</button>}
-          {workspace.project && !workspace.projectHomeProtected && workspace.projectAvailable!==false && !workspace.archived && <button onClick={()=>prepareProject(workspace.project)}>准备文件工作</button>}
+          {!workspace.archived && !workspace.project && <button onClick={()=>setOverlay({kind:"bind-team"})}>选择 Team 文件夹</button>}
           <button disabled={overlay.busy} onClick={()=>updateWorkspace({archived:!workspace.archived})}>{workspace.archived ? "恢复" : "归档"}</button>
         </div>
         {overlay.error && <p className="error-text" role="alert">{overlay.error}</p>}

@@ -76,7 +76,7 @@ export function guiNetworkChoice(input, {networkMode} = {}) {
 export function guiNetworkBlocker(input, options) {
   const mode=guiNetworkChoice(input,options);
   if(mode==="whole-turn-offline")return "整轮离线：当前阵容无法保证离线运行，未发送模型请求。";
-  if(mode==="choose")return "请明确联网范围：仅要求成品离线，还是整轮离线。未发送模型请求。";
+  if(mode==="choose"&&!isGuiFileTask(input,options))return "此条要求不联网，当前阵容无法保证离线运行，未发送模型请求。";
   return null;
 }
 

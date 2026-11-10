@@ -303,3 +303,13 @@ export function listTasks(home) {
     .map((n) => readTask(home, n.slice(0, -5)))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
+
+export function rootUsage(home,record) {
+  const tasks=[record,...(record.projectOperation?.childTaskIds??[]).map(id=>{
+    const child=readTask(home,id);if(child.rootTaskId!==record.id||child.project?.commandId!==record.projectOperation.commandId)throw problem('ROOT_CHILD','Usage child ownership changed');return child;
+  })];
+  const requests=new Map();for(const task of tasks)for(const id of task.requestIds){const call=readRequest(home,task.id,id);if(requests.has(id))throw problem('ROOT_REQUEST','Duplicate physical request ownership');requests.set(id,call);}
+  const sent=[...requests.values()].filter(r=>r.sent),known={input:0,output:0,cacheRead:0,cacheWrite:0};let cost=0,costUnknown=false;
+  for(const call of sent){for(const key of Object.keys(known))known[key]+=call.usage?.[key]??0;if(typeof call.estimatedCost==='number')cost+=call.estimatedCost;else costUnknown=true;}
+  return {scope:'root_and_owned',calls:sent.length,known,unknownCalls:sent.filter(r=>!r.usage).length,cost:costUnknown?null:cost,costSource:'catalog_estimate',ownCalls:sent.filter(r=>r.taskId===record.id).length,ownedCalls:sent.filter(r=>r.taskId!==record.id).length,pendingClaims:(record.rootRequests??[]).filter(c=>!c.notSent&&!requests.get(c.requestId)?.sent).length};
+}

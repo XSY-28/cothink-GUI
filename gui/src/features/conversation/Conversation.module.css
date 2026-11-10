@@ -50,12 +50,6 @@
 @media (pointer:coarse) { .replyAction > button { width:44px; height:44px; } }
 .incompleteAnswer { font-size:14px; color:var(--muted); line-height:1.75; padding:7px 0; }
 .composerArea { flex:none; width:100%; padding-top:10px; padding-bottom:26px; }
-.composerArea :global(.composer-file-status) { display:grid; gap:6px; margin-top:8px; padding:8px 10px; border-radius:10px; background:var(--selected); font-size:12px; }
-.composerArea :global(.composer-file-path), .composerArea :global(.composer-file-actions) { display:flex; align-items:center; flex-wrap:wrap; gap:4px 10px; min-width:0; }
-.composerArea :global(.composer-file-path) span:first-child { font-weight:600; }
-.composerArea :global(.composer-file-path) span:last-child { overflow-wrap:anywhere; }
-.composerArea :global(.composer-file-path .file-not-ready) { color:var(--error); }
-.composerArea :global(.composer-file-actions) button { min-height:26px; padding:2px 8px; font-size:inherit; }
 .composerGreeting { font-size:24px; font-weight:500; line-height:1.45; margin:0 0 25px; letter-spacing:-.02em; }
 .contextNote, .forkContext { color:var(--muted); font-size:12px; margin:0; padding:4px 20px 8px; }
 .forkContext { display:flex; align-items:center; gap:8px; }

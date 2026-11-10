@@ -7,14 +7,14 @@ import {taskSkillDirectory} from './skill-resources.js';
 import {resolvePackageResources} from './packages.js';
 import {
   createGuiWorkspace, importGuiWorkspaceProjects, isWorkspaceId, isWorkspaceProject,
-  readGuiWorkspaces, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError, workspaceForProject, workspaceForSession, sameWorkspaceDirectory,
+  readGuiWorkspaces, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError, workspaceForProject, workspaceForSession,
 } from "./gui-workspace-state.js";
-import {persistNewGuiSession, assertNewGuiSessionId, scopeAfterTruncatedTail} from "./gui-session-persistence.js";
+import {persistNewGuiSession, assertNewGuiSessionId, scopeAfterTruncatedTail, freezeWorkspaceHistory} from "./gui-session-persistence.js";
 import {guiFiles, guiFile, guiFileDiff} from "./gui-files.js";
 import {readSessionUiState, writeSessionUiState, writeSessionViewState, initializeSessionView, readHomeDraft, writeHomeDraft, sessionStateError} from "./session-ui-state.js";
 import {createUpdateService, formatUpdateStatus, updateInstructions} from "./updates.js";
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { join, basename, relative, isAbsolute } from "node:path";
+import { join, basename, dirname, relative, isAbsolute } from "node:path";
 import { prepareGuiProject } from "./gui-project-preparation.js";
 import { randomUUID, createHash } from "node:crypto";
 import { SessionManager, CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
@@ -48,6 +48,7 @@ import {
   readSessionFlow,
   normalizeConversationEditor,
   readSessionProject,
+  readManagedDirectory,
   readSessionWorkspace,
   conversationCwd,
   neutralDirectory,
@@ -75,6 +76,7 @@ import {
   inspectGuiDirectory,
   inspectWorkspaceProject, browseProjectFolders, makeProjectFolder,
   savedDirectoryAvailable, fileWorkStatus, requireFileWork, requireGuiFileTask, workspaceDirectoryFacts,
+  createConversationFolder, discardEmptyConversationFolder, requireConversationFileWork, inspectTeamFolder,
   guiDiff,
   guiOutput,
   guiArtifact,
@@ -222,7 +224,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     const path=manager&&readSessionProject(manager);
     if(!path)throw materialError("MATERIAL_NOT_FOUND","此对话没有绑定项目目录。");
     const facts=inspectGuiDirectory(path);
-    if(!savedDirectoryAvailable(path,facts))throw materialError("MATERIAL_SOURCE","所选目录不可读取或已经改变。");
+    if(!conversationDirectoryAvailable(manager,path,facts))throw materialError("MATERIAL_SOURCE","所选目录不可读取或已经改变。");
     const identity=directoryIdentity(path);
     if(!identity)throw materialError("MATERIAL_SOURCE","所选目录已不可用。");
     if(source==="current")return {root:facts.canonicalPath,path,identity,source,scope:".",version:null};
@@ -427,16 +429,21 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       throw workspaceError("WORKSPACE_UNAVAILABLE", membership.workspaceError);
     if (membership.workspaceArchived)
       throw workspaceError("WORKSPACE_ARCHIVED", "此 Team 已归档，请先恢复。");
-    if (forExecution && facts.project !== null && !await savedProjectAvailable(facts.project,loadConfig(home)?.work))
+    if (forExecution && facts.project !== null && !await savedProjectAvailable(manager,facts.project,loadConfig(home)?.work))
       throw workspaceError("WORKSPACE_UNAVAILABLE", "此对话保存的项目目录已不可用或指向其他仓库，历史仍可阅读。");
     const latest = projectMembership(facts,readGuiWorkspaces(home));
     if (latest.workspaceError) throw workspaceError("WORKSPACE_UNAVAILABLE",latest.workspaceError);
     if (latest.workspaceArchived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。");
     return membership;
   }
-  async function savedProjectAvailable(path,work) {
+  function conversationDirectoryAvailable(manager,path,directory) {
+    const expected=readManagedDirectory(manager);
+    return savedDirectoryAvailable(path,directory) &&
+      (!expected||JSON.stringify(directoryIdentity(path))===JSON.stringify(expected));
+  }
+  async function savedProjectAvailable(manager,path,work) {
     const project = await inspectGuiProject(home,path,work,{includeChanges:false});
-    return project.executionReady && savedDirectoryAvailable(path,project);
+    return project.executionReady && conversationDirectoryAvailable(manager,path,project);
   }
   async function summaries() {
     const files = readdirSync(directory).filter(n => n.endsWith(".jsonl"));
@@ -535,7 +542,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   function chatResources(manager,config) {
     const project=readSessionProject(manager), cwd=neutralDirectory(home);
     const directory=project===null?null:inspectGuiDirectory(project);
-    const projectAvailable=project!==null&&savedDirectoryAvailable(project,directory);
+    const projectAvailable=project!==null&&conversationDirectoryAvailable(manager,project,directory);
     const resourceCwd=projectAvailable?directory.canonicalPath:cwd;
     const options=project!==null&&!projectAvailable&&config?.piResources ? {...config,piResources:
       Object.fromEntries(Object.entries(config.piResources).map(([kind,paths])=>[kind,kind==="tools"?paths:paths.filter(path=>{
@@ -706,13 +713,15 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           ? {taskId:last.taskId,part:last.resultRevision ? "result" : "input",offsetPx:0} : null};
         reading.viewError = "原阅读位置已不可用，已定位到最近保存的消息。";
       }
-      const projectStatus=association.project ? await fileWorkStatus(home,association.project) : null;
+      const managed=readManagedDirectory(manager);
+      const projectStatus=association.project&&!managed ? await fileWorkStatus(home,association.project) : null;
       return safe({
         ...navigation, persisted: !!info,
         id,
         title: meta.title || turns[0]?.input.slice(0, 60) || "新对话",
         project: association.project ?? null,
-        projectDirectoryAvailable: association.project ? savedDirectoryAvailable(association.project) : null,
+        ...(managed?{teamDirectory:dirname(association.project)}:{}),
+        projectDirectoryAvailable: association.project ? conversationDirectoryAvailable(manager,association.project) : null,
         projectStatus,
         pluginCommands:(holders.get(id)?.runtime?.commands()??[]).filter(c=>!c.source?.includes?.("inline:cothink")).map(c=>({name:c.name,description:c.description??""})),
         ...membership,
@@ -1218,7 +1227,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           if(!input.trim()&&!frozenMaterials.length)throw Error("请输入问题或添加至少一份就绪材料。");
           const snapshot = {
             config: confirmation?.source.frozenConfig??resolveConversationConfig(config, manager).config,
-            workspace:{id:membership.workspaceId??null,project:readSessionProject(manager)},
+            workspace:{id:membership.workspaceId??null,project:readSessionProject(manager),managedDirectory:readManagedDirectory(manager)},
             contextTaskIds:conversationTaskIds(manager),
             singleModel: readSessionMode(manager),
             materials:frozenMaterials,
@@ -1228,14 +1237,14 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           snapshot.guiResourceOptions=resources.options;
           snapshot.projectDirectoryAvailable=resources.projectAvailable;
           snapshot.workspace.directoryIdentity=resources.projectAvailable?directoryIdentity(snapshot.workspace.project):null;
+          const networkBlocker=guiNetworkBlocker(input,constraints);
+          if(networkBlocker)throw workspaceError("NETWORK_POLICY",networkBlocker);
           if (!confirmation && (continuation || isGuiFileTask(input, {
             readOnly: constraints.readOnly,
             fileWork: args.editorEditId !== undefined && (editor.turnOptions?.fileWork || !!editor.workRequest),
           }))) await requireGuiFileTask(home,continuation
             ? {...snapshot.workspace,directoryIdentity:continuation.source.workspace.directoryIdentity??undefined}
             : snapshot.workspace,snapshot.config.work);
-          const networkBlocker=guiNetworkBlocker(input,constraints);
-          if(networkBlocker)throw workspaceError("NETWORK_POLICY",networkBlocker);
           const thinking = readConversationMetadata(manager).thinking;
           if (!confirmation && thinking !== undefined)
             snapshot.config.main.thinkingLevel = thinking;
@@ -1266,7 +1275,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           ...(confirmation?{frozenSkillSource:confirmation.source,frozenPackageSnapshot:confirmation.source.packageSnapshot,confirmedOperation:{...confirmation,execute:task=>executeConfirmed(task,confirmation.source,confirmation.reservation)}}:{}),
           mainRuntime: rt,
           guiResourceOptions:snapshot.guiResourceOptions,
-          beforeWork:()=>requireFileWork(home,snapshot.workspace.project,snapshot.workspace.directoryIdentity),
+          beforeWork:()=>requireConversationFileWork(home,snapshot.workspace),
           materials:snapshot.materials,
           ...(continuation?{continuationSource:{taskId:continuation.source.id}}:{}),
           taskId: state.taskId,
@@ -1351,42 +1360,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if(id!==null && !await usableRoster(id))
       throw Error("默认阵容不存在或包含不可用的模型，请重新选择或留空。");
   }
-  function directoryFiles() {
-    return readdirSync(directory).filter(name=>name.endsWith(".jsonl")).sort().map(name=>join(directory,name));
-  }
-  function freezeWorkspaceHistory(infos, table, current, nextPath) {
-    const files=directoryFiles(), found=new Map(infos.map(info=>[info.path,info]));
-    const related=new Set(), legacyBindings=[];
-    const directoryStamp=nextPath===null?null:signature(nextPath);
-    const affects=branch=>projectMembership(branch,table).workspaceId===current.id ||
-      sameWorkspaceDirectory(branch.project,current.project) || sameWorkspaceDirectory(branch.project,nextPath);
-    const unverified=branch=>branch.associationError ||
-      branch.marker!==undefined && projectMembership(branch,table).workspaceError;
-    const snapshot=files.map(path=>{
-      const info=found.get(path);
-      if (!info || signature(path)!==info.stamp || !info.branches ||
-          info.branches.some(branch=>unverified(branch) || info.error && affects(branch)))
-        throw workspaceError("WORKSPACE_CONFLICT","有旧会话的分支归属无法核对，目录未变更。",current);
-      for (const branch of info.branches) {
-        if (affects(branch)) related.add(info.id);
-        if (branch.marker===undefined && branch.project!==null)
-          legacyBindings.push({sessionId:info.id,project:branch.project});
-      }
-      return [path,info.stamp];
-    });
-    const verify=()=>{
-      if (JSON.stringify(directoryFiles())!==JSON.stringify(files) ||
-          snapshot.some(([path,stamp])=>signature(path)!==stamp))
-        throw workspaceError("WORKSPACE_CONFLICT","旧会话在核对期间变化，目录未变更。",current);
-      if ([active?.sessionId,extensionCommand?.sessionId].some(id=>related.has(id)))
-        throw workspaceError("WORKSPACE_CONFLICT","此 Team 正在运行任务或插件命令。",current);
-      if ([...related].some(id=>!holders.has(id)&&sessionWriterBusy(join(home,"pi"),id)))
-        throw workspaceError("WORKSPACE_CONFLICT","此 Team 的对话正被另一窗口占用，请先关闭该窗口。",current);
-      if (nextPath!==null && (inspectWorkspaceProject(nextPath)!==nextPath || signature(nextPath)!==directoryStamp))
-        throw workspaceError("WORKSPACE_CONFLICT","新目录在核对期间改变。",current);
-    };
-    return {legacyBindings,verify};
-  }
   async function manageWorkspace(name,args) {
     const keys = name === "workspace.create" ? ["workspaceId","name","project","defaultRosterId"] :
       name === "workspace.rebind" ? ["workspaceId","expectedRevision","path","operationId"] :
@@ -1416,7 +1389,12 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           if (name === "workspace.bind" && current.project!==null)
             throw workspaceError("WORKSPACE_CONFLICT","请通过新版目录变更入口更换目录。",current);
           const path=args.path===null&&name==="workspace.rebind"?null:inspectWorkspaceProject(args.path);
-          const frozen=freezeWorkspaceHistory(infos,table,current,path);
+          const frozen=freezeWorkspaceHistory(directory,infos,table,current,path,{signature,projectMembership,inspectWorkspaceProject,assertIdle:related=>{
+            if ([active?.sessionId,extensionCommand?.sessionId].some(id=>related.has(id)))
+              throw workspaceError("WORKSPACE_CONFLICT","此 Team 正在运行任务或插件命令。",current);
+            if ([...related].some(id=>!holders.has(id)&&sessionWriterBusy(join(home,"pi"),id)))
+              throw workspaceError("WORKSPACE_CONFLICT","此 Team 的对话正被另一窗口占用，请先关闭该窗口。",current);
+          }});
           const result=rebindGuiWorkspace(home,{workspaceId:args.workspaceId,expectedRevision:args.expectedRevision,
             path,operationId:args.operationId??randomUUID(),legacyBindings:frozen.legacyBindings},frozen.verify);
           emit();
@@ -1576,8 +1554,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (name === "task.reveal")
       return revealGuiTask(rawTask(args.taskId).record);
     if (name === "project.inspect") {
-      if (args.purpose==="directory") {
-        const basic=inspectGuiDirectory(args.path);
+      if (args.purpose==="directory"||args.purpose==="team-directory") {
+        const basic=args.purpose==="directory"?inspectGuiDirectory(args.path):inspectTeamFolder(home,args.path);
         return {...basic,path:basic.canonicalPath,valid:basic.directoryAvailable,executionReady:null,error:basic.reason};
       }
       if (args.purpose!==undefined && args.purpose!=="execution") throw Error("目录检查用途无效。");
@@ -1682,25 +1660,33 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         const endpoint = branch.findLast(entry => entry.type === "custom_message" &&
           entry.customType === "cothink-task-status" && entry.details?.taskId === taskId);
         if (!endpoint) throw Error("回复终点记录缺失，请修复历史后再新建分支。");
-        // A separate Pi reader extracts the selected root-to-reply path into a new
-        // session file. Never change the live source's leaf or copy its later turns.
-        const manager = SessionManager.open(source.sessionManager.getSessionFile());
-        const inherited = SessionManager.inMemory(manager.getCwd(),undefined,
-          [manager.getHeader(),...branch.slice(0,branch.indexOf(endpoint)+1)]);
-        const membership = await assertWorkspaceWritable(inherited);
+        const original=source.sessionManager;
+        const manager=SessionManager.inMemory(original.getCwd(),undefined,[original.getHeader(),...branch.slice(0,branch.indexOf(endpoint)+1)]);
+        const membership = await assertWorkspaceWritable(manager);
         assertIdle();
         source.assertOwned();
         manager.createBranchedSession(endpoint.id);
         const id = manager.getSessionId(), writer = acquireSessionWriter(join(home, "pi"), id);
-        const holder = {sessionManager:manager, persisted:true, writer, assertOwned:writer.assertOwned};
-        holders.set(id, holder);
+        const holder = {sessionManager:manager,writer,assertOwned:writer.assertOwned};
+        let folder,publishing=false;
         try {
           appendConversationEntry(holder, "cothink-fork", {sessionId, taskId});
           if (readSessionWorkspace(manager) === undefined)
             appendConversationEntry(holder,"cothink-gui-workspace",{workspaceId:membership.workspaceId});
+          const teamRoot=readGuiWorkspaces(home).workspaces.find(w=>w.id===membership.workspaceId)?.project;
+          if (teamRoot) {
+            folder=createConversationFolder(home,teamRoot,id);
+            appendConversationEntry(holder,"cothink-project",folder);
+          }
+          else if (branch.some(entry=>entry.customType==="cothink-project" && entry.data?.managedDirectory))
+            throw Error("先为 Team 关联文件夹，再新建对话。");
           appendConversationEntry(holder, "cothink-title", {title:`${readable.title} · 分支`});
           // Historical drafts are not messages, and belong to the source editor.
           appendConversationEntry(holder, "cothink-draft", {text:""});
+          publishing=true;
+          holder.sessionManager=persistNewGuiSession({manager,directory,assertOwned:holder.assertOwned,parentSession:sourceInfo.path});
+          holder.persisted=true;
+          holders.set(id,holder);
           const ids = new Set(conversationTaskIds(manager));
           try {
             initializeSessionView(home,{sessionId:id,seenResults:eligibleResults(taskRecords().filter(record => ids.has(record.id)))});
@@ -1708,7 +1694,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           emit();
           return await session(id);
         } catch (error) {
-          await releaseHolder(id);
+          if (holders.has(id)) await releaseHolder(id);
+          else writer.release();
+          if(folder&&!publishing)discardEmptyConversationFolder(home,folder);
           emit(); // Preserve any written branch for inspection, never retry it.
           throw error;
         }
@@ -1730,7 +1718,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         const id = args.sessionId ?? randomUUID();
         if (holders.has(id)) throw sessionStateError("SESSION_STATE_CONFLICT","会话 ID 已存在，请读取原 ID；本次未创建。");
         const writer = acquireSessionWriter(join(home,"pi"),id);
-        let holder;
+        let holder, folder;
         try {
           assertNewGuiSessionId(directory,id);
           let workspace = null, project = null;
@@ -1756,9 +1744,10 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           if (workspace?.archived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。",workspace);
           if (args.handoff && (project!==args.handoff.project || !savedDirectoryAvailable(project)))
             throw workspaceError("WORKSPACE_CONFLICT","Team 默认目录已变化或不可用，请重新核对。",workspace);
+          if (modern && project) folder=createConversationFolder(home,project,id);
           const manager = SessionManager.create(neutralDirectory(home),directory,{id});
           holder = {sessionManager:manager,writer,assertOwned:writer.assertOwned};
-          appendConversationEntry(holder,"cothink-project",{project});
+          appendConversationEntry(holder,"cothink-project",folder??{project});
           appendConversationEntry(holder,"cothink-gui-workspace",{workspaceId:workspace?.id ?? null});
           appendConversationEntry(holder,"cothink-flow",{flow:"unified",version:unifiedProtocol});
           if (args.handoff?.text) appendConversationEntry(holder,"cothink-draft",{text:args.handoff.text,editId:randomUUID()});
@@ -1811,6 +1800,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           return await session(id);
         } catch(error) {
           if (holders.get(id) === holder) holders.delete(id);
+          if (folder && !existsSync(holder?.sessionManager.getSessionFile()??"")) discardEmptyConversationFolder(home,folder);
           writer.release();
           emit();
           throw error;

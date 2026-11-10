@@ -1,12 +1,12 @@
 import {loadInputMaterials} from "./context.js";
-import {guiNetworkBlocker} from "./gui-turn-options.js";
+import {guiNetworkBlocker,guiNetworkChoice,isGuiFileTask} from "./gui-turn-options.js";
 import {assertCleanProjectProcess} from "./pi-runtime.js";
 import {createHash,randomUUID} from 'node:crypto';
 import {readFileSync,existsSync,realpathSync} from 'node:fs';
 import {join,relative,sep} from 'node:path';
 import {runTurn} from './discussion.js';
 import {conversationTaskIds} from './conversation.js';
-import {problem,readRequest,readRequests,readTask,taskDisplayStatus} from './task.js';
+import {problem,readRequest,readRequests,readTask,rootUsage,taskDisplayStatus} from './task.js';
 import {legacyGit} from './git-versioning.js';
 import {validProjectPath,inScope,createVersioning,readProjectContext} from './versioning.js';
 import {projectChatState,validateChatPlan,assertProjectReviewRequirement} from './project.js';
@@ -197,6 +197,8 @@ export function bindUnifiedActions(task,{workspace,onWork,beforeWork}) {
 export async function runProjectTurn({home,cwd,workspace={id:null,project:null},input,frozenConfig,mainRuntime,frozenConstraints,budget,taskId,submissionId,readAuthorization,confirmedOperation,onProgress,signal,...options}) {
   assertCleanProjectProcess({unified:true});
   const constraints=normalizeConstraints(frozenConstraints),frozenBudget=normalizeRootBudget(budget);
+  if (!constraints.networkMode && isGuiFileTask(input,constraints) &&
+      ["choose","artifact-offline"].includes(guiNetworkChoice(input,constraints))) constraints.networkMode="artifact-offline";
   return runTurn({home,cwd,input,config:frozenConfig,mainRuntime,allowWork:Boolean(workspace.project),flow:'unified',constraints,budget:frozenBudget,workspace,readAuthorization,confirmedOperation,
     id:taskId??randomUUID(),submissionId,onProgress,signal,...options,
     onTaskCreated(task){task.record.contextTaskIds=options.contextTaskIds??[];createRootOwner(task);bindUnifiedActions(task,{workspace,onWork:options.onWork??prepareWork,beforeWork:options.beforeWork});options.onTaskCreated?.(task);},
@@ -363,6 +365,16 @@ export async function executeConfirmed(task,source,reservation) {
       task.record.deliveryRef={projectId:result.state.id,commandId:reservation.commandId,revision:result.state.revision,sources,version:result.state.delivery.version,
         checksRef:result.state.delivery.requestIds.map(requestId=>({projectId:result.state.id,revision:result.state.revision,requestId,version:result.state.delivery.version}))};
       resolveDelivery(task.home,task.record);
+      if (task.record.workspace.managedDirectory) {
+        task.save();
+        try {
+          const {placeConversationDelivery}=await import("./gui-work.js");
+          await placeConversationDelivery(task.home,task.record.workspace,result.state.delivery.version);
+        } catch (error) {
+          task.finish("partial","成果已保存，但未能放入对话文件夹："+error.message);
+          return task;
+        }
+      }
     }
     task.save();
     if(task.signal.aborted){return task;}
@@ -387,15 +399,7 @@ export function resolveDelivery(home,record) {
   });
 }
 
-export function rootUsage(home,record) {
-  const tasks=[record,...(record.projectOperation?.childTaskIds??[]).map(id=>{
-    const child=readTask(home,id);if(child.rootTaskId!==record.id||child.project?.commandId!==record.projectOperation.commandId)throw problem('ROOT_CHILD','Usage child ownership changed');return child;
-  })];
-  const requests=new Map();for(const task of tasks)for(const id of task.requestIds){const call=readRequest(home,task.id,id);if(requests.has(id))throw problem('ROOT_REQUEST','Duplicate physical request ownership');requests.set(id,call);}
-  const sent=[...requests.values()].filter(r=>r.sent),known={input:0,output:0,cacheRead:0,cacheWrite:0};let cost=0,costUnknown=false;
-  for(const call of sent){for(const key of Object.keys(known))known[key]+=call.usage?.[key]??0;if(typeof call.estimatedCost==='number')cost+=call.estimatedCost;else costUnknown=true;}
-  return {scope:'root_and_owned',calls:sent.length,known,unknownCalls:sent.filter(r=>!r.usage).length,cost:costUnknown?null:cost,costSource:'catalog_estimate',ownCalls:sent.filter(r=>r.taskId===record.id).length,ownedCalls:sent.filter(r=>r.taskId!==record.id).length,pendingClaims:(record.rootRequests??[]).filter(c=>!c.notSent&&!requests.get(c.requestId)?.sent).length};
-}
+export {rootUsage} from './task.js';
 
 export function resolveOwnedTasks(home,record) {
   const operation=record.projectOperation;if(!operation?.childTaskIds?.length)return [];

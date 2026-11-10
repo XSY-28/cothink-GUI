@@ -37,6 +37,11 @@ async function fixture(t) {
  await page.getByRole('button',{name:'新建 Team',exact:true}).click();
  const creating=page.getByRole('dialog',{name:'新建 Team',exact:true});
  await creating.getByLabel('名称',{exact:true}).fill('Lifecycle');
+ const folder=mkdtempSync(join(tmpdir(),'cothink-app-team-'));
+ t.after(()=>rmSync(folder,{recursive:true,force:true}));
+ await creating.getByText('手动输入路径').click();
+ await creating.getByLabel('项目绝对路径').fill(folder);
+ await creating.getByRole('button',{name:'只读检查目录'}).click();
  const actionReceipt=(name,matches=()=>true)=>page.waitForResponse(response=>{
   if(!response.url().endsWith('/api/action')||!response.ok())return false;
   const body=response.request().postDataJSON();

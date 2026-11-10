@@ -1,6 +1,7 @@
 import {resolveDelivery} from "./project-turn.js";
 import { createHash } from "node:crypto";
-import { realpathSync, readFileSync, lstatSync, statSync, accessSync, constants, readdirSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { realpathSync, readFileSync, lstatSync, statSync, accessSync, constants, readdirSync, mkdirSync, rmdirSync } from "node:fs";
 import { resolve, join, relative, isAbsolute, dirname } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -8,6 +9,8 @@ import { createVersioning } from "./versioning.js";
 import { taskOutputRefs } from "./gui-projection.js";
 import { inspectGuiPreparation, inspectGuiGitChanges, protectedGuiProjectPath } from "./gui-project-preparation.js";
 import { workspaceError, workspaceForProject } from "./gui-workspace-state.js";
+import { conversationFolderName } from "./conversation.js";
+import { git } from "../packages/agent-sync/src/git.js";
 const exec = promisify(execFile);
 export function inspectGuiDirectory(path) {
   let canonicalPath=null;
@@ -29,6 +32,19 @@ export function inspectWorkspaceProject(path) {
   const directory = inspectGuiDirectory(path);
   if (!directory.directoryAvailable) throw Error(directory.reason);
   return directory.canonicalPath;
+}
+
+export function inspectTeamFolder(home,path) {
+  const directory=inspectGuiDirectory(path);
+  if(!directory.directoryAvailable) return directory;
+  const {canonicalPath}=directory;
+  try {
+    if(protectedGuiProjectPath(canonicalPath,home)) throw Error("请选择专用的 Team 文件夹。");
+    accessSync(canonicalPath,constants.W_OK);
+    return directory;
+  } catch(error) {
+    return {...directory,directoryAvailable:false,reason:error.code?"不能在此文件夹新建对话。":error.message};
+  }
 }
 
 export function browseProjectFolders(input) {
@@ -67,6 +83,80 @@ export function workspaceDirectoryFacts(home, path) {
   };
 }
 
+function pathIdentity(path) {
+  const stat=lstatSync(path,{bigint:true});
+  if (!stat.isDirectory() || realpathSync(path)!==path)
+    throw workspaceError("WORKSPACE_UNAVAILABLE","文件夹指向了其他位置。");
+  return [String(stat.dev),String(stat.ino)];
+}
+
+export function createConversationFolder(home, teamRoot, id) {
+  if (protectedGuiProjectPath(teamRoot,home))
+    throw workspaceError("WORKSPACE_UNAVAILABLE","请选择专用的 Team 文件夹。");
+  const before=pathIdentity(teamRoot), project=join(teamRoot,conversationFolderName(id));
+  try { mkdirSync(project,{mode:0o700}); }
+  catch(error) {
+    if(error.code==="EEXIST") throw Error("对话文件夹已存在，未覆盖现有内容。");
+    throw error;
+  }
+  if (JSON.stringify(pathIdentity(teamRoot))!==JSON.stringify(before))
+    throw workspaceError("WORKSPACE_UNAVAILABLE","Team 文件夹已改变，请重新打开 Team。");
+  return {project,managedDirectory:pathIdentity(project)};
+}
+
+function verifyConversationFolder(home,{project,managedDirectory}) {
+  if (!managedDirectory || protectedGuiProjectPath(project,home) ||
+      JSON.stringify(pathIdentity(project))!==JSON.stringify(managedDirectory))
+    throw workspaceError("WORKSPACE_UNAVAILABLE","对话文件夹已移动或更换，不能写入。");
+  return project;
+}
+
+export function discardEmptyConversationFolder(home, folder) {
+  try { rmdirSync(verifyConversationFolder(home,folder)); }
+  catch { /* Preserve any existing user content, including an occupied folder. */ }
+}
+
+async function verifyConversationRepository(project) {
+  pathIdentity(join(project,".git"));
+  const root=(await git(project,["rev-parse","--show-toplevel"])).toString().replace(/\r?\n$/,"");
+  if (JSON.stringify(pathIdentity(root))!==JSON.stringify(pathIdentity(project)))
+    throw workspaceError("WORKSPACE_UNAVAILABLE","对话文件夹的 Git 范围已改变。");
+}
+
+async function initializeConversationRepository(home, workspace) {
+  const project=verifyConversationFolder(home,workspace);
+  try { pathIdentity(join(project,".git")); }
+  catch (error) {
+    if (error.code!=="ENOENT") throw error;
+    await git(project,["init","--quiet","--template=","--initial-branch=main"]);
+  }
+  await verifyConversationRepository(project);
+  try { await git(project,["rev-parse","--verify","HEAD^{commit}"]); }
+  catch (error) {
+    if (error.exitCode!==128) throw error;
+    const tree=(await git(project,["mktree"],Buffer.alloc(0))).toString().trim();
+    const commit=(await git(project,["commit-tree",tree,"-m","Initialize CoThink conversation"])).toString().trim();
+    await git(project,["update-ref","HEAD",commit,"0".repeat(commit.length)]);
+  }
+  verifyConversationFolder(home,workspace);
+}
+
+export async function requireConversationFileWork(home, workspace, expectedIdentity = workspace.directoryIdentity) {
+  if (workspace.managedDirectory) await initializeConversationRepository(home,workspace);
+  return requireFileWork(home,workspace.project,expectedIdentity);
+}
+
+export async function placeConversationDelivery(home,workspace,version) {
+  const project=verifyConversationFolder(home,workspace);
+  await verifyConversationRepository(project);
+  const head=async()=>(await git(project,["rev-parse","--verify","HEAD^{commit}"])).toString().trim();
+  if (await head()===version) return;
+  if ((await git(project,["status","--porcelain","--untracked-files=no"])).length)
+    throw Error("对话文件夹有尚未保存到 Git 的修改。");
+  await git(project,["merge","--ff-only","--no-autostash","--no-overwrite-ignore",version]);
+  if (await head()!==version) throw Error("对话文件夹没有更新到交付版本。");
+}
+
 export async function fileWorkStatus(home, path) {
   if (!savedDirectoryAvailable(path))
     return { executionReady: false, reason: "保存的目录已不可用或指向其他位置。" };
@@ -96,13 +186,14 @@ export async function requireFileWork(home, path, expectedIdentity) {
   return inspected;
 }
 
-export async function requireGuiFileTask(home, {project,directoryIdentity}, work) {
+export async function requireGuiFileTask(home, workspace, work) {
+  const {project}=workspace;
   if (!project) throw workspaceError("PROJECT_NOT_PREPARED", "此对话尚未关联项目目录，文件任务未发送。");
   try {
-    await requireFileWork(home,project,directoryIdentity);
+    await requireConversationFileWork(home,workspace);
   } catch (error) {
     if (error.code !== "PROJECT_NOT_PREPARED") throw error;
-    throw workspaceError(error.code, `文件任务未发送。当前目录 ${project}：${error.message}`);
+    throw workspaceError(error.code, `此旧对话的文件夹不能用于文件工作。请在 Team 中新建对话。未发送模型请求。`);
   }
   if(!work?.execution)throw workspaceError("PROJECT_EXECUTION_REQUIRED","项目目录已准备。请在设置中配置项目执行环境后再发送。");
 }

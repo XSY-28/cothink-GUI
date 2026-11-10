@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import {tmpdir} from "node:os";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -1091,17 +1091,15 @@ test('GUI disabled builtin and explicit-only external skill retain their selecti
  assert.match(JSON.stringify(f.calls[1].body.messages),/explicit-only/);assert.equal(f.calls.length,2);
 });
 
-test("ordinary chat survives a vanished Team directory and inherits the recent roster when no default is set", async t => {
+test("a missing Team folder stops creation but preserves existing chat", async t => {
   const f=await fixture(t,()=>({text:"reply without project"})), c=await controller(t,f);
-  const {renameSync}=await import("node:fs");
-  const repo=await repository(t);
-  const {project}=repo;
-  const workspaceId=randomUUID();
-  const workspace=await c.action("workspace.create",{workspaceId,name:"vanishing",project,defaultRosterId:null});
-  renameSync(project,project+"-moved");
+  const {project}=repository(t);
+  const {id:workspaceId,project:root}=await c.action("workspace.create",{workspaceId:randomUUID(),name:"vanishing",project,defaultRosterId:null});
   const s=await c.action("session.create",{sessionId:randomUUID(),workspaceId});
-  assert.equal(s.project,workspace.project);
+  assert.equal(s.project,join(root,"对话-"+s.id));
   assert.equal(s.team.id,teamId);
+  renameSync(project,project+"-moved");
+  await assert.rejects(c.action("session.create",{workspaceId,sessionId:randomUUID()}),/ENOENT|不存在|不可用/);
   const accepted=await c.action("task.submit",{sessionId:s.id,input:"hello",protocolVersion:1,submissionId:randomUUID()});
   assert.equal((await finished(c,accepted.taskId)).status,"completed");
   assert.equal(f.calls.length,1);
@@ -1185,7 +1183,7 @@ test("setting a default with an unavailable later roster seat preserves the Team
   assert.equal(f.calls.length,0);
 });
 
-test("ordinary directory binding, preparation and explicit continuation reach formal work", async t => {
+test("legacy project directory can prepare and resume work", async t => {
   const checks=[{command:"node",args:["-e","if(require('fs').readFileSync('a.txt','utf8').trim()!=='prepared result')process.exit(1)"]}];
   const f = await fixture(t, (_, n) => {
     const tool=(name,args={})=>({toolCalls:[{name,args}]});
@@ -1204,8 +1202,8 @@ test("ordinary directory binding, preparation and explicit continuation reach fo
   const directory=await c.action("project.inspect",{path:ordinary,purpose:"directory"});
   assert.equal(directory.directoryAvailable,true);
   assert.equal((await c.action("project.inspect",{path:ordinary})).executionReady,false);
-  const workspace=await c.action("workspace.create",{workspaceId:randomUUID(),name:"普通目录",project:ordinary,defaultRosterId:teamId});
-  const s=await c.action("session.create",{workspaceId:workspace.id,sessionId:randomUUID()});
+  const s=await c.action("session.create",{project:ordinary});
+  assert.equal(s.project,directory.canonicalPath);
   const first=await c.action("task.submit",{sessionId:s.id,input:"work with a.txt",protocolVersion:1,submissionId:randomUUID()});
   const blocked=await finished(c,first.taskId);
   assert.equal(blocked.status,"blocked");
@@ -1229,9 +1227,11 @@ test("ordinary directory binding, preparation and explicit continuation reach fo
   assert.equal(readFileSync(join(ordinary,"a.txt"),"utf8"),"initial\n");
 });
 
-test("rebind preserves every legacy branch and blocks when a sibling is owned elsewhere", async t => {
+test("rebind preserves legacy branches and checks their writers", async t => {
   const f=await fixture(t), c=await controller(t,f);
-  const old=join(f.cwd,"old"),other=join(f.cwd,"other"),next=join(f.cwd,"next");
+  const root=mkdtempSync(join(tmpdir(),"cothink-rebind-"));
+  t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const [old,other,next]=["old","other","next"].map(name=>join(root,name));
   for (const path of [old,other,next]) mkdirSync(path);
   const oldTeam=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Old",project:old,defaultRosterId:teamId});
   const otherTeam=await c.action("workspace.create",{workspaceId:randomUUID(),name:"Other",project:other,defaultRosterId:teamId});
@@ -1259,10 +1259,10 @@ test("rebind preserves every legacy branch and blocks when a sibling is owned el
   assert.equal(existing.project,otherTeam.project);
   assert.equal(existing.workspaceId,otherTeam.id);
   const created=await c.action("session.create",{workspaceId:oldTeam.id,sessionId:randomUUID()});
-  assert.equal((await c.session(created.id)).project,nextPath);
+  assert.equal(created.project,join(nextPath,"对话-"+created.id));
   const detached=await c.action("workspace.rebind",{workspaceId:oldTeam.id,expectedRevision:1,path:null,operationId:randomUUID()});
   assert.equal(detached.project,null);
-  assert.equal((await c.session(created.id)).project,nextPath);
+  assert.equal((await c.session(created.id)).project,created.project);
   assert.equal((await c.session(created.id)).workspaceId,oldTeam.id);
 });
 
