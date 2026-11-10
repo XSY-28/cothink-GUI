@@ -3,15 +3,14 @@ import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import { Composer } from "../../Composer.js";
 import {Icon} from "../../Icon.js";
 import { Markdown } from "../../Markdown.js";
-import { statusLabel } from "../../view.js";
 import { ReplyHeading } from "./ReplyHeading.jsx";
 import { ConversationHeading } from "./ConversationMenu.jsx";
-import { ReplyActions, UserMessage } from "./ReplyActions.jsx";
+import { ReplyActions, StopButton, UserMessage, WorkProposal } from "./ReplyActions.jsx";
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
   onSettings, onPlugins, onToggleNavigation, onWorkspaceMenu, onPrepareProject, onConversations, onRoster, onAttention, onFork, onOpenFile, onOpenDetails, onNotes, onCopy, onLocalCommand, onConversationMenu, onChooseProjectFiles, onAssociateProject,
-  onChooseSkill, onPreviewMaterial, onRetryMaterial, onOpenTurnLimits, conversationMenuTrigger}) {
+  onChooseSkill, onPreviewMaterial, onRetryMaterial, onOpenTurnLimits, conversationMenuTrigger, onUseTeamDirectory}) {
   const {bootstrap: boot, task, draft, ready, submitting, pending, pendingStatus} = state;
   const session = workspace?.archived && state.session ? {...state.session,workspaceArchived:true,readOnly:true} : state.session;
   const replyTeamId = session?.workspaceId && !session.workspaceError &&
@@ -24,8 +23,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   const error = state.errors[0] || "";
   const {openSession, refresh, setError, abandonSubmission} = commands;
   const safely = operation => Promise.resolve(operation).catch(e => setError(e.message));
-  const cancelTask = () => safely(commands.cancelTask());
-  const stopLabel = state.stopping ? statusLabel(state.stopping.status) : "停止";
+  const stop = <StopButton stopping={state.stopping} activeStatus={boot.active?.status} onClick={()=>safely(commands.cancelTask())} />;
   const recoverPending = () => commands.recoverSubmission();
   const editDraft = text => commands.setDraft(session?.id, text);
   const submit = async (options) => {
@@ -158,7 +156,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             >
               返回任务
             </button>
-            <button className="stop-button" disabled={!!state.stopping} onClick={cancelTask}>{stopLabel}</button>
+            {stop}
           </div>
         )}
         {boot.extensionUI?.command && boot.extensionUI.command.sessionId !== session?.id &&
@@ -230,7 +228,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             ) : (
               session.turns.map((turn) => {
                 const inProgress = ["running", "preparing", "cancelling"].includes(turn.status);
-                const canStop = inProgress && boot.active?.status !== "preparing" && boot.active?.taskId === turn.taskId;
+                const canStop = (inProgress || state.stopping?.status === "stop_unknown") && boot.active?.status !== "preparing" && boot.active?.taskId === turn.taskId;
                 return (
                 <section
                   className={styles.turn}
@@ -243,10 +241,11 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                   </div>
                   <article className={styles.answer} data-task-id={turn.taskId} data-reading-part="result" data-result-revision={turn.resultRevision || undefined} tabIndex={-1}>
                     <ReplyHeading turn={turn} now={now} teamId={replyTeamId}>
-                      {canStop && <button type="button" className="stop-button" disabled={!!state.stopping || turn.status === "cancelling"} onClick={cancelTask}>{stopLabel}</button>}
+                      {canStop && stop}
                     </ReplyHeading>
                     {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。请核对已保存的执行记录。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。" : turn.status === "cancelled" ? "已停止。已完成的内容保留，停止不等于回滚；可查看此条执行记录后继续说明下一步。" : "本次未完整完成。请核对已有内容和执行记录；若有成果，文件入口会列在下方。"}</p>}
-                    {turn.finalText ? (
+                    {turn.proposalRef ? <WorkProposal turn={turn} disabled={!!boot.active||!!pending||session.readOnly}
+                      onConfirm={()=>safely(commands.confirmWork(turn))} /> : turn.finalText ? (
                       <div className="prose">
                         <TurnMarkdown text={turn.finalText} sessionId={session.id} taskId={turn.taskId} resolveImage={commands.resolveImage} />
                       </div>
@@ -262,9 +261,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                       <p>已保存原任务。准备目录后可明确发起一次新请求继续。</p>
                       {session.turns.some(item=>item.continuationSource?.taskId===turn.taskId) ? <p>此任务已有一条续作。</p> : session.projectStatus?.executionReady
                         ? <button disabled={!!boot.active||!!pending||session.readOnly||submitting} onClick={()=>safely(commands.continuePrepared(turn))}>继续原任务（将新增请求）</button>
-                        : <button disabled={session.projectDirectoryAvailable===false} onClick={()=>onPrepareProject(turn.projectPreparationBlocked.path,session.projectStatus?.preparation)}>准备文件工作</button>}
+                        : session.projectStatus?.homeDirectory || session.project!==turn.projectPreparationBlocked.path ? null :
+                          <button disabled={session.projectDirectoryAvailable===false} onClick={()=>onPrepareProject(turn.projectPreparationBlocked.path,session.projectStatus?.preparation)}>准备文件工作</button>}
                     </div>}
-                    {turn.proposalRef && !turn.confirmationIntent?.consumedByTaskId && <button disabled={!!boot.active||!!pending||session.readOnly} onClick={()=>safely(commands.confirmWork(turn))}>确认上述计划并执行</button>}
                     {turn.hasWork && <OutcomeFiles taskId={turn.taskId} status={turn.status} commands={commands} onOpen={onOpenFile}/>}
                     <ReplyActions turn={turn} forkDisabled={!!boot.active || !!pending || session.readOnly || !!session.selectionError || !turn.canFork}
                       showChanges={turn.hasWork || task?.id === turn.taskId && task.work}
@@ -315,6 +314,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             onRetryMaterial={onRetryMaterial}
             onChooseProjectFiles={onChooseProjectFiles}
             onAssociateProject={onAssociateProject}
+            onUseTeamDirectory={onUseTeamDirectory}
             onPrepareProject={session?.project && session.projectDirectoryAvailable !== false && onPrepareProject
               ? ()=>onPrepareProject(session.project,session.projectStatus?.preparation) : undefined}
             onWorkspaceMenu={workspace ? onWorkspaceMenu : undefined}

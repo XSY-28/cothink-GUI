@@ -12,7 +12,7 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
   useEffect(()=>()=>{++request.current;},[]);
   const validDirectory = result?.directoryAvailable ?? result?.valid;
   const validName = !!name.trim() && [...name.trim()].length <= 80;
-  async function inspect(candidate = path.trim()) {
+  async function inspect(candidate = path) {
     const token = ++request.current;
     setBusy(true); setError(""); setExisting(null); setResult(null);
     try {
@@ -36,20 +36,57 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
     await inspect(candidate);
   }
   async function browse(candidate) {
-    setBusy(true);setError("");
-    try { setBrowser(await commands.browseProject(candidate)); }
-    catch (error) {setError(error.message);}
-    finally {setBusy(false);}
-  }
-  async function mkdir() {
-    if (!browser || !folderName.trim()) return;
+    const token = ++request.current;
     setBusy(true);setError("");
     try {
-      const created=await commands.mkdirProject({parent:browser.path,name:folderName.trim()});
-      setFolderName("");
-      await choose(created.path);
-    } catch(error) {setError(error.message);}
-    finally {setBusy(false);}
+      const result=await commands.browseProject(candidate);
+      if (token===request.current) setBrowser(result);
+    } catch (error) {
+      if (token===request.current) setError(error.message);
+    } finally {
+      if (token===request.current) setBusy(false);
+    }
+  }
+  async function mkdir() {
+    if (!browser || browser.unverified || !folderName.trim()) return;
+    const token=++request.current, parent=browser.path;
+    setBusy(true);setError("");
+    try {
+      const created=await commands.mkdirProject({parent,name:folderName.trim()});
+      if (token===request.current) {
+        setFolderName("");
+        await choose(created.path);
+      }
+    } catch(error) {
+      if (token!==request.current) return;
+      if (!error.unknown) {setError(error.message);return;}
+      setBrowser({...browser,unverified:true});
+      try {
+        const refreshed=await commands.browseProject(parent);
+        if (token===request.current) {
+          setBrowser(refreshed);
+          setError("新建结果未收到。已重新浏览父目录，请核对文件夹是否存在，再选择或新建。");
+        }
+      } catch {
+        if (token===request.current) setError("新建结果未收到。请重新浏览父目录核对。");
+      }
+    } finally {
+      if (token===request.current) setBusy(false);
+    }
+  }
+  async function pickDirectory() {
+    const desktop=window.cothinkDesktop;
+    if (!desktop) return browse(result?.canonicalPath ?? workspace?.project ?? undefined);
+    const token=++request.current;
+    setBusy(true);setError("");
+    try {
+      const selected=await desktop.chooseProjectDirectory(path.trim() ? path : workspace?.project ?? undefined);
+      if (token===request.current && selected!==null) await choose(selected);
+    } catch(error) {
+      if (token===request.current) setError(error.message);
+    } finally {
+      if (token===request.current) setBusy(false);
+    }
   }
   async function save(event) {
     event.preventDefault();
@@ -79,13 +116,21 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
     finally{saveBusy.current=false;setSaving(false);}
   }
   async function query() {
+    if (saveBusy.current) return;
+    saveBusy.current=true;
     setSaving(true);
     try {
-      const receipt=await commands.queryWorkspaceRebind(uncertain);
-      if (receipt.status==="confirmed") onSaved(receipt.workspace);
-      else setError("原操作未确认。请查看当前 Team 目录。");
+      if (uncertain.operationId) {
+        const receipt=await commands.queryWorkspaceRebind(uncertain);
+        if (receipt.status==="confirmed") onSaved(receipt.workspace);
+        else setError("原操作未确认。请查看当前 Team 目录。");
+      } else {
+        const created=await commands.queryWorkspaceCreation(uncertain.workspaceId);
+        if (created) onOpenExisting(created);
+        else setError("尚未查到原 Team。可再次查询，或关闭弹窗后核对 Team 列表。");
+      }
     } catch(error) {setError(error.message);}
-    finally {setSaving(false);}
+    finally {saveBusy.current=false;setSaving(false);}
   }
   const saveLabel = binding ? "保存目录" : "创建";
   return <Modal title={title} onClose={()=>{if (!saveBusy.current) onClose();}}>
@@ -94,31 +139,30 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
       {!binding && <label>名称<input autoComplete="off" required value={name} disabled={saving || !!uncertain}
         placeholder="例如：个人网站" onChange={event=>setName(event.target.value)}/></label>}
       {!binding && name.trim() && !validName && <p className="error-text" role="alert">Team 名称须为 1—80 个字符。</p>}
-      {(window.cothinkDesktop || commands.browseProject) && <button type="button" disabled={busy || saving || !!uncertain} onClick={async()=>{
-        if (!window.cothinkDesktop) return browse(result?.canonicalPath ?? workspace?.project ?? undefined);
-        setBusy(true);
-        try {
-          const selected=await window.cothinkDesktop.chooseProjectDirectory(path.trim() || workspace?.project || undefined);
-          if(selected!==null) await choose(selected);
-        } catch(error) {setError(error.message);}
-        finally {setBusy(false);}
-      }}>选择或新建文件夹…</button>}
-      {path.trim() && <p className="workspace-directory">{validDirectory?"已选目录":"目录"}：{result?.canonicalPath ?? path.trim()}</p>}
+      {(window.cothinkDesktop || commands.browseProject) && <>
+        <button type="button" disabled={busy || saving || !!uncertain} onClick={pickDirectory}>选择或新建文件夹…</button>
+        <p className="field-note">新建会立即创建文件夹，取消或解除关联会保留它。{window.cothinkDesktop?.info?.platform==="darwin"
+          ? "要清理时，可在系统选择器的父目录中右键移到废纸篓，也可在访达处理。"
+          : "要清理时，可在系统文件管理器打开上级目录。"} </p>
+      </>}
+      {path.trim() && <p className="workspace-directory">{validDirectory?"已选目录":"目录"}：{result?.canonicalPath ?? path}</p>}
       {browser && <fieldset>
         <legend>浏览文件夹</legend>
         <p>{browser.path}</p>
         {browser.parent && <button type="button" disabled={busy} onClick={()=>browse(browser.parent)}>上一级</button>}
+        <button type="button" disabled={busy} onClick={()=>browse(browser.path)}>重新浏览</button>
         <button type="button" disabled={busy} onClick={()=>choose(browser.path)}>使用此文件夹</button>
         <ul>{browser.folders.map(folder=><li key={folder.path}><button type="button" disabled={busy} onClick={()=>browse(folder.path)}>{folder.name}</button></li>)}</ul>
-        <label>新文件夹名称<input value={folderName} onChange={event=>setFolderName(event.target.value)} /></label>
-        <button type="button" disabled={busy||!folderName.trim()} onClick={mkdir}>新建文件夹</button>
+        <label>新文件夹名称<input disabled={busy} value={folderName} onChange={event=>setFolderName(event.target.value)} /></label>
+        <button type="button" disabled={busy||browser.unverified||!folderName.trim()||
+          browser.folders.some(folder=>folder.name===folderName.trim())} onClick={mkdir}>新建文件夹</button>
       </fieldset>}
       <details>
         <summary>手动输入路径</summary>
         <label>{binding ? "项目绝对路径" : "项目绝对路径（可选）"}
           <input aria-label="项目绝对路径" required={binding} autoComplete="off" value={path} list="recent-projects"
             disabled={saving || !!uncertain} placeholder="/Users/you/projects/example" onChange={event=>{
-              ++request.current; setBusy(false); setPath(event.target.value); setResult(null); setExisting(null); setError("");
+              ++request.current; setBusy(false); setPath(event.target.value); setResult(null); setExisting(null); setBrowser(null); setError("");
             }}/>
         </label>
         <datalist id="recent-projects">{projects.map(project=><option key={project} value={project}/>)}</datalist>
@@ -137,7 +181,8 @@ export function ProjectDialog({commands, workspace, projects = [], defaultRoster
         </dl></details>}
       </div>}
       {error && <p role="alert" className="error-text">{error}</p>}
-      {uncertain?.operationId && <button type="button" disabled={saving} onClick={query}>查询原目录变更</button>}
+      {uncertain?.workspaceId && <button type="button" disabled={saving} onClick={query}>
+        {uncertain.operationId ? "查询原目录变更" : "查询原 Team"}</button>}
       {existing && <button type="button" onClick={()=>onOpenExisting(existing)}>打开 · {existing.name}</button>}
       <div className="form-actions">
         <button type="button" onClick={onClose} disabled={saving}>取消</button>
@@ -159,12 +204,19 @@ export function ProjectPreparationDialog({commands,path,initialPreparation,onClo
     active.current=true;setBusy(true);setError("");
     try {
       const value=await commands.prepareProject({action,operationId,...extra});
+      if (action === "query" && value.status === "missing") {
+        if (unknown === "preview") {
+          setOperationId(crypto.randomUUID());setResult(null);setSelected([]);setUnknown(false);
+          setError("未找到原盘点结果，可以重新盘点。");
+        } else setError("未找到原操作记录。请先核对目录状态。");
+        return;
+      }
       if (value.operationId && value.operationId!==operationId) setOperationId(value.operationId);
       setResult(value);setUnknown(false);
       if (value.status==="ready") onReady?.();
     } catch(error) {
       setError(error.message);
-      setUnknown(!!error.unknown);
+      if (error.unknown) setUnknown(previous=>previous||action);
     } finally {active.current=false;setBusy(false);}
   }
   const status=result?.status;

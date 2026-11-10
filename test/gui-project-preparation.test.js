@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { git, textGit } from "../packages/agent-sync/src/git.js";
@@ -44,6 +44,93 @@ test("previews without creating .git and commits exactly the selected bytes", as
   assert.equal(readFileSync(join(path, ".env"), "utf8"), "secret");
   assert.equal((await run("query")).status, "ready");
   assert.equal((await run("confirm")).commit, preview.expectedCommit);
+});
+
+test("does not enter an unreadable subtree excluded by Git", { skip: process.platform === "win32" }, async t => {
+  const { path, run } = fixture(t);
+  const ignored = join(path, "build-cache");
+  mkdirSync(ignored);
+  writeFileSync(join(path, ".gitignore"), "/build-cache/\n");
+  chmodSync(ignored, 0);
+  try {
+    const result = await run("preview");
+    assert.equal(result.status, "inventory");
+    assert.deepEqual(result.files.map(file => file.path), [".gitignore"]);
+    assert.deepEqual(result.ignored, [{ path: "build-cache", reason: "gitignore" }]);
+  } finally {
+    chmodSync(ignored, 0o700);
+  }
+});
+
+test("confirms an older inventory that listed the contents of a Git-ignored directory", async t => {
+  const { home, path, operationId, run } = fixture(t);
+  mkdirSync(join(path, "cache"));
+  writeFileSync(join(path, ".gitignore"), "/cache/\n");
+  writeFileSync(join(path, "cache", "artifact"), "not tracked");
+  await run("preview", { selectedPaths: [".gitignore"] });
+  const record = join(home, "gui-project-preparation", operationId + ".json");
+  const old = JSON.parse(readFileSync(record, "utf8"));
+  delete old.inventoryVersion;
+  const cache = lstatSync(join(path, "cache"), { bigint: true });
+  old.directories.push(["cache", [String(cache.dev), String(cache.ino)]]);
+  old.ignored = [{ path: "cache/artifact", reason: "gitignore" }];
+  writeFileSync(record, JSON.stringify(old));
+  assert.equal((await run("confirm")).status, "ready");
+  assert.equal(await textGit(path, ["ls-files"]), ".gitignore");
+});
+
+test("protects an OS home and its ancestors even when an old preview exists", t => {
+  const { dir, home, operationId } = fixture(t);
+  const osHome = realpathSync(home);
+  const appData = join(osHome, ".cothink");
+  mkdirSync(appData);
+  const state = join(appData, "gui-project-preparation");
+  mkdirSync(state);
+  writeFileSync(join(state, operationId + ".json"), JSON.stringify({
+    status: "preview", operationId, path: osHome, root: osHome,
+  }));
+  const source = new URL("../src/gui-project-preparation.js", import.meta.url).href;
+  execFileSync(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import {homedir} from 'node:os';
+    import {randomUUID} from 'node:crypto';
+    const {prepareGuiProject}=await import(${JSON.stringify(source)});
+    const [home, ancestor, id]=process.argv.slice(1);
+    const denied={code:'PROJECT_PREPARATION_PROTECTED'};
+    assert.equal(homedir(),${JSON.stringify(osHome)});
+    const {existsSync,realpathSync}=await import('node:fs');
+    const protectedPaths=[homedir(),ancestor];
+    for (const path of [...protectedPaths]) {
+      const alias=path.toUpperCase();
+      if(existsSync(alias)&&realpathSync.native(alias)===realpathSync.native(path))protectedPaths.push(alias);
+    }
+    for (const path of protectedPaths) {
+      await assert.rejects(prepareGuiProject(home,{action:'preview',path,operationId:randomUUID()}),denied);
+    }
+    for (const action of ['query','confirm','finish']) {
+      await assert.rejects(prepareGuiProject(home,{action,operationId:id}),denied);
+    }
+  `, appData, realpathSync(dir), operationId], { env: { ...process.env, HOME: osHome, USERPROFILE: osHome } });
+  assert.equal(existsSync(join(osHome, ".git")), false);
+});
+
+test("a damaged preparation record blocks only its own repository", async t => {
+  const { dir, home, path, operationId, run } = fixture(t);
+  const other = join(dir, "unrelated");
+  mkdirSync(other);
+  await git(path, ["init", "--template=", "--initial-branch=fixture"]);
+  await run("preview", { selectedPaths: [] });
+  assert.equal((await run("confirm")).status, "ready");
+  const otherId = randomUUID();
+  const prepareOther = (action, extra = {}) => prepareGuiProject(home, { action, operationId: otherId, ...extra });
+  await prepareOther("preview", { path: other, selectedPaths: [] });
+  assert.equal((await prepareOther("confirm")).status, "ready");
+  writeFileSync(join(home, "gui-project-preparation", operationId + ".json"), "{");
+  assert.ok((await inspectGuiPreparation(other, home)).head);
+  await assert.rejects(inspectGuiPreparation(path, home), { code: "PROJECT_PREPARATION_DAMAGED" });
+  const alias = path.toUpperCase();
+  if (existsSync(alias) && realpathSync.native(alias) === realpathSync.native(path))
+    await assert.rejects(inspectGuiPreparation(alias, home), { code: "PROJECT_PREPARATION_DAMAGED" });
 });
 
 test("changing confirmed bytes requires a new preview and preserves files", async t => {

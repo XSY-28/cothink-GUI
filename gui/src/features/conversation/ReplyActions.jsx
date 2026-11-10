@@ -1,5 +1,6 @@
 import React from "react";
 import {Icon} from "../../Icon.js";
+import {statusLabel} from "../../view.js";
 import styles from "./Conversation.module.css";
 
 function ReplyAction({icon, label, onClick, disabled, description}) {
@@ -9,6 +10,23 @@ function ReplyAction({icon, label, onClick, disabled, description}) {
     </button>
     <span className={styles.replyTooltip} role="tooltip" aria-hidden="true">{label}</span>
   </span>;
+}
+
+export function StopButton({stopping, activeStatus, onClick}) {
+  const check = stopping?.status === "stop_unknown";
+  const label = check ? "核对停止" : stopping ? statusLabel(stopping.status) : "停止";
+  return <button type="button" className="stop-button" disabled={!check && (!!stopping || activeStatus === "cancelling")} onClick={onClick}>{label}</button>;
+}
+
+export function WorkProposal({turn, disabled, onConfirm}) {
+  const blocker=turn.confirmationBlocker;
+  return <>
+    <pre className={styles.proposalText}>{turn.finalText}</pre>
+    {!turn.confirmationIntent?.consumedByTaskId && <>
+      {blocker && <p className="field-note">{blocker}</p>}
+      <button type="button" disabled={disabled||!!blocker} onClick={onConfirm}>确认上述计划并执行</button>
+    </>}
+  </>;
 }
 
 export function UserMessage({turn, onCopy}) {

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { backend, begin, replace } from "./helpers/repository.js";
+import { backend, begin, git, invalidUtf8Tree, replace, repository } from "./helpers/repository.js";
+import { entries } from "../src/git.js";
 test("C03/C05 released authorization cannot edit while expanded scope is blocked; same request can later reacquire", async (t) => {
   const { v } = await backend(t),
     a = await begin(v, "a", ["a.txt"]);
@@ -72,4 +73,20 @@ test("C03/C05 readonly observation cannot acquire hidden write authority through
   );
   const writer = await begin(v, "writer", ["a.txt"], { wait: false });
   assert.equal(writer.status, "open");
+});
+
+test("a malformed tracked filename cannot alias a literal replacement character in the source tree", async t => {
+  const {project} = repository(t);
+  const {version} = await invalidUtf8Tree(project);
+  await assert.rejects(entries(project, version), {code:"PATH"});
+});
+
+test("fixed version reads ignore Git replacement refs", async t => {
+  const {v, project, baseVersion} = await backend(t);
+  const authorized = git(project, "rev-parse", baseVersion + ":a.txt");
+  const unselected = git(project, "rev-parse", baseVersion + ":b.txt");
+  git(project, "replace", authorized, unselected);
+  assert.equal(git(project, "cat-file", "blob", authorized), "base B", "replacement is active in ordinary Git");
+  const value = await v.read({version:baseVersion, path:"a.txt"});
+  assert.equal(Buffer.from(value.contentBase64, "base64").toString(), "base A\n");
 });

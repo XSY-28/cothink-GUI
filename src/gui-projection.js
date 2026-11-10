@@ -160,6 +160,7 @@ export function projectGuiTask(record, requests = [], sessionEntries = []) {
     sessionId: record.sessionId,
     createdAt: record.createdAt ?? null,
     endedAt: record.endedAt ?? null,
+    cancelRequestedAt: record.cancelRequestedAt ?? null,
     cancelSettledAt: record.cancelSettledAt ?? null,
     input: record.input,
     materials:(record.materials??[]).map(({ownerId,...ref})=>clone(ref)),

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { fixture } from "./helpers/pi-fixture.js";
 import { git, repository } from "./helpers/git-fixture.js";
 import { createTeamConfig } from "../src/teams.js";
@@ -10,13 +10,18 @@ import { saveConfig } from "../src/config.js";
 import { startGuiServer } from "../src/gui-server.js";
 import { createGuiController } from "../src/gui-controller.js";
 import { payloadImageHashes } from "../src/visual-preview.js";
+import { editorTurnInput } from "../src/gui-turn-options.js";
+import { readTask } from "../src/task.js";
+import { invalidUtf8Tree } from "../packages/agent-sync/test/helpers/repository.js";
+import { listGuiProjectMaterials, readGuiProjectMaterial } from "../src/gui-materials.js";
+import { readProjectContext } from "../src/versioning.js";
 
 const hash=bytes=>createHash("sha256").update(bytes).digest("hex");
 const png=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAFElEQVR42mNklAtgYGBgYmBgQFAACEIAdYij2wsAAAAASUVORK5CYII=","base64");
 const editor=(materials=[],text="")=>({editorVersion:2,text,materials,workRequest:null,selectionId:null,editId:randomUUID()});
 
-async function setup(t,controllerOptions={}){
-  const f=await fixture(t);
+async function setup(t,controllerOptions={}, modelHandler){
+  const f=await fixture(t,modelHandler);
   const config=createTeamConfig({formatVersion:2,...f.models},"fixture",randomUUID());
   saveConfig(f.home,config);
   const path=join(f.home,"pi","models.json"),catalog=JSON.parse(readFileSync(path,"utf8"));
@@ -120,6 +125,69 @@ test("project copy import checks exact preview bytes and folder identity; fixed 
   constraints:{readOnly:false,allowedSubtasks:["review","work"],requireDifferentModelReview:false},budget:{maxCalls:null},readAuthorization:{paths:["a.txt"],version:saved.version}});
  assert.equal(send.status,409,await send.clone().text());
  assert.equal((await send.json()).code,"READ_VERSION");assert.equal(f.calls.length,0);
+});
+
+test("fixed-version selection preserves literal paths and text; binary context reads are refused",async t=>{
+ const repo=repository(t),root=realpathSync(repo.project),sessionId=randomUUID();
+ const chosenPath=" docs/example.py",differentPath="docs/private.txt",commaPath="guide,notes.txt",imagePath=" docs/pixel.png";
+ const input="Read the authorized fixed version",source="\n    print('fixture')\n";
+ mkdirSync(join(root," docs"));mkdirSync(join(root,"docs"));
+ for(const [path,body] of [[chosenPath,source],[differentPath,"PRIVATE_MARKER"],[commaPath,"comma-name fixture"],[imagePath,png]])
+   writeFileSync(join(root,path),body);
+ git(root,"status","--porcelain");
+ git(root,"add","--",chosenPath,differentPath,commaPath,imagePath);
+ git(root,"commit","-m","audit fixture with exact path spellings");
+ const paths=[chosenPath,differentPath,commaPath,imagePath];
+ const f=await setup(t,{},(_,n)=>n===1?{toolCalls:paths.map(path=>({
+   name:"read_project_context",args:{operation:"read",paths:[path]},
+ }))}:{text:"fixture answer"});
+ const session=await f.open(sessionId,root);
+ const saved=await f.ok(f.action("project.materials",{ownerId:sessionId,source:"saved"}));
+ const scoped=await f.ok(f.action("project.materials",{ownerId:sessionId,source:"saved",path:" docs",version:saved.version}));
+ assert.ok(saved.entries.some(entry=>entry.path===commaPath));
+ assert.ok(scoped.entries.some(entry=>entry.path===chosenPath));
+ assert.ok(!scoped.entries.some(entry=>entry.path===imagePath),"the saved-version text picker does not offer images");
+ const location={project:root,workspaceId:session.workspaceId};
+ const options={id:randomUUID(),readAllowed:true,readPaths:[" docs",commaPath],readProject:root,
+   readWorkspaceId:session.workspaceId,readVersion:saved.version};
+ assert.deepEqual(editorTurnInput({...options,readPaths:" docs"},location).readAuthorization.paths,[" docs"],"old picker values remain literal");
+ const chosen={...editor([],input),turnOptions:options};
+ await f.ok(f.action("session.draft",{sessionId,...chosen,expectedDraftRevision:session.draftRevision,branchAnchor:session.branchAnchor}));
+ const result=await f.ok(f.action("task.submit",{sessionId,input,submissionId:randomUUID(),protocolVersion:1,editorEditId:chosen.editId,
+   ...editorTurnInput(options,location)}));
+ assert.equal((await f.complete(result.taskId)).status,"completed");
+ assert.deepEqual(readTask(f.home,result.taskId).readAuthorization.paths,[" docs",commaPath]);
+ const responses=f.calls[1].body.messages.filter(message=>message.role==="tool").map(message=>message.content);
+ assert.deepEqual(JSON.parse(responses[0]).items.map(({text})=>text),source.split("\n"));
+ assert.match(responses[1],/unauthorized/);
+ assert.ok(!responses.some(response=>response.includes("PRIVATE_MARKER")));
+ assert.equal(JSON.parse(responses[2]).items[0].path,commaPath);
+ assert.match(responses[3],/UTF-8 text/);
+});
+
+test("saved material listing and context reads never alias a malformed filename to a selected name",async t=>{
+ const {home,project}=repository(t),root=realpathSync(project);
+ const {version,validName}=await invalidUtf8Tree(root),stat=statSync(root,{bigint:true});
+ const saved={source:"saved",root,path:root,scope:".",version,identity:[String(stat.dev),String(stat.ino)]};
+ const readAuthorization={version,canonicalRepo:root,paths:[validName]};
+ const task={home,record:{readAuthorization}};
+ const result=await readProjectContext(task,{operation:"read",paths:[validName]});
+ assert.deepEqual(result.items,[{path:validName,line:1,text:"AUTHORIZED"}]);
+ const listing=await listGuiProjectMaterials(saved);
+ assert.deepEqual(listing.entries.map(({path,fileCount})=>[path,fileCount]),[[validName,1]]);
+});
+
+test("saved material and ordinary Git context reads ignore replacement refs",async t=>{
+ const {home,project,baseVersion:version}=repository(t),root=realpathSync(project);
+ const authorized=git(root,"rev-parse",version+":a.txt"),unselected=git(root,"rev-parse",version+":b.txt");
+ git(root,"status","--porcelain");
+ git(root,"replace",authorized,unselected);
+ assert.equal(git(root,"cat-file","blob",authorized),"base B");
+ const readAuthorization={version,canonicalRepo:root,paths:["a.txt"]};
+ const result=await readProjectContext({home,record:{readAuthorization}},{operation:"read",paths:["a.txt"]});
+ assert.deepEqual(result.items.map(({text})=>text),["base A",""]);
+ const stat=statSync(root,{bigint:true}),saved={source:"saved",root,path:root,scope:".",version,identity:[String(stat.dev),String(stat.ino)]};
+ assert.equal((await readGuiProjectMaterial(saved,"a.txt")).bytes.toString(),"base A\n");
 });
 
 test("a lost ready response is recoverable, while a removed attachment never reappears on replay",async t=>{

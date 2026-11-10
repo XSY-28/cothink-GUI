@@ -1,5 +1,5 @@
 import {contextToolNames,contextDigest,contextSnapshot,contextState,readContextDisk,compactContext,contextOperationView} from './context-management.js';
-import {validateEditorTurnOptions,editorTurnInput,isGuiFileTask} from "./gui-turn-options.js";
+import {validateEditorTurnOptions,editorTurnInput,isGuiFileTask,guiNetworkBlocker} from "./gui-turn-options.js";
 import {resolveBuiltinSkills,validateBuiltinSkills,builtinSkillNames,capabilitySnapshot} from './builtin-skills.js';
 import {freezeAnswerSkills} from './context.js';
 import {createGuiMaterialStore,GUI_MATERIAL_CAPABILITIES,listGuiProjectMaterials,readGuiProjectMaterial} from './gui-materials.js';
@@ -7,15 +7,14 @@ import {taskSkillDirectory} from './skill-resources.js';
 import {resolvePackageResources} from './packages.js';
 import {
   createGuiWorkspace, importGuiWorkspaceProjects, isWorkspaceId, isWorkspaceProject,
-  readGuiWorkspaces, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError, workspaceForProject, workspaceForSession,
+  readGuiWorkspaces, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError, workspaceForProject, workspaceForSession, sameWorkspaceDirectory,
 } from "./gui-workspace-state.js";
-import {persistNewGuiSession, assertNewGuiSessionId} from "./gui-session-persistence.js";
+import {persistNewGuiSession, assertNewGuiSessionId, scopeAfterTruncatedTail} from "./gui-session-persistence.js";
 import {guiFiles, guiFile, guiFileDiff} from "./gui-files.js";
 import {readSessionUiState, writeSessionUiState, writeSessionViewState, initializeSessionView, readHomeDraft, writeHomeDraft, sessionStateError} from "./session-ui-state.js";
 import {createUpdateService, formatUpdateStatus, updateInstructions} from "./updates.js";
-import { readFileSync, readdirSync, statSync, existsSync, mkdirSync } from "node:fs";
-import { join, basename, dirname, relative, isAbsolute } from "node:path";
-import { homedir } from "node:os";
+import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
+import { join, basename, relative, isAbsolute } from "node:path";
 import { prepareGuiProject } from "./gui-project-preparation.js";
 import { randomUUID, createHash } from "node:crypto";
 import { SessionManager, CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
@@ -28,7 +27,7 @@ import {
   selectedResources,
   secretValues,
 } from "./pi-runtime.js";
-import {runProjectTurn,unifiedProtocol,normalizeConstraints,normalizeRootBudget,loadPreparedContinuation,freezeReadAuthorization,reserveConfirmation,confirmationState,executeConfirmed,resolveDelivery,rootUsage,assertRootOwner,createRootOwner} from "./project-turn.js";
+import {runProjectTurn,unifiedProtocol,normalizeConstraints,normalizeRootBudget,loadPreparedContinuation,freezeReadAuthorization,reserveConfirmation,confirmationState,executeConfirmed,resolveDelivery,rootUsage,assertRootOwner,createRootOwner,workConfirmationBlocker} from "./project-turn.js";
 import { cothinkExtension } from "./extensions/cothink.js";
 import { createTask,readTask, readRequests, taskDisplayStatus } from "./task.js";
 import {
@@ -74,7 +73,8 @@ import {
 import {
   inspectGuiProject,
   inspectGuiDirectory,
-  savedDirectoryAvailable, fileWorkStatus, requireFileWork,
+  inspectWorkspaceProject, browseProjectFolders, makeProjectFolder,
+  savedDirectoryAvailable, fileWorkStatus, requireFileWork, requireGuiFileTask, workspaceDirectoryFacts,
   guiDiff,
   guiOutput,
   guiArtifact,
@@ -313,6 +313,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   // Disposable summaries: stat every dependency, parse only changed durable bytes.
   // No request bodies, reviewer text or second persisted conversation store.
   const taskCache = new Map(), sessionCache = new Map(), fileListCache = new Map();
+  const hasFileWork = record => !!(record.work || record.deliveryRef || record.projectOperation?.childTaskIds?.length);
   async function files(id) {
     const record=rawTask(id).record;
     const key=JSON.stringify(record.work ?? null);
@@ -343,9 +344,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           const record = readTask(home, id);
           if (!Array.isArray(record.requestIds) || record.requestIds.some(r=>typeof r !== "string" || !/^[0-9a-f-]{36}$/.test(r)) || typeof record.input !== "string" || typeof record.createdAt !== "string") throw Error("task summary");
           cached.requestIds = record.requestIds;
-          cached.value = {id: record.id, sessionId: record.sessionId, submissionId: record.submissionId,
+          cached.value = {id: record.id, sessionId: record.sessionId, submissionId: record.submissionId, editorEditId:record.editorEditId,
             createdAt: record.createdAt, cancelSettledAt: record.cancelSettledAt ?? null, input: record.input, status: taskDisplayStatus(record),
-            origin:record.origin,sourceLeaf:record.sourceLeaf,sourceSnapshot:record.sourceSnapshot,contextResult:record.contextResult,singleModel: record.singleModel, flow:record.flow, proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,projectPreparationBlocked:record.projectPreparationBlocked,continuationSource:record.continuationSource,materials:record.materials,inputDigest:record.inputDigest,hasWork: !!record.work||!!record.deliveryRef||!!record.projectOperation?.childTaskIds?.length, finalText: ""};
+            origin:record.origin,sourceLeaf:record.sourceLeaf,sourceSnapshot:record.sourceSnapshot,contextResult:record.contextResult,singleModel: record.singleModel, flow:record.flow, proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,confirmationBlocker:workConfirmationBlocker(record),projectPreparationBlocked:record.projectPreparationBlocked,continuationSource:record.continuationSource,materials:record.materials,inputDigest:record.inputDigest,hasWork:hasFileWork(record), finalText: ""};
           try {
             cached.value.finalText = finalGuiText(record, readRequests(home, record),home);
             cached.value.resultRevision = guiResultRevision(record,cached.value.finalText);
@@ -446,18 +447,20 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       if (!cached || cached.stamp !== stamp) {
         cached = {stamp, legacySeenResults:cached?.legacySeenResults};
         try {
-          // Discover the header even when a later line is damaged; never silently hide it.
-          const raw = readFileSync(path, "utf8"), header = JSON.parse(raw.split("\n").find(Boolean));
+          const lines = readFileSync(path, "utf8").split("\n").filter(Boolean), header = JSON.parse(lines[0]);
           if (header.type !== "session" || !/^[0-9a-f-]{36}$/.test(header.id)) throw Error("header");
           cached.info = {id: header.id, cwd: header.cwd, path, modified: statSync(path).mtime};
           try {
-            const entries = raw.split("\n").filter(Boolean).map(line => JSON.parse(line));
+            const entries = lines.map(line => JSON.parse(line));
             const manager = SessionManager.inMemory(header.cwd, undefined, entries);
+            try { cached.branches=branchFacts(manager); } catch { /* A damaged sibling prevents rebind, not a valid branch read. */ }
             cached.branch = {meta: readConversationMetadata(manager), ...workspaceFacts(manager),
               ids: conversationTaskIds(manager)};
             readSessionMode(manager); readSessionTeam(manager.getBranch());
-            try { cached.branches=branchFacts(manager); } catch { /* A damaged sibling prevents rebind, not a valid branch read. */ }
-          } catch { cached.error = "会话历史损坏或不可用；原文件保留，请修复后重新打开。"; }
+          } catch {
+            cached.error = "会话历史损坏或不可用；原文件保留，请修复后重新打开。";
+            cached.branches ??= scopeAfterTruncatedTail(lines,home,unifiedProtocol);
+          }
         } catch { /* Unidentifiable headers cannot become selectable IDs. */ }
         sessionCache.set(path, cached);
       }
@@ -642,7 +645,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     const submissions = () => (records ?? taskRecords())
       .filter((t) => t.sessionId === id)
       .filter((t) => t.submissionId)
-      .map((t) => ({ taskId: t.id, submissionId: t.submissionId }));
+      .map(t => ({taskId:t.id,submissionId:t.submissionId,...(t.editorEditId?{editorEditId:t.editorEditId}:{})}));
     try {
       const infos = await summaries();
       const info = infos.find(item => item.id === id);
@@ -662,6 +665,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         return {
           taskId: record.id,
           flow:record.flow,proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,
+          confirmationBlocker:current?workConfirmationBlocker(record):record.confirmationBlocker,
           projectPreparationBlocked:record.projectPreparationBlocked??null,continuationSource:record.continuationSource??null,
           createdAt: record.createdAt ?? null,
           endedAt: record.endedAt ?? null,
@@ -763,13 +767,14 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (active && live.has(active.taskId)) {
       const task = live.get(active.taskId), record = task.record;
       const finalText = finalGuiText(record,task.requests(),home);
-      byTask.set(record.id,{...record,status:taskDisplayStatus(record),finalText,
+      byTask.set(record.id,{...record,status:taskDisplayStatus(record),finalText,hasWork:hasFileWork(record),
         resultRevision:guiResultRevision(record,finalText)});
     }
     const rows = [], workspaceRows = new Map();
     const needle = query.trim().toLocaleLowerCase();
     const prompts = new Set([...extensionPrompts.values()].map(prompt => prompt.sessionId));
     const attentionRank = {running:1,unread:2,needs_attention:3};
+    const archiveMatches = value => archived === "all" || (archived === "archived") === !!value;
     for (const id of new Set([...infos.map(i=>i.id), ...holders.keys()])) {
       const info = infos.find(i=>i.id===id), holder = holders.get(id);
       let branch = info?.branch, error = info?.error;
@@ -824,15 +829,16 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       const row = {id, title, summary,hasDraft,running:active?.sessionId===id, project: association?.project ?? null, updatedAt: info?.modified.toISOString() ?? null,
         lastOpenedAt, persisted: !!info, readOnly: !!error || !!membership.workspaceError || !!nav.navigationError ||
           !!membership.workspaceArchived || !!nav.navigation?.archived || (!holder && sessionWriterBusy(join(home,"pi"),id)), ...membership, ...nav};
+      if ((project !== undefined && row.project !== project) || (workspaceId !== undefined && row.workspaceId !== workspaceId) ||
+          !archiveMatches(row.navigation?.archived || row.workspaceArchived)) continue;
       if (needle) {
         const sources = [{text:title,taskId:null,field:"title"}, ...(!error ? turns.flatMap(t=>[
           {text:t.input,taskId:t.id,field:"input"}, {text:t.finalText,taskId:t.id,field:"finalText"}]) : [])];
         let match = sources.find(m=>m.text?.toLocaleLowerCase().includes(needle));
-        if((!match || match.field==="finalText" && turns.find(t=>t.id===match.taskId)?.proposalRef)&&!error) {
+        if (!error) {
           for(const turn of turns) {
+            if(!turn.hasWork)continue;
             try {
-              const record=rawTask(turn.id).record;
-              if(!record.work&&!record.deliveryRef&&!record.projectOperation?.childTaskIds?.length)continue;
               const list=await files(turn.id), item=list.items.find(f=>f.name.toLocaleLowerCase().includes(needle));
               if(item){match={text:item.name,taskId:turn.id,field:"file",fileRef:item.ref};break;}
             } catch(e) {errors.push({taskId:turn.id,error:e.message});}
@@ -845,11 +851,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       rows.push(row);
     }
     const projects = [...new Set(infos.map(i=>i.branch?.project).filter(Boolean).concat([...holders.values()].map(h=>workspaceFacts(h.sessionManager).project).filter(Boolean)))];
-    const archiveMatches = value => archived === "all" || (archived === "archived") === !!value;
-    const filtered = rows.filter(r => (project === undefined || r.project === project) &&
-      (workspaceId === undefined || r.workspaceId === workspaceId) &&
-      archiveMatches(r.navigation?.archived || r.workspaceArchived));
-    filtered.sort((a,b) => Number(!!b.navigation?.pinned)-Number(!!a.navigation?.pinned) ||
+    const filtered = rows.sort((a,b) => Number(!!b.navigation?.pinned)-Number(!!a.navigation?.pinned) ||
       (b.lastOpenedAt ?? "").localeCompare(a.lastOpenedAt ?? "") ||
       (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || a.id.localeCompare(b.id));
     const workspaces = table ? table.workspaces.map(item => {
@@ -984,7 +986,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     const historyErrors = page.errors;
     const workspaces = page.workspaces === null ? null : await Promise.all(page.workspaces.map(async workspace => ({
       ...workspace,
-      projectAvailable: workspace.project === null ? null : savedDirectoryAvailable(workspace.project),
+      ...workspaceDirectoryFacts(home, workspace.project),
     })));
     return safe({
       version: notes.version,
@@ -1034,6 +1036,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         ? {
             origin:active.origin??null,taskId: active.taskId,
             sessionId: active.sessionId,
+            cancelRequested: active.abort.signal.aborted,
             status: live.has(active.taskId) ? taskDisplayStatus(live.get(active.taskId).record) : "preparing",
           }
         : null,
@@ -1132,16 +1135,16 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       submissionId.length > 200
     )
       throw Error("submissionId 必须是 1—200 字符。");
-    const prior = taskRecords().find(
-      (t) => t.sessionId === sessionId && t.submissionId === submissionId,
-    );
+    const {records,errors}=taskIndex();
+    const prior = records.find(t=>t.sessionId===sessionId && t.submissionId===submissionId)
+      ?? (args.editorEditId && records.find(t=>t.sessionId===sessionId && t.editorEditId===args.editorEditId));
     if (prior) {
       if(prior.inputDigest?prior.inputDigest!==inputDigest:
         prior.input!==input||refs.length||continuation&&prior.continuationSource?.taskId!==continuation.source.id)
         throw materialError("SUBMISSION_CONFLICT","同一提交标识已经绑定不同内容。");
       return { taskId: prior.id, sessionId: prior.sessionId };
     }
-    if (taskIndex().errors.length)
+    if (errors.length)
       throw Error(
         "存在损坏任务记录，无法确认旧提交身份；请保留并修复记录后再提交。历史和设置仍可查看。",
       );
@@ -1149,7 +1152,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       if(active.inputDigest!==inputDigest)throw materialError("SUBMISSION_CONFLICT","同一提交标识已经绑定不同内容。");
       return active.ready;
     }
-    if (continuation && taskRecords().some(task=>task.continuationSource?.taskId===continuation.source.id))
+    if (continuation && records.some(task=>task.continuationSource?.taskId===continuation.source.id))
       throw Object.assign(Error("原工作已有续作，请核对该次提交。"),{code:"PROJECT_CONTINUATION_EXISTS"});
     if (active || management || oauthBusy())
       throw Error("当前任务或设置尚未结束；草稿保留，不自动排队。");
@@ -1158,7 +1161,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if(slash&&!slash[1].startsWith("skill:"))
       throw materialError("COMMAND_UNAVAILABLE",["one","cothink","project"].includes(slash[1])?"统一会话已移除旧模式命令。":"本地或未知命令不能作为模型问题发送。");
     assertSessionUnarchived(sessionId);
-    void checkForUpdates();
     let resolveReady, rejectReady;
     const ready = new Promise((yes, no) => {
       resolveReady = yes;
@@ -1187,7 +1189,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             if (readSessionProject(manager)!==continuation.source.workspace.project ||
                 (membership.workspaceId??null)!==(continuation.source.workspace.id??null))
               throw Error("原工作任务的目录或 Team 已变化。");
-            await requireFileWork(home,readSessionProject(manager),continuation.source.workspace.directoryIdentity??undefined);
           }
           if (holder.runtime?.selectionError || holder.selectionError)
             throw Error(
@@ -1227,19 +1228,14 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           snapshot.guiResourceOptions=resources.options;
           snapshot.projectDirectoryAvailable=resources.projectAvailable;
           snapshot.workspace.directoryIdentity=resources.projectAvailable?directoryIdentity(snapshot.workspace.project):null;
-          if (!confirmation && !continuation && isGuiFileTask(input, {
+          if (!confirmation && (continuation || isGuiFileTask(input, {
             readOnly: constraints.readOnly,
             fileWork: args.editorEditId !== undefined && (editor.turnOptions?.fileWork || !!editor.workRequest),
-          })) {
-            const {project,directoryIdentity:identity}=snapshot.workspace;
-            if (!project) throw workspaceError("PROJECT_NOT_PREPARED", "此对话尚未关联项目目录；文件任务未发送。");
-            try {
-              await requireFileWork(home,project,identity);
-            } catch (error) {
-              if (error.code !== "PROJECT_NOT_PREPARED") throw error;
-              throw workspaceError(error.code, `文件任务未发送。当前目录 ${project}：${error.message}`);
-            }
-          }
+          }))) await requireGuiFileTask(home,continuation
+            ? {...snapshot.workspace,directoryIdentity:continuation.source.workspace.directoryIdentity??undefined}
+            : snapshot.workspace,snapshot.config.work);
+          const networkBlocker=guiNetworkBlocker(input,constraints);
+          if(networkBlocker)throw workspaceError("NETWORK_POLICY",networkBlocker);
           const thinking = readConversationMetadata(manager).thinking;
           if (!confirmation && thinking !== undefined)
             snapshot.config.main.thinkingLevel = thinking;
@@ -1248,6 +1244,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           if(requestedRead?.version&&snapshot.readAuthorization?.version!==requestedRead.version)
             throw materialError("READ_VERSION","保存的项目版本已改变，请重新浏览和选择。");
           if(!manager.getBranch().some(e=>e.type==="custom"&&e.customType==="cothink-flow"&&e.data?.flow==="unified"))appendConversationEntry(holder,"cothink-flow",{flow:"unified",version:unifiedProtocol});
+          void checkForUpdates();
           // Publish the initialization promise before allowing later selection writes.
           return {
             snapshot,
@@ -1319,12 +1316,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       return {source,reservation,found};
     });
     if(prepared.found.task)return {taskId:prepared.found.task.id,sessionId:args.sessionId};
+    const blocker=workConfirmationBlocker(prepared.source);
+    if(blocker)throw Error(blocker);
     return submit({sessionId:args.sessionId,input:prepared.source.input,submissionId:prepared.reservation.submissionId},prepared);
-  }
-  function inspectWorkspaceProject(path) {
-    const project = inspectGuiDirectory(path);
-    if (!project.directoryAvailable) throw Error(project.reason);
-    return project.canonicalPath;
   }
   function directoryIdentity(path) {
     try {const s=statSync(path,{bigint:true});return [String(s.dev),String(s.ino)];}
@@ -1364,13 +1358,17 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     const files=directoryFiles(), found=new Map(infos.map(info=>[info.path,info]));
     const related=new Set(), legacyBindings=[];
     const directoryStamp=nextPath===null?null:signature(nextPath);
+    const affects=branch=>projectMembership(branch,table).workspaceId===current.id ||
+      sameWorkspaceDirectory(branch.project,current.project) || sameWorkspaceDirectory(branch.project,nextPath);
+    const unverified=branch=>branch.associationError ||
+      branch.marker!==undefined && projectMembership(branch,table).workspaceError;
     const snapshot=files.map(path=>{
       const info=found.get(path);
-      if (!info || signature(path)!==info.stamp || info.error || !info.branches || info.branches.some(branch=>branch.associationError))
+      if (!info || signature(path)!==info.stamp || !info.branches ||
+          info.branches.some(branch=>unverified(branch) || info.error && affects(branch)))
         throw workspaceError("WORKSPACE_CONFLICT","有旧会话的分支归属无法核对，目录未变更。",current);
       for (const branch of info.branches) {
-        if (projectMembership(branch,table).workspaceId===current.id ||
-            nextPath!==null && branch.project===nextPath) related.add(info.id);
+        if (affects(branch)) related.add(info.id);
         if (branch.marker===undefined && branch.project!==null)
           legacyBindings.push({sessionId:info.id,project:branch.project});
       }
@@ -1388,23 +1386,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         throw workspaceError("WORKSPACE_CONFLICT","新目录在核对期间改变。",current);
     };
     return {legacyBindings,verify};
-  }
-  function browseProjectFolders(input) {
-    const path=inspectWorkspaceProject(input??homedir());
-    const folders=readdirSync(path,{withFileTypes:true}).filter(entry=>entry.isDirectory()&&!entry.name.startsWith("."))
-      .map(entry=>({name:entry.name,path:join(path,entry.name)})).sort((a,b)=>a.name.localeCompare(b.name));
-    return {path,parent:dirname(path)===path?null:dirname(path),folders};
-  }
-  function makeProjectFolder(args) {
-    const {parent,name}=args;
-    if (typeof parent!=="string" || typeof name!=="string" || !name.trim() || name!==name.trim() ||
-        name==="." || name===".." || /[\x00-\x1f\x7f\\/:]/.test(name) || /[. ]$/.test(name))
-      throw Error("请输入一个新文件夹名称。");
-    const canonical=inspectWorkspaceProject(parent);
-    if (canonical!==parent) throw Error("父目录已改变，请重新浏览。");
-    const path=join(parent,name);
-    mkdirSync(path);
-    return {path:inspectWorkspaceProject(path)};
   }
   async function manageWorkspace(name,args) {
     const keys = name === "workspace.create" ? ["workspaceId","name","project","defaultRosterId"] :
@@ -1736,13 +1717,16 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (name === "session.create") {
       return writeSelection(async () => {
         const modern = Object.hasOwn(args,"workspaceId");
-        if (Object.keys(args).some(key => !["sessionId","workspaceId","project","sourceSessionId","sourceLeafId","homeDraftId"].includes(key)) ||
+        if (Object.keys(args).some(key => !["sessionId","workspaceId","project","sourceSessionId","sourceLeafId","homeDraftId","handoff"].includes(key)) ||
             modern && Object.hasOwn(args,"project") || modern && !isWorkspaceId(args.sessionId) ||
             args.sessionId !== undefined && !isWorkspaceId(args.sessionId) ||
             modern && args.workspaceId !== null && !isWorkspaceId(args.workspaceId) ||
             (args.sourceSessionId!==undefined || args.sourceLeafId!==undefined) &&
               (!modern || !isWorkspaceId(args.sourceSessionId) || typeof args.sourceLeafId!=="string") ||
-            args.homeDraftId!==undefined && (!modern || !isWorkspaceId(args.homeDraftId) || args.sourceSessionId!==undefined)) throw Error("新对话参数无效，请刷新页面。");
+            args.homeDraftId!==undefined && (!modern || !isWorkspaceId(args.homeDraftId) || args.sourceSessionId!==undefined) ||
+            args.handoff!==undefined && (!modern || !args.workspaceId || args.homeDraftId || !args.handoff ||
+              Object.keys(args.handoff).some(k=>!["project","text"].includes(k)) ||
+              !isWorkspaceProject(args.handoff.project) || typeof args.handoff.text!=="string")) throw Error("新对话参数无效，请刷新页面。");
         const id = args.sessionId ?? randomUUID();
         if (holders.has(id)) throw sessionStateError("SESSION_STATE_CONFLICT","会话 ID 已存在，请读取原 ID；本次未创建。");
         const writer = acquireSessionWriter(join(home,"pi"),id);
@@ -1770,11 +1754,14 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             }
           }
           if (workspace?.archived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。",workspace);
+          if (args.handoff && (project!==args.handoff.project || !savedDirectoryAvailable(project)))
+            throw workspaceError("WORKSPACE_CONFLICT","Team 默认目录已变化或不可用，请重新核对。",workspace);
           const manager = SessionManager.create(neutralDirectory(home),directory,{id});
           holder = {sessionManager:manager,writer,assertOwned:writer.assertOwned};
           appendConversationEntry(holder,"cothink-project",{project});
           appendConversationEntry(holder,"cothink-gui-workspace",{workspaceId:workspace?.id ?? null});
           appendConversationEntry(holder,"cothink-flow",{flow:"unified",version:unifiedProtocol});
+          if (args.handoff?.text) appendConversationEntry(holder,"cothink-draft",{text:args.handoff.text,editId:randomUUID()});
           if(args.homeDraftId){
             const homeDraft=readHomeDraft(home);
             if(homeDraft?.draftId!==args.homeDraftId||homeDraft.pendingCreateSessionId!==id||homeDraft.targetWorkspaceId!==args.workspaceId)

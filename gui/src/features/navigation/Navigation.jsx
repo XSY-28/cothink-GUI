@@ -1,5 +1,6 @@
 import React, {useCallback,useEffect,useId,useState,useRef} from "react";
 import {Icon} from "../../Icon.js";
+import {Modal} from "../../Modal.jsx";
 import {SidebarTeamAvatar,teamAvatarFor} from "../avatars/TeamAvatar.jsx";
 import styles from "./Navigation.module.css";
 
@@ -255,6 +256,7 @@ export function ConversationPicker({state, commands, scope, workspace, busy, onO
   const rows = loaded ? state.sessions.filter(row=>global || row.workspaceId === state.workspaceId) : [];
   const names = state.bootstrap.workspaces ?? [];
   const matches = global && loaded ? names.filter(row=>workspaceMatches.includes(row.id)) : [];
+  const error = loaded ? state.navigationError : null;
   return <div className={styles.picker}>
     {!global && <button className="primary" disabled={!canCreate} onClick={onCreateSession} aria-label="新建对话" aria-description={workspace?.name||"未分组"}><span aria-hidden="true">＋ </span>新建对话 <span className={styles.scopeLabel}>· {workspace?.name||"未分组"}</span></button>}
     {unknown ? <p className={styles.empty}>归属待核对。请从左侧选择工作，或搜索并打开健康的对话后再新建。</p> : <>
@@ -266,6 +268,10 @@ export function ConversationPicker({state, commands, scope, workspace, busy, onO
     <label className={styles.archiveFilter}><input type="checkbox" checked={loaded && navigationQuery.includeArchived}
       onChange={event=>commands.searchSessions({includeArchived:event.target.checked,scope})}/>包含归档</label>
     <div className={styles.pickerRows}>
+      {error && !state.navigationLoading && <div>
+        <p className="error-text" role="alert">读取失败：{error.message}</p>
+        <button onClick={()=>commands.loadSessions({more:error.more,showProgress:true})}>重试</button>
+      </div>}
       {matches.map(row=>{
         const hint = workspaceDirectoryHint(row,matches);
         return <button key={row.id} className={styles.workspaceRow} onClick={()=>onOpenWorkspace(row)}
@@ -278,9 +284,36 @@ export function ConversationPicker({state, commands, scope, workspace, busy, onO
         {global && <div className={styles.matchOwner}>{names.find(item=>item.id === row.workspaceId)?.name || (row.workspaceId === null ? "未分组" : "归属待核对")}</div>}
         <SessionRow session={row} selected={row.id === selectedSessionId} onOpen={onOpenSession} commands={global ? undefined : commands} active={state.bootstrap.active} />
       </div>)}
-      {!matches.length && !rows.length && <p className={styles.empty}>{state.navigationLoading ? "正在读取…" : navigationQuery.query ? "没有匹配结果。" : "暂无可显示的对话。"}</p>}
-      {loaded && nextCursor && <button onClick={()=>commands.loadSessions({more:true})}>加载更多</button>}
+      {state.navigationLoading && <p className={styles.empty} role="status">正在读取…</p>}
+      {!error && !state.navigationLoading && !matches.length && !rows.length &&
+        <p className={styles.empty}>{navigationQuery.query ? "没有匹配结果。" : "暂无可显示的对话。"}</p>}
+      {loaded && !error && nextCursor && <button disabled={state.navigationLoading} onClick={()=>commands.loadSessions({more:true,showProgress:true})}>加载更多</button>}
     </div>
     </>}
   </div>;
+}
+
+export function ConversationRename({initialTitle, onSave, onClose}) {
+  const [title, setTitle] = useState(initialTitle), [error, setError] = useState(""), [busy, setBusy] = useState(false);
+  const saving = useRef(false);
+  async function submit(event) {
+    event.preventDefault();
+    if (saving.current) return;
+    const value = title.trim();
+    if (!value || value.length > 200) {setError("标题需要 1—200 字符。");return;}
+    saving.current = true;
+    setBusy(true); setError("");
+    try {
+      await onSave(value);
+      onClose();
+    } catch (error) {setError(error.message);}
+    finally {saving.current=false;setBusy(false);}
+  }
+  return <Modal title="重命名对话" onClose={()=>{if(!saving.current)onClose();}}>
+    <form onSubmit={submit}>
+      <label>对话标题<input maxLength={200} value={title} disabled={busy} onChange={event=>{setTitle(event.target.value);setError("");}}/></label>
+      <div className="form-actions"><button className="primary" disabled={busy}>保存标题</button></div>
+      {error && <p className="error-text" role="alert">{error}</p>}
+    </form>
+  </Modal>;
 }

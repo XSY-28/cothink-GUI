@@ -12,6 +12,66 @@ const {saveConfig}=await load("src/config.js");
 const {createTeamConfig}=await load("src/teams.js");
 const {startGuiServer}=await load("src/gui-server.js");
 
+test("search failures and rejected renames stay actionable in their dialogs", async t => {
+  const f = await fixture(t);
+  saveConfig(f.home, createTeamConfig({formatVersion:2,...f.models}, "UI fixture", "7c8094cd-3476-4bfa-8f53-055d87972896"));
+  const {createGuiController} = await load("src/gui-controller.js");
+  const controller = await createGuiController({home:f.home,suggestedProject:null});
+  const {id} = await controller.action("session.create",{sessionId:crypto.randomUUID(),workspaceId:null});
+  await controller.action("session.name",{sessionId:id,title:"检索重命名测试"});
+  const host = await startGuiServer({controller,open:false});
+  t.after(()=>host.close());
+  const browser = await chromium.launch({headless:true});
+  t.after(()=>browser.close());
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  let searchAttempts = 0, renameAttempts = 0;
+  await page.route("**/api/sessions?*", async route => {
+    if (new URL(route.request().url()).searchParams.get("query") === "检索重命名" && ++searchAttempts === 1)
+      await route.fulfill({status:503,json:{error:"检索暂时失败。"}});
+    else await route.continue();
+  });
+  await page.route("**/api/action", async route => {
+    if (route.request().postDataJSON()?.action === "session.name" && ++renameAttempts === 1)
+      await route.fulfill({status:400,json:{error:"宿主拒绝这次重命名。"}});
+    else await route.continue();
+  });
+
+  await page.goto(host.url);
+  await page.getByRole("button",{name:"搜索",exact:true}).click();
+  const search = page.getByRole("dialog",{name:"搜索",exact:true});
+  await search.getByPlaceholder("搜索名称、对话或文件…").fill("检索重命名");
+  assert.match(await search.getByRole("alert").innerText(),/检索暂时失败/);
+  assert.equal(await search.getByText("没有匹配结果。",{exact:true}).count(),0);
+  await search.getByRole("button",{name:"重试",exact:true}).click();
+  await search.getByRole("button",{name:"检索重命名测试",exact:true})
+    .and(search.getByTitle("检索重命名测试",{exact:true})).waitFor();
+  assert.equal(await search.getByRole("alert").count(),0);
+  assert.equal(searchAttempts,2);
+
+  await page.keyboard.press("Escape");
+  await page.getByRole("button",{name:"对话",exact:true}).click();
+  const picker = page.getByRole("dialog",{name:"对话",exact:true});
+  await picker.getByLabel("检索重命名测试的菜单",{exact:true}).click();
+  await picker.getByRole("button",{name:"重命名",exact:true}).click();
+  const rename = page.getByRole("dialog",{name:"重命名对话",exact:true});
+  const title = rename.getByLabel("对话标题",{exact:true});
+  const save = rename.getByRole("button",{name:"保存标题",exact:true});
+  await title.fill("   ");
+  await save.click();
+  assert.match(await rename.getByRole("alert").innerText(),/标题需要/);
+  assert.equal(renameAttempts,0);
+  await title.fill("  新名称  ");
+  await save.click();
+  assert.match(await rename.getByRole("alert").innerText(),/宿主拒绝/);
+  assert.equal(await title.inputValue(),"  新名称  ");
+  await save.click();
+  await rename.waitFor({state:"hidden"});
+  assert.equal((await controller.session(id)).title,"新名称");
+  assert.equal(renameAttempts,2);
+  assert.equal(f.calls.length,0);
+});
+
 test('compact sidebar keeps three Teams and project conversations separate without model calls', async t => {
   const f = await fixture(t);
   saveConfig(f.home, createTeamConfig({formatVersion:2,...f.models}, 'UI fixture', '7c8094cd-3476-4bfa-8f53-055d87972896'));

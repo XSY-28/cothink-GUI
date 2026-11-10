@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync, unlinkSync } from "node:fs";
-import { dirname, extname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { privateDirectory, writePrivateBytes } from "./storage.js";
-import { git } from "../packages/agent-sync/src/git.js";
+import { git, gitTreeRecords } from "../packages/agent-sync/src/git.js";
 import { inScope, validProjectPath } from "./versioning.js";
+import { materialType } from "./gui-material-types.js";
 
 export const GUI_MATERIAL_CAPABILITIES = Object.freeze({
   mediaTypes: Object.freeze(["text/plain", "text/markdown", "image/png", "image/jpeg", "image/webp"]),
@@ -354,15 +355,6 @@ function directoryIdentity(path){
   try{const stat=statSync(path,{bigint:true});return [String(stat.dev),String(stat.ino)];}
   catch{return null;}
 }
-function projectMaterialType(path){
-  const ext=extname(path).toLowerCase();
-  if(ext===".png")return "image/png";
-  if(ext===".jpeg"||ext===".jpg")return "image/jpeg";
-  if(ext===".webp")return "image/webp";
-  if(ext===".md"||ext===".markdown")return "text/markdown";
-  if(!ext||[".txt",".json",".csv",".tsv",".xml",".yaml",".yml",".toml",".ini",".log",".js",".ts",".jsx",".tsx",".css",".html",".py",".sh",".rs",".go",".c",".h",".java",".sql",".tex",".diff",".patch"].includes(ext))return "text/plain";
-  return null;
-}
 const permittedMaterialPath=(path,source)=>validProjectPath(path,true)&&inScope(path,[source.scope]);
 function diskMaterialPath(root,path,asDirectory){
   let target=root;
@@ -377,11 +369,9 @@ function diskMaterialPath(root,path,asDirectory){
   return target;
 }
 async function savedMaterialEntries(source,path){
-  const entries=(await git(source.root,["--literal-pathspecs","ls-tree","-rz","--full-tree",source.version,"--",...(path==="."?[]:[path])],undefined,{GIT_NO_LAZY_FETCH:"1"})).toString("utf8").split("\0").filter(Boolean);
-  return entries.flatMap(line=>{
-    const tab=line.indexOf("\t"),[mode,type,object]=line.slice(0,tab).split(" "),name=line.slice(tab+1);
-    return type==="blob"&&["100644","100755"].includes(mode)&&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(object)&&permittedMaterialPath(name,source)?[{path:name,object}]:[];
-  });
+  const tree=await git(source.root,["--literal-pathspecs","ls-tree","-rz","--full-tree",source.version,"--",...(path==="."?[]:[path])],undefined,{GIT_NO_LAZY_FETCH:"1"});
+  return [...gitTreeRecords(tree,{skipInvalidUtf8:true})].flatMap(({mode,type,oid,path})=>
+    type==="blob"&&["100644","100755"].includes(mode)&&/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid)&&permittedMaterialPath(path,source)?[{path,object:oid}]:[]);
 }
 export async function listGuiProjectMaterials(source,{path=source.scope,cursor}={}){
   if(!permittedMaterialPath(path,source))throw problem("MATERIAL_SOURCE","目录超出选择范围。");
@@ -394,19 +384,18 @@ export async function listGuiProjectMaterials(source,{path=source.scope,cursor}=
       if(entry.isDirectory())return [{path:rel,name:entry.name,kind:"directory",byteLength:null}];
       if(!entry.isFile())return [];
       const stat=lstatSync(join(dir,entry.name));
-      return stat.nlink===1&&projectMaterialType(rel)?[{path:rel,name:entry.name,kind:"file",byteLength:stat.size}]:[];
+      return stat.nlink===1&&materialType(rel)?[{path:rel,name:entry.name,kind:"file",byteLength:stat.size}]:[];
     });
   }else{
     const children=new Map();
     for(const entry of await savedMaterialEntries(source,path)){
+      if(!materialType(entry.path)?.startsWith("text/"))continue;
       const leaf=path==="."?entry.path:entry.path.slice(path.length+1),name=leaf.split("/")[0];
       if(!name)continue;
       const child=path==="."?name:path+"/"+name;
       const kind=leaf.includes("/")?"directory":"file";
-      if(kind==="directory"||projectMaterialType(child)){
-        const count=(children.get(child)?.fileCount??0)+1;
-        children.set(child,{path:child,name,kind,byteLength:null,fileCount:count});
-      }
+      const count=(children.get(child)?.fileCount??0)+1;
+      children.set(child,{path:child,name,kind,byteLength:null,fileCount:count});
     }
     entries=[...children.values()];
   }
@@ -421,7 +410,7 @@ export async function listGuiProjectMaterials(source,{path=source.scope,cursor}=
     nextCursor:offset+100<entries.length?`${fingerprint}:${offset+100}`:null};
 }
 export async function readGuiProjectMaterial(source,path){
-  const mediaType=projectMaterialType(path??"");
+  const mediaType=materialType(path??"");
   if(!validProjectPath(path)||!permittedMaterialPath(path,source)||!mediaType)
     throw problem("MATERIAL_SOURCE","该项目材料格式或相对路径不可用。");
   const limit=mediaType.startsWith("image/")?GUI_MATERIAL_CAPABILITIES.imageBytes:GUI_MATERIAL_CAPABILITIES.textBytes;

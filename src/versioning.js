@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { createAgentSync } from "../packages/agent-sync/src/index.js";
-import { legacyProjectInfo, createGitVersioning } from "./git-versioning.js";
+import { gitTreeRecords } from "../packages/agent-sync/src/git.js";
+import { legacyGit, legacyProjectInfo, createGitVersioning } from "./git-versioning.js";
 import { problem } from "./task.js";
 /** One production writer; only legacy records retain a separate read-only interpretation. */
 export async function createVersioning({
@@ -42,6 +43,66 @@ export async function createVersioning({
 }
 export const inScope = (path, scope) =>
   scope.some((p) => p === "." || p === path || path.startsWith(p + "/"));
+
+export async function readProjectContext(task, {operation, paths, query = "", offset = 0, limit = 100}) {
+  const grant = task.record.readAuthorization;
+  if (!grant) throw problem("READ_AUTHORIZATION", "No file-read authorization for this turn; ask for materials or explicit read scope");
+  if (!["list", "read", "search"].includes(operation) || !Array.isArray(paths) || !paths.length ||
+      paths.some(path => !validProjectPath(path, true) || !inScope(path, grant.paths)) ||
+      !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 ||
+      typeof query !== "string" || query.length > 500)
+    throw problem("READ_SCOPE", "Invalid or unauthorized read request");
+
+  let versioning;
+  try {
+    let files;
+    if (grant.projectId) {
+      versioning = await createVersioning({home:task.home, project:grant.canonicalRepo, readOnly:true});
+      const tree = await versioning.read({version:grant.version, path:".", kind:"tree"});
+      if (tree.version !== grant.version || !Array.isArray(tree.entries))
+        throw problem("READ_VERSION", "Cannot verify formal version");
+      files = tree.entries.map(file => ({path:file.path, mode:file.mode, oid:file.object}));
+    } else {
+      const tree = await legacyGit(grant.canonicalRepo, ["ls-tree", "-rz", grant.version], {bytes:true});
+      files = [...gitTreeRecords(tree,{skipInvalidUtf8:true})].filter(entry => entry.type === "blob");
+    }
+    files = files.filter(file => validProjectPath(file.path) && inScope(file.path, paths) &&
+      inScope(file.path, grant.paths) && ["100644", "100755"].includes(file.mode));
+    let items = [];
+    const decoder = new TextDecoder("utf-8", {fatal:true, ignoreBOM:true});
+    const textLimit = 512 * 1024;
+    if (operation === "list") items = files.map(file => file.path);
+    else for (const file of files) {
+      if (operation === "read" && !paths.includes(file.path)) continue;
+      let bytes;
+      if (versioning) {
+        const value = await versioning.read({version:grant.version, path:file.path});
+        if (value.version !== grant.version) throw problem("READ_VERSION", "Cannot verify formal file version");
+        bytes = Buffer.from(value.contentBase64, "base64");
+      } else {
+        const size = Number(await legacyGit(grant.canonicalRepo, ["cat-file", "-s", file.oid], {bytes:true}));
+        if (size > textLimit) throw problem("READ_LIMIT", "File exceeds bounded text read: " + file.path);
+        bytes = await legacyGit(grant.canonicalRepo, ["cat-file", "blob", file.oid], {bytes:true});
+      }
+      if (bytes.length > textLimit) throw problem("READ_LIMIT", "File exceeds bounded text read: " + file.path);
+      let text;
+      try {
+        text = decoder.decode(bytes);
+        if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) throw Error();
+      } catch {
+        if (operation === "search") continue;
+        throw problem("READ_FORMAT", "Read authorized UTF-8 text only. Import images as material copies: " + file.path);
+      }
+      for (const [index, line] of text.split("\n").entries()) {
+        if (operation === "read" || line.includes(query))
+          items.push({path:file.path, line:index + 1, text:line.slice(0, 2000), ...(line.length > 2000 && {truncated:true})});
+        if (items.length > offset + limit) break;
+      }
+      if (items.length > offset + limit) break;
+    }
+    return {version:grant.version, uncommitted:false, items:items.slice(offset, offset + limit), more:items.length > offset + limit};
+  } finally { await versioning?.close(); }
+}
 
 // Grants use exact spellings. Only conflict detection folds paths, matching the
 // kernel's portable namespace, including differently cased directory prefixes.

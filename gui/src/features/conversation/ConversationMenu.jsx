@@ -5,7 +5,8 @@ import styles from "./Conversation.module.css";
 
 function ConversationMenu({session, homeDraft, onRename, onOrganize, onPrepareProject, onOpenTurnLimits, onClose}) {
   const needsPreparation = session?.project && session.projectDirectoryAvailable !== false &&
-    session.projectStatus?.executionReady === false;
+    !session.readOnly && !session.workspaceArchived && !session.navigation?.archived &&
+    session.projectStatus?.executionReady === false && !session.projectStatus.homeDirectory;
 
   return <Modal title="对话操作" onClose={onClose}>
     <div className="dialog-body">

@@ -4,7 +4,7 @@ import {Modal} from "../../Modal.jsx";
 import styles from "./Conversation.module.css";
 
 export function TurnLimits({available, team, models=[], options, onChange, onClose, returnFocusTo}) {
-  const {readOnly, delegate, review, maxCalls} = options ?? defaultTurnOptions();
+  const {readOnly, delegate, review, maxCalls, networkMode} = options ?? defaultTurnOptions();
   const refs = team ? [team.main, ...team.secondary] : [];
   return <Modal title="下一条消息的限制" onClose={onClose} returnFocusTo={returnFocusTo}>
     <div className="dialog-body">
@@ -27,6 +27,13 @@ export function TurnLimits({available, team, models=[], options, onChange, onClo
         </label>
         <label>本轮最多模型请求（留空不设上限）
           <input type="number" min="0" step="1" value={maxCalls} onChange={event=>onChange({maxCalls:event.target.value})}/>
+        </label>
+        <label>联网要求
+          <select value={networkMode??""} onChange={event=>onChange({networkMode:event.target.value||null})}>
+            <option value="">按本条消息判断</option>
+            <option value="whole-turn-offline">整轮不联网</option>
+            <option value="artifact-offline">只要求成品离线</option>
+          </select>
         </label>
         <details className={styles.turnLimitPolicy}>
           <summary>调用与输出额度详情</summary>

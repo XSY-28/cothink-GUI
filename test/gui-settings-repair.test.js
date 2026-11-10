@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -90,6 +90,20 @@ test("local skill source changes use real discovery and preserve configuration o
   await assert.rejects(settings.saveGuiLocalSkills(home,[a,duplicate],{cwd:home}), /名称冲突 external/);
   await assert.rejects(settings.saveGuiLocalSkills(home,[source("third","doc-maintenance")],{cwd:home}), /技能名称冲突 doc-maintenance/);
   assert.deepEqual(loadConfig(home).piResources,{tools:["read"],skills:[a]});
+});
+
+test("saving a local skill validates its resources before replacing the previous selection", async t => {
+  const home=temporaryHome(t), skill=join(home,"external"), assets=join(home,"asset-source");
+  saveConfig(home,{...modelConfig,piResources:{tools:["read"]}});
+  mkdirSync(skill);mkdirSync(assets);
+  writeFileSync(join(skill,"SKILL.md"),"---\nname: external\ndescription: Test resource validation\n---\nRead only.\n");
+  symlinkSync(assets,join(skill,"assets"),process.platform==="win32"?"junction":"dir");
+  await assert.rejects(settings.saveGuiLocalSkills(home,[skill],{cwd:home}),/external.*symbolic link/s);
+  assert.deepEqual(loadConfig(home).piResources,{tools:["read"]});
+
+  // Previously saved broken sources can still be removed without touching source bytes.
+  saveConfig(home,{...modelConfig,piResources:{skills:[skill],tools:["read"]}});
+  assert.deepEqual((await settings.saveGuiLocalSkills(home,[],{cwd:home})).paths,[]);
 });
 
 const image="sha256:"+"d".repeat(64);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { acquireSessionWriter, writePrivateBytes, writePrivateJson } from "./storage.js";
 
@@ -19,6 +19,15 @@ const validName = name => typeof name === "string" && name === name.trim() && na
 const nameKey = name => name.normalize("NFC").replace(/[A-Z]/g, letter => letter.toLowerCase());
 const projectKey = path => process.platform === "win32" ? path.toLowerCase() : path;
 const sameDirectory = (a, b) => a !== null && b !== null && projectKey(a) === projectKey(b);
+export function sameWorkspaceDirectory(a, b) {
+  if (!isWorkspaceProject(a) || !isWorkspaceProject(b)) return false;
+  if (sameDirectory(a, b)) return true;
+  try {
+    const first = statSync(a, {bigint:true}), second = statSync(b, {bigint:true});
+    return first.isDirectory() && second.isDirectory() && first.ino !== 0n &&
+      first.dev === second.dev && first.ino === second.ino;
+  } catch { return false; }
+}
 const sameName = (a, b) => a.project === null && b.project === null && nameKey(a.name) === nameKey(b.name);
 const rosterId = id => id === null || isWorkspaceId(id);
 
@@ -114,8 +123,9 @@ function write(home, update) {
   } finally { writer.release(); }
 }
 
-function assertUnique(state, candidate) {
-  const existing = state.workspaces.find(w => w.id !== candidate.id && (sameDirectory(w.project,candidate.project) || sameName(w,candidate)));
+function assertUnique(state, candidate, checkAliases = true) {
+  const sameProject = checkAliases ? sameWorkspaceDirectory : sameDirectory;
+  const existing = state.workspaces.find(w => w.id !== candidate.id && (sameProject(w.project,candidate.project) || sameName(w,candidate)));
   if (existing)
     throw workspaceError("WORKSPACE_CONFLICT", candidate.project === null
       ? "已有同名的无目录 Team；请改名或打开已有 Team。"
@@ -166,7 +176,7 @@ export function updateGuiWorkspace(home, {workspaceId, expectedRevision, change}
     if (!revision(current.revision + 1)) throw unavailable();
     const {mutationId: _mutationId, ...previous} = current;
     const result = {...previous, [key]:value, revision:current.revision + 1};
-    assertUnique(state,result);
+    assertUnique(state,result,key === "project");
     state.workspaces[at] = result;
     return {changed:true, result};
   });
@@ -197,6 +207,13 @@ function remember(state, sessionId, project, workspaceId) {
 function discoverLegacyBinding(state, {sessionId, project}) {
   if (sessionId && mappedWorkspace(state,sessionId,project)) return false;
   let target = workspaceForProject(state,project);
+  if (!target) {
+    const aliases = state.workspaces.filter(item => sameWorkspaceDirectory(item.project,project));
+    // Old tables with existing aliases keep their saved owners. A third
+    // spelling does not determine which old Team should own a new branch.
+    if (aliases.length > 1) return false;
+    target = aliases[0];
+  }
   if (!target) {
     const name = [...(basename(project).trim() || project.trim())].slice(0,80).join("").trimEnd();
     target = workspace(randomUUID(),name,project,null);
@@ -246,9 +263,9 @@ export function rebindGuiWorkspace(home, input, verifyLegacyBindings) {
     // Discover against the old directory table. A destination with new
     // legacy history needs its own Team before it can participate in rebind.
     for (const binding of legacyBindings) {
-      if (sameDirectory(binding.project,path) &&
+      if (sameWorkspaceDirectory(binding.project,path) &&
           !mappedWorkspace(state,binding.sessionId,binding.project) &&
-          !workspaceForProject(state,binding.project))
+          !state.workspaces.some(item=>sameWorkspaceDirectory(item.project,binding.project)))
         throw workspaceError("WORKSPACE_CONFLICT", "目标目录有尚未归属的旧对话。请刷新历史后查看该目录的 Team。");
       discoverLegacyBinding(state,binding);
     }

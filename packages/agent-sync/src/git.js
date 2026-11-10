@@ -14,6 +14,7 @@ import { pathName, aliases, covers, problem } from "./scope.js";
 import { digest } from "./storage.js";
 const flags = [
   "--no-optional-locks",
+  "--no-replace-objects",
   "-c",
   "core.hooksPath=/dev/null",
   "-c",
@@ -69,15 +70,30 @@ export function git(root, args, input, extraEnv = {}) {
 }
 export const textGit = async (root, args, input) =>
   (await git(root, args, input)).toString().trim();
+
+export function* gitTreeRecords(raw, { skipInvalidUtf8 = false } = {}) {
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  for (let start = 0; start < raw.length;) {
+    const end = raw.indexOf(0, start);
+    const tab = raw.indexOf(9, start);
+    if (end < 0 || tab < start || tab >= end)
+      throw problem("PATH", "Malformed NUL-delimited Git tree entry");
+    const [mode, type, oid] = raw.toString("ascii", start, tab).split(" ");
+    start = end + 1;
+    let path;
+    try { path = decoder.decode(raw.subarray(tab + 1, end)); }
+    catch {
+      if (skipInvalidUtf8) continue;
+      throw problem("PATH", "Tracked source path is not valid UTF-8");
+    }
+    yield { mode, type, oid, path };
+  }
+}
+
 export async function entries(root, version) {
   const raw = await git(root, ["ls-tree", "-rz", "--full-tree", version]);
   const map = new Map();
-  for (const record of raw.toString().split("\0").filter(Boolean)) {
-    const [meta, path] = [
-        record.slice(0, record.indexOf("\t")),
-        record.slice(record.indexOf("\t") + 1),
-      ],
-      [mode, type, oid] = meta.split(" ");
+  for (const { mode, type, oid, path } of gitTreeRecords(raw)) {
     pathName(path);
     if (type !== "blob" || !["100644", "100755"].includes(mode))
       throw problem("UNSUPPORTED", "Source symlink/gitlink is unsupported", {

@@ -302,17 +302,9 @@ test("HTTP distinguishes an empty unverified policy from configured checks witho
     [{ command: "node", args: ["-e", "process.exit(0)"] }],
   ]) {
     const repo = repository(t);
-    const f = await fixture(t, (_, n) =>
-      n === 1
-        ? tool("start_work", {action:"start",reason:"check boundary",plan:{goal:"policy test",scope:["a.txt"],deliverables:["a.txt"],checks}})
-        : n === 2
-          ? tool("read", { path: "a.txt" })
-          : n === 3
-            ? tool("write", { path: "a.txt", content: "policy change\n" })
-            : n === 4 || n === 5
-              ? tool("accept_change")
-              : { text: "policy result" },
-    );
+    const f = await fixture(t, (_,n) => n===1
+      ? tool("start_work", {action:"start",reason:"check boundary",plan:{goal:"policy test",scope:["a.txt"],deliverables:["a.txt"],checks}})
+      : {text:"policy result"});
     const h = await host(t, f);
     await setup(h, f);
     await h.action("settings.work", { work: { checks } });
@@ -323,15 +315,25 @@ test("HTTP distinguishes an empty unverified policy from configured checks witho
       input: "policy test",
       protocolVersion:1, submissionId: "policy",
     });
-    let task = await done(h, a.taskId);
+    const task = await done(h, a.taskId);
     if (!checks.length) {
       assert.equal(task.proposalRef,undefined,"formal plan requires nonempty checks");assert.equal(task.work,null);
       assert.equal(readFileSync(join(repo.project,"a.txt"),"utf8"),"base A\n");
     } else {
-      const confirmed=await h.action("task.confirmWork",{sessionId:s.id,protocolVersion:1,submissionId:"policy-confirm",proposalRef:task.proposalRef});task=await done(h,confirmed.taskId);
-      assert.notEqual(task.work?.finalCheck?.verification, "passed");
-      assert.notEqual(task.status, "completed");
-      assert.match(JSON.stringify(task), /Docker|EXECUTOR_CONFIG|execution/i);
+      assert.ok(task.proposalRef);
+      const refs=()=>git(repo.project,"for-each-ref","--format=%(refname) %(objectname)");
+      const before=refs();
+      const response=await fetch(h.origin+"/api/action",{
+        method:"POST",headers:{...h.headers,"Content-Type":"application/json","X-CoThink-GUI-Input":"2"},
+        body:JSON.stringify({action:"task.confirmWork",args:{sessionId:s.id,protocolVersion:1,submissionId:"policy-confirm",proposalRef:task.proposalRef}}),
+      });
+      assert.equal(response.status,400);
+      const blocked=await response.json();
+      assert.equal(blocked.code,"PROPOSAL_BLOCKED");
+      assert.match(blocked.error,/执行环境/);
+      assert.equal(f.calls.length,1);
+      assert.equal(refs(),before);
+      assert.equal((await h.get("/api/session?id="+s.id)).turns.at(-1).confirmationIntent,undefined);
     }
   }
 });

@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { existsSync, readFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 const packageRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL("..",import.meta.url)));
 const load=path=>import(pathToFileURL(join(packageRoot,path)));
 const {saveConfig}=await load("src/config.js");
@@ -29,8 +30,8 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
     {id:"7c8094cd-3476-4bfa-8f53-000000000001",name:"花园讨论",reply:"这份答复来自花园讨论 Team。"},
     {id:"7c8094cd-3476-4bfa-8f53-000000000002",name:"蓝色工具箱",reply:"这份答复来自蓝色工具箱 Team。"}
   ];
-  const ordinary=join(f.cwd,"unprepared");
-  mkdirSync(ordinary);
+  const ordinary=mkdtempSync(join(tmpdir(),"cothink-avatar-unprepared-"));
+  t.after(()=>rmSync(ordinary,{recursive:true,force:true}));
   for(const item of teams){
     const workspace=await controller.action("workspace.create",{workspaceId:item.id,name:item.name,
       project:item===teams[0]?ordinary:null,defaultRosterId:rosterId});

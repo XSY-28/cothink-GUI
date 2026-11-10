@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 import { chooseRailCreation } from "./helpers/gui-rail.js";
 import { fixture } from "./helpers/pi-fixture.js";
+import { execution } from "./helpers/agent-sync-fixture.js";
 
 const packageRoot = resolve(process.env.COTHINK_TEST_PACKAGE_ROOT ?? fileURLToPath(new URL("..", import.meta.url)));
 const load = path => import(pathToFileURL(join(packageRoot, path)));
@@ -16,9 +17,12 @@ const { startGuiServer } = await load("src/gui-server.js");
 
 test("file requests wait for directory preparation while ordinary chat remains usable", { timeout: 30000 }, async t => {
   const reply = Promise.withResolvers();
-  const f = await fixture(t, () => reply.promise);
+  const plan = { goal:"Verify the proposal display", scope:["__init__.py"], deliverables:["__init__.py"],
+    checks:[{command:"node",args:["-e","process.exit(0)"]}] };
+  const f = await fixture(t, (_,n) => n === 1 ? reply.promise :
+    {toolCalls:[{name:"start_work",args:{action:"start",reason:"fixture",plan}}]});
   t.after(() => reply.resolve({ text: "已回答普通问题。" }));
-  saveConfig(f.home, createTeamConfig({ formatVersion: 2, ...f.models }, "文件任务验证阵容", "7c8094cd-3476-4bfa-8f53-055d87972896"));
+  saveConfig(f.home, createTeamConfig({ formatVersion: 2, ...f.models, work:{execution} }, "文件任务验证阵容", "7c8094cd-3476-4bfa-8f53-055d87972896"));
   const projectPath = mkdtempSync(join(tmpdir(), "cothink-file-task-"));
   t.after(() => rmSync(projectPath, { recursive: true, force: true }));
   const project = realpathSync(projectPath);
@@ -106,6 +110,18 @@ test("file requests wait for directory preparation while ordinary chat remains u
   await button("准备文件工作").click();
   const preparation = page.getByRole("dialog", { name: "准备文件工作", exact: true });
   await preparation.getByText(project, { exact: true }).waitFor();
+  let lostInventory = false;
+  await page.route("**/api/action", async route => {
+    const body = route.request().postDataJSON();
+    if (!lostInventory && body?.action === "project.prepare" && body.args.action === "preview") {
+      lostInventory = true;
+      return route.abort("failed");
+    }
+    return route.continue();
+  });
+  await preparation.getByRole("button", { name: "盘点文件", exact: true }).click();
+  await preparation.getByRole("button", { name: "查询原操作", exact: true }).click();
+  await preparation.getByText("未找到原盘点结果，可以重新盘点。", { exact: true }).waitFor();
   for (const name of ["盘点文件", "预览起点"]) await preparation.getByRole("button", { name, exact: true }).click();
   assert.equal(existsSync(join(project, ".git")), false);
   await preparation.getByRole("button", { name: "确认建立起点", exact: true }).click();
@@ -113,9 +129,29 @@ test("file requests wait for directory preparation while ordinary chat remains u
   assert.equal(existsSync(join(project, ".git", "HEAD")), true);
   await preparation.getByRole("button", { name: "关闭", exact: true }).click();
   assert.equal(await editor.inputValue(), filePrompt);
-  await page.waitForFunction(() => document.querySelector('button[aria-label="发送"]')?.disabled === false);
+  await page.getByText("目录已准备", {exact:true}).waitFor();
   assert.deepEqual(submitted, [chatPrompt], "preparing the directory does not send the saved draft");
   assert.equal(f.calls.length, 1);
-  assert.deepEqual(errors, []);
+  assert.equal(await button("发送").isDisabled(),true,"ambiguous offline text needs a choice after directory preparation");
+  await button("整轮不联网").click();
+  assert.equal(await button("发送").isDisabled(),true,"the configured model cannot satisfy whole-turn offline");
+  await button("重新选择联网要求").click();
+  await button("只要求成品离线").click();
+  await page.waitForFunction(() => document.querySelector('button[aria-label="发送"]')?.disabled === false);
   await capture("file-task-ready.png");
+  assert.equal(f.calls.length,1,"choosing network requirements does not send the draft");
+
+  await page.getByRole("button",{name:/^对话操作：/}).click();
+  await button("下一条消息的限制").click();
+  await page.getByLabel("本轮最多模型请求（留空不设上限）",{exact:true}).fill("1");
+  await page.keyboard.press("Escape");
+  await button("发送").click();
+  const confirmation=button("确认上述计划并执行");
+  await confirmation.waitFor();
+  const proposal=page.locator("article pre").filter({hasText:"待确认工作提议"});
+  assert.match(await proposal.textContent(), /"__init__\.py"/);
+  assert.equal(await confirmation.isDisabled(),true,"planning spent the last allowed request");
+  await page.getByText(/本轮模型请求额度已用完/).waitFor();
+  assert.equal(f.calls.length,2);
+  assert.deepEqual(errors, []);
 });

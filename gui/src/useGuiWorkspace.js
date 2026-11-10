@@ -1,14 +1,15 @@
 import {defaultTurnOptions,editorTurnInput} from "../../src/gui-turn-options.js";
+import {materialType} from "../../src/gui-material-types.js";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createDraftBook } from "./view.js";
+import { createDraftBook, readGuiStorage, writeGuiStorage } from "./view.js";
+import { saveWorkspaceChange } from "./api.js";
+import { useSessionSearch } from "./features/navigation/useSessionSearch.js";
 
 const HOME = "@home";
 const emptyBootstrap = { teams: [], models: [], providers: [], sessions: [], work: {}, active: null };
 function readPending() {
-  try {
-    const value = JSON.parse(sessionStorage.getItem("cothink.pending") || "null");
-    return typeof value?.sessionId === "string" && typeof value?.submissionId === "string" ? value : null;
-  } catch { return null; }
+  const value = readGuiStorage("cothink.pending");
+  return typeof value?.sessionId === "string" && typeof value?.submissionId === "string" ? value : null;
 }
 
 function readCreations() {
@@ -24,18 +25,11 @@ function readCreations() {
 export function useGuiWorkspace(api) {
   const [bootstrap, setBootstrap] = useState(emptyBootstrap);
   const [ready, setReady] = useState(false);
-  const [sessions, setSessions] = useState([]);
-  const [nextCursor, setNextCursor] = useState(null);
-  const [navigationQuery, setNavigationQuery] = useState({query:"", scope:"project", includeArchived:false});
   const [workspaceId, setWorkspaceId] = useState(null);
-  const [workspaceMatches, setWorkspaceMatches] = useState([]);
-  const [navigationLoading, setNavigationLoading] = useState(false);
   const workspaceRef = useRef(null), editorWorkspaces = useRef(new Map());
   const [currentProject, setCurrentProject] = useState(null);
   const [navigationNotice, setNavigationNotice] = useState(null);
-  const listQuery = useRef({query:"", scope:"project", includeArchived:false}), projectRef = useRef(null);
-  const loadedCount = useRef(50);
-  const listRequest = useRef(0), recentByProject = useRef(new Map());
+  const projectRef = useRef(null), recentByProject = useRef(new Map());
   const [session, setSession] = useState(null);
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [readingPosition,setReadingPosition] = useState(null);
@@ -72,7 +66,7 @@ export function useGuiWorkspace(api) {
   function syncEditor(sessionId) {
     const snapshot=book.current.snapshot(sessionId);
     setWorkChoices(previous=>({...previous,[sessionId]:{request:snapshot.workRequest??null,id:snapshot.selectionId,turnOptions:snapshot.turnOptions??null}}));
-    if (homeEditorId(selected.current) === sessionId) setDraftText(snapshot.text || "");
+    if (homeEditorId(selected.current) === sessionId && (sessionId!==HOME || workspaceRef.current===null)) setDraftText(snapshot.text || "");
   }
   function setWorkRequest(sessionId, request) {
     sessionId=homeEditorId(sessionId);
@@ -115,9 +109,11 @@ export function useGuiWorkspace(api) {
     updateError(message);
   }
   const selected = useRef(null), selectedTask = useRef(null);
-  const book = useRef(createDraftBook()), draftTimers = useRef(new Map());
+  const book = useRef(createDraftBook(true)), draftTimers = useRef(new Map());
   const draftQueue = useRef(Promise.resolve()), submissionBusy = useRef(false);
   const pendingRef = useRef(pending), mounted = useRef(true), organizingSession = useRef(null);
+  const {sessions,nextCursor,navigationQuery,workspaceMatches,navigationLoading,navigationError,listQuery,listRequest,
+    seedSessionList,querySessions,loadSessions,searchSessions} = useSessionSearch(api,workspaceRef,mounted);
   const refreshing = useRef(false), refreshAgain = useRef(false);
   const selectionRequest = useRef(0), taskRequest = useRef(0);
 
@@ -156,8 +152,7 @@ export function useGuiWorkspace(api) {
   function storePending(value) {
     pendingRef.current = value;
     setPending(value);
-    if (value) sessionStorage.setItem("cothink.pending", JSON.stringify(value));
-    else sessionStorage.removeItem("cothink.pending");
+    writeGuiStorage("cothink.pending",value);
   }
   function markDraftConflict(sessionId, saved) {
     conflicts.current.set(sessionId,saved);
@@ -217,6 +212,14 @@ export function useGuiWorkspace(api) {
     draftTimers.current.set(sessionId,setTimeout(()=>{
       draftTimers.current.delete(sessionId); void saveDraft(snapshot).catch(()=>{});
     },650));
+  }
+  function reconcileEditor(id, saved, observed) {
+    const result=book.current.reconcile(id,saved,observed,!submissionBusy.current&&!pendingRef.current);
+    if (!result) return;
+    if (result.accepted) setPendingStatus("已从保存记录恢复上次提交。");
+    syncEditor(id);
+    if (result.conflict) markDraftConflict(id,saved);
+    else if (result.save) scheduleDraft(id);
   }
   async function flushDraft(sessionId) {
     if (!sessionId) return;
@@ -360,6 +363,7 @@ export function useGuiWorkspace(api) {
     setDraftText(book.current.snapshot(sessionId).text || "");
     setError("");
     sessionStorage.setItem("cothink.session", sessionId);
+    const observed=book.current.snapshot(sessionId);
     try {
       const value = confirmed ?? await api.read("session", {id: sessionId});
       if(value.contextOperationIds?.length)value.contextOperation=await api.read("context-operation",{operationId:value.contextOperationIds[0]});
@@ -373,7 +377,7 @@ export function useGuiWorkspace(api) {
       selectWorkspaceId(value.workspaceId);
       editorWorkspaces.current.set(sessionId, value.workspaceId);
       if (!value.navigation?.archived) recentByProject.current.set(value.project,sessionId);
-      book.current.load(sessionId,value.editor ?? value.draft,value.draftRevision,value.branchAnchor);
+      reconcileEditor(sessionId,value,observed);
       reconcileReadSelection(value);
       syncEditor(sessionId);
       await selectTask(taskId || value.turns.at(-1)?.taskId || null, sessionId);
@@ -384,47 +388,6 @@ export function useGuiWorkspace(api) {
       if (mounted.current && request === selectionRequest.current) setError(e.message);
       return null;
     }
-  }
-  function querySessions(options = {}) {
-    const args = {...options};
-    if (Object.hasOwn(args,"workspaceId") && args.workspaceId === undefined) return Promise.resolve({items:[],nextCursor:null});
-    if (args.workspaceId === null) args.workspaceId = "";
-    if (Object.hasOwn(args,"project") && args.project === null) args.project = "";
-    return api.read("sessions",args);
-  }
-  async function loadSessions({more = false} = {}) {
-    const request = ++listRequest.current, q = listQuery.current;
-    const args = {query:q.query, archived:q.includeArchived ? "all" : "active",
-      ...(q.scope === "project" ? {workspaceId:workspaceRef.current} : {}), ...(more && nextCursor ? {cursor:nextCursor} : {})};
-    try {
-      let page = await querySessions(args);
-      if (!more) {
-        while (page.nextCursor && page.items.length < loadedCount.current) {
-          const next = await querySessions({...args,cursor:page.nextCursor});
-          page = {...next,items:[...page.items,...next.items]};
-          if (request !== listRequest.current || !mounted.current) return;
-        }
-      }
-      if (request !== listRequest.current || !mounted.current) return;
-      setSessions(previous => more ? [...new Map([...previous,...page.items].map(s=>[s.id,s])).values()] : page.items);
-      setNextCursor(page.nextCursor);
-      setWorkspaceMatches(page.workspaceMatches ?? []);
-      setNavigationLoading(false);
-      if (more) loadedCount.current += page.items.length;
-    } catch (e) {
-      if (!mounted.current || request !== listRequest.current) return;
-      if (e.code === "CURSOR_EXPIRED" && more) return loadSessions();
-      setNavigationLoading(false);
-      setError(e.message);
-    }
-  }
-  function searchSessions(change) {
-    loadedCount.current = 50;
-    listQuery.current = {...listQuery.current,...change};
-    setNavigationQuery(listQuery.current);
-    setNavigationLoading(true);
-    setSessions([]); setWorkspaceMatches([]); setNextCursor(null);
-    void loadSessions();
   }
   function clearSelection(request = ++selectionRequest.current) {
     if (request !== selectionRequest.current) return;
@@ -492,24 +455,7 @@ export function useGuiWorkspace(api) {
       for (const [sessionId, owner] of editorWorkspaces.current)
         if (owner === id) await flushDraft(sessionId);
     }
-    let saved;
-    try { saved = await api.action(action, args); }
-    catch (error) {
-      if (error.unknown && action === "workspace.rebind") {
-        const {workspaceId,operationId,expectedRevision}=args;
-        const receipt=await api.action("workspace.rebind.query",{workspaceId,operationId,expectedRevision}).catch(()=>null);
-        if (receipt?.status==="confirmed") saved=receipt.workspace;
-        else throw Object.assign(Error("原目录变更尚未确认。可查询原操作，当前目录以最新记录为准。"),{unknown:true,operation:{workspaceId,operationId,expectedRevision}});
-      } else if (error.unknown || error.code === "WORKSPACE_CONFLICT") {
-        const current = await readBootstrap().catch(()=>null);
-        if (current && mounted.current) acceptBootstrap(current);
-        const found = current?.workspaces?.find(row=>row.id === id);
-        if (error.unknown && found && (action === "workspace.create" ||
-            action === "workspace.update" && Object.entries(args.change).every(([key,value])=>found[key]===value))) saved = found;
-        else if (error.unknown) throw Object.assign(Error(`Team 操作结果尚未确认，请按原 Team ID ${id} 核对。不会自动重发。`),{unknown:true});
-      }
-      if (!saved) throw error;
-    }
+    const saved = await saveWorkspaceChange(api,action,args,readWorkspaces);
     if (mounted.current) setBootstrap(current => {
       if (!Array.isArray(current.workspaces)) return current;
       const prior=current.workspaces.find(row=>row.id===id);
@@ -530,6 +476,11 @@ export function useGuiWorkspace(api) {
     }
     await refresh();
     return saved;
+  }
+  async function readWorkspaces() {
+    const current=await readBootstrap();
+    if (mounted.current) acceptBootstrap(current);
+    return current.workspaces??[];
   }
   async function setSessionNavigation({sessionId, expectedRevision, change}) {
     const selection = selectionRequest.current;
@@ -576,18 +527,30 @@ export function useGuiWorkspace(api) {
     refreshing.current = true;
     let observedSelection = selectionRequest.current;
     try {
+      const homeBefore=home.current, homeEditor=book.current.snapshot(HOME);
       const b = await readBootstrap();
       if (!mounted.current) return;
+      // Home has its own durable row and upload owner. Never rebind a dirty tab
+      // to another tab's row or replace an in-progress creation reservation.
+      const localHome=book.current.snapshot(HOME);
+      if (!b.homeDraftError && home.current===homeBefore && !creationIntent.current &&
+          localHome.editId===homeEditor.editId && localHome.savedEditId===homeEditor.savedEditId &&
+          (!localHome.editId || localHome.editId===localHome.savedEditId)) {
+        setHome(b.homeDraft??null);
+        reconcileEditor(HOME,{editor:b.homeDraft?.editor,draft:"",draftRevision:b.homeDraft?.revision??null},homeEditor);
+      }
       acceptBootstrap(b);
       await loadSessions();
       const id = selected.current, taskId = selectedTask.current;
       const selection = selectionRequest.current, taskSelection = taskRequest.current;
+      const observed=book.current.snapshot(id);
       observedSelection = selection;
       await Promise.all([
         id && api.read("session", {id}).then(async value => {
           if(value.contextOperationIds?.length)value.contextOperation=await api.read("context-operation",{operationId:value.contextOperationIds[0]});
           if (mounted.current && selectionRequest.current === selection && value.id === selected.current) {
             setSession(rememberView(value));
+            reconcileEditor(id,value,observed);
             reconcileReadSelection(value);
             if (value.workspaceId !== workspaceRef.current) {
               selectWorkspaceId(value.workspaceId);
@@ -624,12 +587,10 @@ export function useGuiWorkspace(api) {
       try {
         const b = await readBootstrap();
         if (cancelled || initialSelection !== selectionRequest.current) return;
-        acceptBootstrap(b); setSessions(b.sessions); setNextCursor(b.sessionsCursor);
-        if(b.homeDraft){
-          setHome(b.homeDraft);
-          book.current.load(HOME,b.homeDraft.editor,b.homeDraft.revision);
-          syncEditor(HOME);
-        }
+        acceptBootstrap(b); seedSessionList(b);
+        if(b.homeDraft)setHome(b.homeDraft);
+        reconcileEditor(HOME,{editor:b.homeDraft?.editor,draft:"",
+          draftRevision:b.homeDraft?.revision??null,readOnly:!!b.homeDraftError},book.current.snapshot(HOME));
         const p = readPending(), previous = sessionStorage.getItem("cothink.session");
         const wanted = p?.sessionId || previous;
         const restored = wanted ? await openSession(wanted,undefined,initialSelection) : null;
@@ -637,7 +598,7 @@ export function useGuiWorkspace(api) {
         if (!restored) {
           clearSelection(initialSelection);
           const latest = b.workspaces?.find(row=>!row.archived && row.recentSessionId);
-          if (b.homeDraft) selectWorkspaceId(null);
+          if (b.homeDraft || book.current.snapshot(HOME).editId) selectWorkspaceId(null);
           else if (latest) await selectWorkspace(latest,undefined,initialSelection);
           else if (b.sessions[0]?.id) await openSession(b.sessions[0].id,undefined,initialSelection);
           else if (b.workspaces?.some(row=>!row.archived)) await selectWorkspace(b.workspaces.find(row=>!row.archived),undefined,initialSelection);
@@ -711,12 +672,20 @@ export function useGuiWorkspace(api) {
         }
         value=result.session;
         if(result.status!=="confirmed")throw Error(`创建结果尚未确认，请按原会话 ID ${sessionId} 查询。不会自动重建。`);
+        const original=unknown.options?.handoff, requested=options.handoff;
+        if ((original || requested) && (original?.project!==requested?.project ||
+            original?.text!==requested?.text || requested?.project!==value.project)) {
+          rememberCreation(createScope,null);setCreationNotice(null);
+          await refresh();
+          throw Error("上一次新建已保存，可在对话列表打开。目录或草稿已变化，请重新确认本次新建。");
+        }
       }else{
         const flushed=source&&source===selected.current&&options.sourceLeafId===undefined?await flushDraft(source):null;
         const leaf=options.sourceLeafId??flushed?.branchAnchor??book.current.snapshot(source).branchAnchor??sourceLeaf;
         rememberCreation(createScope,{sessionId,options});
         try {
           value=await api.action("session.create",{sessionId,...(modern ? {workspaceId:options.workspaceId} : {project}),
+            ...(options.handoff?{handoff:options.handoff}:{}),
             ...(modern&&source&&typeof leaf==="string"?{sourceSessionId:source,sourceLeafId:leaf}:{})});
           if(value?.selectionError)throw Object.assign(Error(value.selectionError),{unknown:true});
         }catch(error){
@@ -903,9 +872,7 @@ export function useGuiWorkspace(api) {
   }
   async function materialDescriptor(file,ownerId,uploadId=crypto.randomUUID()){
     if(typeof file?.arrayBuffer!=="function")throw Error("请选择有效文件。");
-    const name=file.name||"粘贴图片",ext=name.split(".").at(-1).toLowerCase();
-    const mediaType=({png:"image/png",jpeg:"image/jpeg",jpg:"image/jpeg",webp:"image/webp",md:"text/markdown",markdown:"text/markdown",txt:"text/plain"})[ext]||
-      (file.type?.startsWith("text/")?"text/plain":file.type);
+    const name=file.name||"粘贴图片",mediaType=materialType(name,file.type);
     const limits=bootstrap.materialCapabilities;
     if(!limits?.mediaTypes.includes(mediaType))throw Error("仅支持 UTF-8 文本、PNG、JPEG 和静态 WebP。");
     const limit=mediaType.startsWith("image/")?limits.imageBytes:limits.textBytes;
@@ -1241,7 +1208,32 @@ export function useGuiWorkspace(api) {
   }
   async function cancelTask() {
     const taskId=bootstrap.active?.taskId;
-    if (!taskId || stoppingTask.current === taskId) return;
+    if (!taskId) return;
+    if (stoppingTask.current === taskId) {
+      if (stopStatus?.status !== "stop_unknown") return;
+      setStopStatus({taskId,status:"checking_stop"});
+      try {
+        const saved=await api.read("task",{id:taskId}).catch(async error=>{
+          const original=(await readBootstrap()).active;
+          if (original?.taskId!==taskId || original.status!=="preparing") throw error;
+          return {id:taskId,status:original.cancelRequested===false?"running":"cancelling"};
+        });
+        if (stoppingTask.current !== taskId) return;
+        if (saved.id !== taskId) throw Error("原任务身份无法确认。");
+        if (saved.status === "stop_unknown") setStopStatus({taskId,status:"stop_unknown"});
+        else if (saved.status === "cancelling" || (saved.status === "running" && saved.cancelRequestedAt))
+          setStopStatus({taskId,status:"cancelling"});
+        else {
+          stoppingTask.current=null;
+          setStopStatus(null);
+          setError(saved.status === "running" ? "原任务仍在运行。可再次明确停止。" : "");
+        }
+      } catch(error) {
+        if (stoppingTask.current === taskId) setStopStatus({taskId,status:"stop_unknown"});
+        throw error;
+      } finally { await refresh(); }
+      return;
+    }
     stoppingTask.current=taskId;
     setStopStatus({taskId,status:"cancelling"});
     try {
@@ -1278,7 +1270,7 @@ export function useGuiWorkspace(api) {
     await refresh();
   }
   return {
-    state: {bootstrap, readingPosition, readingError, stopping:stopStatus && stopStatus.taskId === bootstrap.active?.taskId ? stopStatus : null, sessions, nextCursor, navigationQuery, currentProject, workspaceId, workspaceMatches, navigationLoading, navigationNotice, selectedSessionId, session, task, tasksById, draft, workRequest:workChoices[homeEditorId(selectedSessionId)]?.request ?? null,turnOptions:workChoices[homeEditorId(selectedSessionId)]?.turnOptions??null, draftConflict:!!draftConflicts[homeEditorId(selectedSessionId)], pending,
+    state: {bootstrap, readingPosition, readingError, stopping:stopStatus && stopStatus.taskId === bootstrap.active?.taskId ? stopStatus : null, sessions, nextCursor, navigationQuery, currentProject, workspaceId, workspaceMatches, navigationLoading, navigationError, navigationNotice, selectedSessionId, session, task, tasksById, draft, workRequest:workChoices[homeEditorId(selectedSessionId)]?.request ?? null,turnOptions:workChoices[homeEditorId(selectedSessionId)]?.turnOptions??null, draftConflict:!!draftConflicts[homeEditorId(selectedSessionId)], pending,
       homeDraft, homeReady:ready&&!session&&!selectedSessionId&&workspaceId===null&&!navigationLoading&&bootstrap.protocol?.guiInput===2&&!bootstrap.homeDraftError,
       creating:creating?.request===selectionRequest.current,creationNotice,
       materials:materialRowsFor(homeEditorId(selectedSessionId)),materialCapabilities:bootstrap.materialCapabilities,
@@ -1289,6 +1281,7 @@ export function useGuiWorkspace(api) {
       updateWorkspace: (workspace,change) => manageWorkspace("workspace.update",{workspaceId:workspace.id,expectedRevision:workspace.revision,change}),
       bindWorkspace: (workspace,path) => manageWorkspace("workspace.rebind",{workspaceId:workspace.id,expectedRevision:workspace.revision,path,operationId:crypto.randomUUID()}),
       queryWorkspaceRebind: args => api.action("workspace.rebind.query",args),
+      queryWorkspaceCreation: async id => (await readWorkspaces()).find(row=>row.id===id),
       clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, recoverCreation, showHome, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, continuePrepared, recoverSubmission, abandonSubmission,
       selectTask, changeSession, recordView, refresh, cancelTask, acknowledgeNotes, setWorkRequest,setTurnOptions, refreshTeams,
       saveTeam: args => manageTeam("team.save", args),

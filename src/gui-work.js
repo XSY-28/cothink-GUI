@@ -1,19 +1,19 @@
 import {resolveDelivery} from "./project-turn.js";
 import { createHash } from "node:crypto";
-import { realpathSync, readFileSync, lstatSync, statSync, accessSync, constants } from "node:fs";
-import { resolve, join, relative, isAbsolute } from "node:path";
+import { realpathSync, readFileSync, lstatSync, statSync, accessSync, constants, readdirSync, mkdirSync } from "node:fs";
+import { resolve, join, relative, isAbsolute, dirname } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { homedir } from "node:os";
 import { createVersioning } from "./versioning.js";
 import { taskOutputRefs } from "./gui-projection.js";
-import { inspectGuiPreparation, inspectGuiGitChanges } from "./gui-project-preparation.js";
+import { inspectGuiPreparation, inspectGuiGitChanges, protectedGuiProjectPath } from "./gui-project-preparation.js";
 import { workspaceError, workspaceForProject } from "./gui-workspace-state.js";
 const exec = promisify(execFile);
 export function inspectGuiDirectory(path) {
   let canonicalPath=null;
   try {
     if(typeof path!=="string"||!path.trim())throw Error("请选择目录。");
+    if(!isAbsolute(path))throw Error("请输入项目目录的绝对路径。");
     canonicalPath=realpathSync(resolve(path));
     if(!statSync(canonicalPath).isDirectory())throw Error("该路径不是文件夹。");
     accessSync(canonicalPath,constants.R_OK|constants.X_OK);
@@ -25,9 +25,46 @@ export function inspectGuiDirectory(path) {
   }
 }
 
+export function inspectWorkspaceProject(path) {
+  const directory = inspectGuiDirectory(path);
+  if (!directory.directoryAvailable) throw Error(directory.reason);
+  return directory.canonicalPath;
+}
+
+export function browseProjectFolders(input) {
+  const path = inspectWorkspaceProject(input ?? homedir());
+  const folders = readdirSync(path,{withFileTypes:true}).filter(entry => !entry.name.startsWith(".") &&
+    (entry.isDirectory() || entry.isSymbolicLink() && inspectGuiDirectory(join(path,entry.name)).directoryAvailable))
+    .map(entry => ({name:entry.name,path:join(path,entry.name)})).sort((a,b) => a.name.localeCompare(b.name));
+  return {path,parent:dirname(path)===path?null:dirname(path),folders};
+}
+
+export function makeProjectFolder({parent,name}) {
+  if (typeof parent!=="string" || typeof name!=="string" || !name.trim() || name!==name.trim() ||
+      /[\x00-\x1f\x7f\\/:]/.test(name) || /[. ]$/.test(name))
+    throw Error("请输入一个新文件夹名称。");
+  if (name.startsWith(".")) throw Error("浏览器选择器不创建隐藏文件夹，请使用不以点开头的名称。");
+  if (inspectWorkspaceProject(parent)!==parent) throw Error("父目录已改变，请重新浏览。");
+  const path = join(parent,name);
+  try { mkdirSync(path); }
+  catch (error) {
+    if (error.code==="EEXIST") throw Error("已有同名文件或文件夹，请刷新列表或改名。");
+    if (["EACCES","EPERM","EROFS"].includes(error.code)) throw Error("没有权限在此目录新建文件夹，请选择其他父目录。");
+    throw error;
+  }
+  return {path:inspectWorkspaceProject(path)};
+}
+
 export function savedDirectoryAvailable(path, directory = inspectGuiDirectory(path)) {
   return directory.directoryAvailable &&
     !!workspaceForProject({ workspaces: [{ project: path }] }, directory.canonicalPath);
+}
+
+export function workspaceDirectoryFacts(home, path) {
+  return {
+    projectAvailable: path === null ? null : savedDirectoryAvailable(path),
+    projectHomeProtected: protectedGuiProjectPath(path, home),
+  };
 }
 
 export async function fileWorkStatus(home, path) {
@@ -38,12 +75,14 @@ export async function fileWorkStatus(home, path) {
     const executionReady = !!repo.head && !repo.preparation;
     return {
       executionReady, root: repo.root, relativePath: repo.relativePath, directoryIdentity: repo.pathIdentity,
-      ...(path === homedir() ? { homeDirectory: true } : {}),
       preparation: repo.preparation ?? null,
       reason: executionReady ? null : "此目录需要先准备文件工作。",
     };
   } catch (error) {
-    return { executionReady: false, reason: error.message };
+    return {
+      executionReady: false, reason: error.message,
+      ...(error.code === "PROJECT_PREPARATION_PROTECTED" ? { homeDirectory: true } : {}),
+    };
   }
 }
 
@@ -55,6 +94,17 @@ export async function requireFileWork(home, path, expectedIdentity) {
   if (!inspected.executionReady)
     throw Object.assign(Error(inspected.reason), { code: "PROJECT_NOT_PREPARED", path });
   return inspected;
+}
+
+export async function requireGuiFileTask(home, {project,directoryIdentity}, work) {
+  if (!project) throw workspaceError("PROJECT_NOT_PREPARED", "此对话尚未关联项目目录，文件任务未发送。");
+  try {
+    await requireFileWork(home,project,directoryIdentity);
+  } catch (error) {
+    if (error.code !== "PROJECT_NOT_PREPARED") throw error;
+    throw workspaceError(error.code, `文件任务未发送。当前目录 ${project}：${error.message}`);
+  }
+  if(!work?.execution)throw workspaceError("PROJECT_EXECUTION_REQUIRED","项目目录已准备。请在设置中配置项目执行环境后再发送。");
 }
 
 export async function inspectGuiProject(home, path, work = {}, { includeChanges = true } = {}) {

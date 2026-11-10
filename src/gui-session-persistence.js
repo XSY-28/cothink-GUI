@@ -3,6 +3,8 @@ import { dirname, resolve, join } from "node:path";
 import { SessionManager, CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 import { writePrivateBytes } from "./storage.js";
 import { sessionStateError } from "./session-ui-state.js";
+import { existingNeutralDirectory } from "./conversation.js";
+import { isWorkspaceId, isWorkspaceProject } from "./gui-workspace-state.js";
 
 // Summaries deliberately omit unidentifiable histories. Creation must also inspect
 // UUID-bearing filenames, so a damaged header cannot make an occupied ID look free.
@@ -44,4 +46,37 @@ export function persistNewGuiSession({manager,directory,assertOwned}) {
   } catch(error) {
     throw sessionStateError("SESSION_STATE_UNAVAILABLE",`会话 ${header.id} 已发布，但重开未确认；请按原 ID 查询，不要重复创建。${error.message}`);
   }
+}
+
+// Rebind may exclude a damaged history only when every intact record is under
+// the original GUI-created scope. This does not recover the history for use.
+export function scopeAfterTruncatedTail(lines, home, protocolVersion) {
+  if (lines.length < 5 || lines.at(-1).trim() !== "{") return undefined;
+  try {
+    const [header, projectEntry, workspaceEntry, flow, ...entries] =
+      lines.slice(0,-1).map(line=>JSON.parse(line));
+    const neutral = existingNeutralDirectory(home);
+    if (!neutral || header.type !== "session" || header.version !== CURRENT_SESSION_VERSION ||
+        !isWorkspaceId(header.id) || header.parentSession || header.cwd !== neutral) return undefined;
+    const scope = [projectEntry,workspaceEntry,flow], types = ["cothink-project","cothink-gui-workspace","cothink-flow"];
+    const ids = new Set();
+    for (const [index, entry] of scope.entries()) {
+      if (entry.type !== "custom" || entry.customType !== types[index] ||
+          typeof entry.id !== "string" || !entry.id || ids.has(entry.id) ||
+          entry.parentId !== (index ? scope[index-1].id : null)) return undefined;
+      ids.add(entry.id);
+    }
+    const project = projectEntry.data?.project, marker = workspaceEntry.data?.workspaceId;
+    if ((project !== null && !isWorkspaceProject(project)) ||
+        (marker === null ? project !== null : !isWorkspaceId(marker)) ||
+        flow.data?.flow !== "unified" || flow.data?.version !== protocolVersion) return undefined;
+    const descendants = new Set([flow.id]);
+    for (const entry of entries) {
+      if (entry.type === "session" || (entry.type === "custom" && types.includes(entry.customType)) ||
+          typeof entry.id !== "string" || !entry.id || ids.has(entry.id) || !descendants.has(entry.parentId)) return undefined;
+      ids.add(entry.id);
+      descendants.add(entry.id);
+    }
+    return [{sessionId:header.id,project,marker}];
+  } catch { return undefined; }
 }

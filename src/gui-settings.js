@@ -1,12 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { CredentialSynchronizationError, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { freezeAnswerSkills } from "./context.js";
-import { resolvePackageResources } from "./packages.js";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
-import { basename, isAbsolute, join } from "node:path";
-import { createModelRuntime, selectedResources } from "./pi-runtime.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { createModelRuntime } from "./pi-runtime.js";
 import { loadConfig, updateConfig, positiveInteger } from "./config.js";
 import {
   addTeam,
@@ -17,14 +15,8 @@ import {
 import { validateModelRefs, selectModelRef } from "./setup.js";
 import { acquireSessionWriter, privateDirectory, writePrivateJson } from "./storage.js";
 import { validateModelThinking } from "./thinking.js";
-import { capabilitySnapshot, resolveBuiltinSkills, validateBuiltinSkills } from "./builtin-skills.js";
-export function saveGuiBuiltinSkills(home,value) {
-  validateBuiltinSkills({piResources:{builtinSkills:value}});
-  return updateConfig(home,current=>{
-    if(!current)throw Error('请先保存阵容。');
-    return {...current,piResources:{...current.piResources,builtinSkills:structuredClone(value)}};
-  }).piResources.builtinSkills;
-}
+export { saveGuiBuiltinSkills, saveGuiLocalSkills } from "./gui-skills.js";
+
 export async function saveGuiTeam(home, { name, main, secondary }) {
   const team = {
     id: randomUUID(),
@@ -147,42 +139,6 @@ export async function validateGuiThinking(home, team, level) {
     level,
   );
   return level;
-}
-
-export async function saveGuiLocalSkills(home, paths, { cwd = process.cwd() } = {}) {
-  if (!Array.isArray(paths) || paths.some(path => typeof path !== "string" || !path.trim() || path.includes("\0")))
-    throw Error("请选择本机 SKILL.md 或技能目录。");
-  const current = loadConfig(home);
-  if (!current) throw Error("请先保存阵容。");
-  const oldResources = current.piResources;
-  const unique = [...new Set(paths)];
-  for (const path of unique) {
-    if (oldResources?.skills?.includes(path)) continue;
-    if (!isAbsolute(path)) throw Error("新增技能来源需要本机绝对路径。");
-    const stat = statSync(path, { throwIfNoEntry: false });
-    if (!stat || !stat.isDirectory() && !(stat.isFile() && basename(path) === "SKILL.md"))
-      throw Error("技能来源不存在或不是 SKILL.md / 技能目录：" + path);
-  }
-  const proposed = {...current, piResources:{...oldResources, skills:unique}};
-  const {additionalSkillPaths:skills, additionalPromptTemplatePaths:prompts, additionalThemePaths:themes} =
-    selectedResources(proposed, cwd);
-  const builtins = resolveBuiltinSkills(proposed);
-  const packages = await resolvePackageResources({home, cwd, manual:{skills,prompts,themes}});
-  const found = freezeAnswerSkills({
-    cwd, home, paths:[...builtins.skills.map(s=>s.path), ...skills, ...packages.skills],
-    project:true, includeRestricted:true,
-  });
-  updateConfig(home, latest => {
-    if (!latest || JSON.stringify(latest.piResources) !== JSON.stringify(oldResources))
-      throw Error("技能配置已改变，请刷新后重新选择。");
-    return {...latest, piResources:proposed.piResources};
-  });
-  const sourceKind = path => builtins.skills.some(b=>b.path===path) ? "builtin" :
-    packages.skills.includes(path) ? "package" : "selected";
-  return {
-    paths:unique,
-    skills:capabilitySnapshot({skills:found.map(s=>({...s,sourceKind:sourceKind(s.path)}))}).skills,
-  };
 }
 
 const authPromptMessages = {
