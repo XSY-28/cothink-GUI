@@ -11,6 +11,19 @@ function ReplyAction({icon, label, onClick, disabled, description}) {
   </span>;
 }
 
+export function UserMessage({turn, onCopy}) {
+  return <div className={styles.userMessage}>
+    <div className={styles.userText}>{turn.input}
+      {!!turn.materials?.length && <ul className={styles.sentMaterials} aria-label="已发送材料">
+        {turn.materials.map(item=><li key={item.id}>{item.name??"已保存材料"}</li>)}
+      </ul>}
+    </div>
+    {turn.input && onCopy && <div className={styles.messageActions}>
+      <ReplyAction icon="copy" label="复制消息" onClick={()=>onCopy(turn.input)} />
+    </div>}
+  </div>;
+}
+
 export function ReplyActions({turn, forkDisabled, showChanges, onDetails, onCopy, onFork}) {
   return <footer className={styles.answerActions}>
     <ReplyAction icon="process" label="查看过程" onClick={event=>onDetails(turn.taskId,"collaboration",event)} />

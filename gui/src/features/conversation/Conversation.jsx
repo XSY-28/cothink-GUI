@@ -3,10 +3,10 @@ import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import { Composer } from "../../Composer.js";
 import {Icon} from "../../Icon.js";
 import { Markdown } from "../../Markdown.js";
-import { statusLabel, phaseLabel } from "../../view.js";
+import { statusLabel } from "../../view.js";
 import { ReplyHeading } from "./ReplyHeading.jsx";
 import { ConversationHeading } from "./ConversationMenu.jsx";
-import { ReplyActions } from "./ReplyActions.jsx";
+import { ReplyActions, UserMessage } from "./ReplyActions.jsx";
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
@@ -147,12 +147,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
               {boot.active.status === "preparing" ? "正在准备任务" : "正在执行"} ·{" "}
               {boot.sessions.find((s) => s.id === boot.active.sessionId)
                 ?.title || "当前任务"}
-              <small>
-                {boot.active.sessionId === session?.id &&
-                task?.id === boot.active.taskId
-                  ? phaseLabel(task.phase)
-                  : "可浏览历史，草稿不会排队"}
-              </small>
+              <small>可浏览历史，草稿不会排队</small>
             </span>
             <button
               onClick={() =>
@@ -234,6 +229,8 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
               </section>
             ) : (
               session.turns.map((turn) => {
+                const inProgress = ["running", "preparing", "cancelling"].includes(turn.status);
+                const canStop = inProgress && boot.active?.status !== "preparing" && boot.active?.taskId === turn.taskId;
                 return (
                 <section
                   className={styles.turn}
@@ -242,28 +239,20 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                   key={turn.taskId}
                 >
                   <div className={styles.turnInput} data-task-id={turn.taskId} data-reading-part="input" tabIndex={-1}>
-
-                    <div className={styles.userText}>{turn.input}
-                      {!!turn.materials?.length&&<ul className={styles.sentMaterials} aria-label="已发送材料">
-                        {turn.materials.map(item=><li key={item.id}>{item.name??"已保存材料"}</li>)}
-                      </ul>}
-                    </div>
+                    <UserMessage turn={turn} onCopy={onCopy} />
                   </div>
                   <article className={styles.answer} data-task-id={turn.taskId} data-reading-part="result" data-result-revision={turn.resultRevision || undefined} tabIndex={-1}>
-                    <ReplyHeading turn={turn} now={now} teamId={replyTeamId} />
-                    {turn.status === "running" && boot.active?.status !== "preparing" && boot.active?.taskId === turn.taskId && <div className={styles.runState} role="status"><span>{phaseLabel(state.tasksById[turn.taskId]?.phase)} · {typeof state.tasksById[turn.taskId]?.usage?.calls === "number" ? `已发 ${state.tasksById[turn.taskId].usage.calls} 次调用` : "调用数尚未汇总"}</span><button className="stop-button" disabled={!!state.stopping} onClick={cancelTask}>{stopLabel}</button></div>}
+                    <ReplyHeading turn={turn} now={now} teamId={replyTeamId}>
+                      {canStop && <button type="button" className="stop-button" disabled={!!state.stopping || turn.status === "cancelling"} onClick={cancelTask}>{stopLabel}</button>}
+                    </ReplyHeading>
                     {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。请核对已保存的执行记录。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。" : turn.status === "cancelled" ? "已停止。已完成的内容保留，停止不等于回滚；可查看此条执行记录后继续说明下一步。" : "本次未完整完成。请核对已有内容和执行记录；若有成果，文件入口会列在下方。"}</p>}
                     {turn.finalText ? (
                       <div className="prose">
                         <TurnMarkdown text={turn.finalText} sessionId={session.id} taskId={turn.taskId} resolveImage={commands.resolveImage} />
                       </div>
-                    ) : (
+                    ) : !inProgress && (
                       <div className={styles.incompleteAnswer}>
-                        <p>
-                          {turn.status === "running"
-                            ? `${phaseLabel(task?.id === turn.taskId ? task.phase : null)}，完整交付将在结束后显示。`
-                            : "这轮没有完整最终稿。执行记录保留已取得的内容；可交付文件以本条文件清单为准。"}
-                        </p>
+                        <p>这轮没有完整最终稿。执行记录保留已取得的内容；可交付文件以本条文件清单为准。</p>
                         {task?.id === turn.taskId && task.error && (
                           <p className="error-text">{task.error}</p>
                         )}
@@ -326,6 +315,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             onRetryMaterial={onRetryMaterial}
             onChooseProjectFiles={onChooseProjectFiles}
             onAssociateProject={onAssociateProject}
+            onPrepareProject={session?.project && session.projectDirectoryAvailable !== false && onPrepareProject
+              ? ()=>onPrepareProject(session.project,session.projectStatus?.preparation) : undefined}
+            onWorkspaceMenu={workspace ? onWorkspaceMenu : undefined}
             onChooseSkill={onChooseSkill}
             selectedSkill={state.selectedSkill}
             onRemoveSkill={commands.removeSkill}

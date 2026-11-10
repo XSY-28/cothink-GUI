@@ -1078,7 +1078,7 @@ export function useGuiWorkspace(api) {
   function localDestination(command){
     return ({settings:"settings",models:"models",team:"team",help:"help"})[command];
   }
-  async function submit({sessionId = selected.current, input, workRequest} = {}) {
+  async function submit({sessionId = selected.current, input} = {}) {
     if(creationBusy())return;
     if(!sessionId&&!selected.current&&workspaceRef.current===null){
       if(connection==="reconnecting"||bootstrap.shutdown?.requested||bootstrap.active||submissionBusy.current||pendingRef.current)return;
@@ -1090,13 +1090,13 @@ export function useGuiWorkspace(api) {
       if(materialBatches.current.has(HOME)||materialRowsFor(HOME).some(row=>row.status!=="ready")){setError("请完成、核对或移除未就绪材料。");return;}
       try{
         const result=await transferHome({send:true});
-        if(result?.send)return submitSaved(result.session,{workRequest});
+        if(result?.send)return submitSaved(result.session);
       }catch(error){setError(error.message);}
       return;
     }
-    return submitSaved(session,{sessionId,input,workRequest});
+    return submitSaved(session,{sessionId,input});
   }
-  async function submitSaved(session,{sessionId=session?.id,input,workRequest}={}){
+  async function submitSaved(session,{sessionId=session?.id,input}={}){
     if (!session || session.readOnly || session.navigation?.archived || session.id !== sessionId || selected.current !== sessionId ||
         bootstrap.workspaces?.some(row=>row.id===session.workspaceId && row.archived)) return;
     const snapshot = book.current.snapshot(sessionId);
@@ -1111,7 +1111,6 @@ export function useGuiWorkspace(api) {
     if (connection === "reconnecting" || bootstrap.shutdown?.requested) {setError("宿主未连接或正在退出；草稿保留，不发送新任务。");return;}
     if (bootstrap.active || bootstrap.extensionUI?.command || submissionBusy.current || pendingRef.current || !session.team) return;
     const choice = {request:snapshot.workRequest??null,id:snapshot.selectionId,turnOptions:snapshot.turnOptions??null};
-    workRequest ??= snapshot.workRequest;
     submissionBusy.current = true;
     setSubmitting(true);
     setError("");
@@ -1130,7 +1129,6 @@ export function useGuiWorkspace(api) {
         if(now.editId===snapshot.editId){book.current.edit(sessionId,{text:""});syncEditor(sessionId);await flushDraft(sessionId);}
         await refresh();return;
       }
-      if (workRequest && !session.project) { setError("制作HTML/SVG需要先选择项目；草稿已保留。"); return; }
       const association = {sessionId, submissionId: crypto.randomUUID(), editorSnapshot:snapshot, ...(choice ? {selectionId:choice.id,workRequest:choice.request} : {})};
       storePending(association);
       setPendingStatus("正在确认本次提交…");
@@ -1150,6 +1148,7 @@ export function useGuiWorkspace(api) {
     } catch (e) {
       if (submitted && !e.unknown) { storePending(null); setPendingStatus(""); }
       setError(e.message);
+      if (submitted && e.code === "PROJECT_NOT_PREPARED") await refresh().catch(()=>{});
       if (submitted && e.unknown) {
         submissionError.current = {sessionId:pendingRef.current?.sessionId, submissionId:pendingRef.current?.submissionId, errorRevision:errorRevision.current};
         setPendingStatus("提交确认丢失，先读取同一 submissionId 的记录。不会自动重发。");

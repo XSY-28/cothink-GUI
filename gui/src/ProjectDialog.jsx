@@ -194,7 +194,7 @@ export function ProjectPreparationDialog({commands,path,initialPreparation,onClo
         <dt>提交</dt><dd>{result.expectedCommit}</dd>
       </dl></details>
     </>}
-    {status==="ready" && <p role="status">文件工作起点已核对。原任务仍保留，你可以明确继续。</p>}
+    {status==="ready" && <p role="status">文件工作起点已核对。</p>}
     {(error||result?.error) && <p className="error-text" role="alert">{error||result.error}</p>}
     <div className="form-actions">
       <button disabled={busy} onClick={onClose}>关闭</button>
