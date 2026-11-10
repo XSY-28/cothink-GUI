@@ -1,3 +1,10 @@
+export function copyText(text) {
+  const desktop = window.cothinkDesktop;
+  return desktop?.writeClipboardText
+    ? desktop.writeClipboardText(text)
+    : navigator.clipboard.writeText(text);
+}
+
 // Transport owns credentials and reconnects only reads. Mutations are sent once.
 export function consumeToken(win = window) {
   const token = new URLSearchParams(win.location.hash.slice(1)).get("token");

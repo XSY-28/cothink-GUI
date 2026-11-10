@@ -2,9 +2,13 @@
 // COTHINK_DESKTOP_APP=/absolute/CoThink.app npm run test:desktop-app
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
+import {once} from 'node:events';
 import {mkdtempSync,readdirSync,readFileSync,renameSync,mkdirSync,rmdirSync,rmSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {pathToFileURL} from 'node:url';
 import {_electron as electron} from 'playwright';
 import {verifyPackagedTeamPortraits} from './helpers/desktop-team-portrait.js';
 const appPath=process.env.COTHINK_DESKTOP_APP;
@@ -80,6 +84,100 @@ async function pendingQuit(f) {
 test('packaged Team portraits reveal the name only after hover dwell',async t=>{
  await verifyPackagedTeamPortraits(t,{appPath,launchCandidate});
 });
+
+async function preservePasteboard(testText, run) {
+ // Keep every representation in memory, including images and Finder items.
+ // Restore only if our unique fixture text is still on the pasteboard.
+ const helper = spawn('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `
+  ObjC.import('AppKit');
+  function run(argv) {
+   const pasteboard = $.NSPasteboard.generalPasteboard;
+   const saved = $.NSMutableArray.alloc.init;
+   for (const original of pasteboard.pasteboardItems.js || []) {
+    const item = $.NSPasteboardItem.alloc.init;
+    for (const type of original.types.js) {
+     if (!item.setDataForType(original.dataForType(type), type))
+      throw Error('Cannot preserve this pasteboard representation');
+    }
+    saved.addObject(item);
+   }
+   $.NSFileHandle.fileHandleWithStandardOutput.writeData($('ready\\n').dataUsingEncoding($.NSUTF8StringEncoding));
+   $.NSFileHandle.fileHandleWithStandardInput.readDataOfLength(1);
+   if (ObjC.unwrap(pasteboard.stringForType($.NSPasteboardTypeString)) === argv[0]) {
+    pasteboard.clearContents;
+    if (saved.count && !pasteboard.writeObjects(saved)) throw Error('Could not restore the pasteboard');
+   }
+  }
+ `, testText], {stdio:['pipe','pipe','inherit']});
+ const exited = once(helper, 'exit');
+ await Promise.race([
+  once(helper.stdout, 'data'),
+  exited.then(([code]) => { throw Error(`Pasteboard preservation could not start (${code})`); }),
+ ]);
+ try {
+  await run();
+ } finally {
+  helper.stdin.end();
+  assert.deepEqual(await exited, [0, null], 'the original pasteboard was preserved');
+ }
+}
+
+test('packaged copy buttons write original text to the system clipboard', {timeout:30000}, async t=>{
+ const backend = join(appPath, 'Contents/Resources/app/backend');
+ const load = path => import(pathToFileURL(join(backend, path)));
+ const input = `用户消息：保留空格  😀\n第二行 ${randomUUID()}`;
+ const code = `const 消息 = "保留空格  😀";\n// ${randomUUID()}\n`;
+ const reply = '助手回复：保留原文\n\n**第二段**\n\n```js\n' + code + '```';
+ const teamName = '剪贴板验收';
+ const {app,page} = await launchCandidate(t, async home=>{
+  const [{createGuiWorkspace},{createTask},{SessionManager}] = await Promise.all([
+   load('src/gui-workspace-state.js'),
+   load('src/task.js'),
+   load('node_modules/@earendil-works/pi-coding-agent/dist/index.js'),
+  ]);
+  const workspaceId = randomUUID();
+  createGuiWorkspace(home, {workspaceId, name:teamName, project:null, defaultRosterId:null});
+  const manager = SessionManager.create(home, join(home,'pi/sessions/main'));
+  manager.appendCustomEntry('cothink-project', {project:null});
+  manager.appendCustomEntry('cothink-gui-workspace', {workspaceId});
+  const models = {main:{provider:'fixture',modelId:'main'},secondary:[]};
+  const task = createTask({home,input,models,sessionId:manager.getSessionId(),singleModel:true});
+  const request = {id:randomUUID(),taskId:task.record.id,status:'completed',sent:false,events:[],text:reply};
+  task.register(request);
+  task.writeRequest(request);
+  task.record.finalCallId = request.id;
+  task.finish('completed');
+  manager.appendCustomEntry('cothink-task', {taskId:task.record.id});
+  manager.appendMessage({role:'user',content:input,timestamp:Date.now()});
+  manager.appendMessage({
+   role:'assistant',content:[{type:'text',text:reply}],api:'openai-completions',provider:'fixture',model:'main',
+   usage:{input:0,output:0,totalTokens:0,cost:{input:0,output:0,total:0}},stopReason:'stop',timestamp:Date.now(),
+  });
+ });
+ await page.getByRole('navigation', {name:'工作导航'}).getByRole('button', {name:teamName, exact:true}).click();
+ await page.locator('[data-reading-part="input"]').getByText('用户消息：保留空格').hover();
+ const messages = '未能访问系统剪贴板，请手动选中文字复制。';
+ const cases = [
+  ['复制消息', input, '已复制原文', messages],
+  ['复制原文', reply, '已复制原文', messages],
+  ['复制代码', code, '已复制', '复制失败，请手动选中'],
+ ];
+ for (const [name,text,success,failure] of cases) {
+  const copied = page.getByText(success, {exact:true});
+  const failed = page.getByText(failure, {exact:true});
+  await preservePasteboard(text, async ()=>{
+   await page.getByRole('button', {name,exact:true}).click();
+   assert.equal(await copied.or(failed).textContent({timeout:4000}), success);
+   const matches = await app.evaluate(({clipboard}, expected)=>clipboard.readText() === expected, text);
+   assert.equal(matches, true, `${name} preserves Unicode, whitespace and line breaks in the native clipboard`);
+  });
+  if (name === '复制消息') await copied.waitFor({state:'hidden',timeout:6000});
+ }
+ const closed = app.waitForEvent('close');
+ await app.evaluate(({app})=>app.quit());
+ await closed;
+});
+
 test('actual App keeps native window buttons clear of the compact UI at both widths',async t=>{
  const f=await fixture(t);
  const rail=f.page.getByRole('navigation',{name:'工作导航'});

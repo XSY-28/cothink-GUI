@@ -1,4 +1,4 @@
-const {app,BrowserWindow,Menu,ipcMain,dialog,shell}=require('electron');
+const {app,BrowserWindow,Menu,ipcMain,dialog,shell,clipboard}=require('electron');
 const {spawn}=require('node:child_process');
 const {dirname,isAbsolute,join}=require('node:path');
 const {readFileSync,realpathSync,statSync}=require('node:fs');
@@ -125,6 +125,10 @@ else {
       const selected=availableDirectory(result.filePaths[0]);
       if (selected) lastSelectedDirectory=selected;
       return selected??null;
+    });
+    ipcMain.handle('cothink:copy-text',(event,text)=>{
+      if(!trusted(event)||typeof text!=='string')throw Error('剪贴板写入请求无效。');
+      clipboard.writeText(text);
     });
     ipcMain.on('cothink:close-ack',(event,value)=>{
       if(!trusted(event)||!pendingClose||!value||Object.keys(value).some(k=>!['requestId','saved'].includes(k))||value.requestId!==pendingClose.requestId||typeof value.saved!=='boolean')return;
