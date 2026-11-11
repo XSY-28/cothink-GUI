@@ -8,7 +8,26 @@ import {randomUUID} from 'node:crypto';
 import {SessionManager} from '@earendil-works/pi-coding-agent';
 import { fixtureConversation, prepareSubmit } from './helpers/gui-controller-fixture.js';
 import {createGuiController} from '../src/gui-controller.js';
+import {GUI_INPUT_VERSION} from '../src/gui-turn-options.js';
 import { settled, setup } from "./context-management.fixture.js";
+
+test('context organize consumes the current all-model selection and freezes it in its actual summary request',async t=>{
+ const {f,c,s}=await setup(t,()=>({text:'Summary under the current selected thinking level.'}));
+ const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+ for(const model of catalog.providers.fixture.models)model.reasoning=true;
+ writeFileSync(path,JSON.stringify(catalog));
+ await c.action('session.thinking',{sessionId:s.id,level:'low',scope:'all'});
+ const sourceLeaf=(await c.session(s.id)).branchAnchor,operationId=randomUUID();
+ await c.action('context.organize',{sessionId:s.id,operationId,sourceLeaf,budget:{maxCalls:2},protocolVersion:1});
+ const result=await settled(c,operationId);
+ assert.equal(result.status,'completed',result.error);
+ assert.ok(f.calls.length>=1);
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort==='low'));
+ const {readTask,readRequests}=await import('../src/task.js');
+ const task=readTask(f.home,operationId);
+ assert.ok([task.frozenConfig.main,...task.frozenConfig.secondary].every(ref=>ref.thinkingLevel==='low'));
+ assert.ok(readRequests(f.home,task).every(request=>request.requestedModel.thinkingLevel==='low'&&request.payload.reasoning_effort==='low'));
+});
 
 for(const split of [false,true])test(`controller organize records actual ${split?2:1} summary requests and retains original history`,async t=>{
  const {f,c,s,path,leaf}=await setup(t,()=>({text:'A sourced summary retaining the original constraints.'}),split),before=readFileSync(path,'utf8'),operationId=randomUUID();
@@ -73,7 +92,7 @@ test('writer token lost after response prevents compaction and later generation'
 });
 test('HTTP context action and read-only operation route enforce authentication and identity',async t=>{
  const {f,c,s,leaf}=await setup(t,()=>({text:'HTTP summary'}));await c.close();
- const {startGuiServer}=await import('../src/gui-server.js');const server=await startGuiServer({home:f.home,cwd:f.cwd,open:false,port:0});t.after(()=>server.close());const origin=new URL(server.url).origin,headers={Authorization:'Bearer '+server.token,'Content-Type':'application/json', "X-CoThink-GUI-Input":"3"},operationId=randomUUID();
+ const {startGuiServer}=await import('../src/gui-server.js');const server=await startGuiServer({home:f.home,cwd:f.cwd,open:false,port:0});t.after(()=>server.close());const origin=new URL(server.url).origin,headers={Authorization:'Bearer '+server.token,'Content-Type':'application/json', "X-CoThink-GUI-Input":GUI_INPUT_VERSION},operationId=randomUUID();
  const response=await fetch(origin+'/api/action',{method:'POST',headers,body:JSON.stringify({action:'context.organize',args:{sessionId:s.id,operationId,sourceLeaf:leaf,budget:{maxCalls:2},protocolVersion:1}})});assert.equal(response.status,200,await response.clone().text());assert.equal((await response.json()).taskId,operationId);
  let result;for(let i=0;i<500;i++){result=await (await fetch(origin+'/api/context-operation?operationId='+operationId,{headers})).json();if(result.status==='completed')break;await new Promise(r=>setTimeout(r,10));}assert.equal(result.applied,true);const count=f.calls.length;
  assert.equal((await fetch(origin+'/api/context-operation?operationId='+operationId)).status,403);assert.equal((await fetch(origin+'/api/context-operation?operationId='+operationId+'&path=/etc/passwd',{headers})).status,400);

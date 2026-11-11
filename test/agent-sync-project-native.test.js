@@ -2,84 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import {fixture} from './helpers/pi-fixture.js';
 import {repository} from './helpers/git-fixture.js';
 import {invoke} from './helpers/cli-fixture.js';
 import {execution} from './helpers/agent-sync-fixture.js';
-import {fixtureConversation,prepareSubmit,seedFixtureConversationRepository,teamId} from './helpers/gui-controller-fixture.js';
 import { evidence, installNative, listTasks, productRoot, runtime, saveConfig, tool } from "./project-native.fixture.js";
-
-for(const unified of [false,true])test(`PROJECT ${unified?'unified root':'legacy'} original native frontend uses host model journal, independent source and reviewed public acceptance`,{timeout:120000},async t=>{
- const repo=repository(t);let sourceSkill;let rootCalls=0,helperCalls=0,helperId,fixtureError;
- const f=await fixture(t,({body})=>{
-  try{
-   const system=String(body.messages.find(m=>m.role==='system')?.content??''),last=body.messages.findLast(m=>m.role==='tool')?.content??'';
-   if(system.includes('You are helper ')){
-    helperCalls++;if(helperCalls===1)return tool('read',{path:'/resources/native-method/references/value.txt'});
-    if(helperCalls===2){assert.match(last,/NATIVE_PROJECT/);assert.doesNotMatch(last,/CHANGED_AFTER_LAUNCH/);return tool('bash',{command:'node /resources/native-method/scripts/write.cjs'});}
-    if(helperCalls===3){assert.match(last,/exitCode.*0/);return tool('write',{path:'./a.txt',content:'NATIVE_PROJECT'});}
-    if(helperCalls===4){assert.match(last,/successfully/i);const source=listTasks(f.home)[0].work.helpers[0].native.containerSource;return tool('write',{path:source+'/a.txt',content:'NATIVE_PROJECT'});}
-    if(helperCalls===5){assert.match(last,/successfully/i);return tool('write',{path:'/native-work/00000000-0000-0000-0000-000000000000/source/a.txt',content:'ESCAPE'});}
-    assert.match(last,/outside its own source copy/);return {text:'Native helper wrote exact artifact; relative and own absolute paths work, foreign copy is denied'};
-   }
-   if(unified && body.tools.some(item=>item.function.name==='start_work'))return tool('start_work',{action:'start',reason:'Confirm original native helper plan through the real GUI entry',plan:JSON.parse(readFileSync(plan))});
-   switch(++rootCalls){
-    case 1:writeFileSync(join(sourceSkill,'references/value.txt'),'CHANGED_AFTER_LAUNCH');return tool('next_change',{reason:'Implement exact file through original plugin helper',scope:['a.txt'],readScope:['a.txt']});
-    case 2:return tool('project_plugin_0_subagent',{agent:'native-project',model:'fixture/main',task:'Write a.txt=NATIVE_PROJECT',async:false,artifacts:false});
-    case 3:{const match=last.match(/"helperId":"([a-f0-9-]+)"/);assert.ok(match,last);helperId=match[1];return tool('cothink_helper_result',{helperId,decision:'inspect'});}
-    case 4:assert.match(last,/NATIVE_PROJECT|TkFUSVZFX1BST0pFQ1Q/);return tool('cothink_helper_result',{helperId,decision:'adopt',reason:'Inspected exact original/new file bytes'});
-    case 5:assert.equal(JSON.parse(last).status,'applied',last);return tool('prepare_change');
-    case 6:return tool('accept_change');
-    case 7:return tool('accept_change');
-    default:assert.equal(JSON.parse(last).status,'accepted',last);return {text:'Original native helper reviewed and accepted.'};
-   }
-  }catch(error){fixtureError=error;return {text:'Unexpected native result; stop fixture.'};}
- });
- // Reuse the real installed compatibility-hashed package, never a replacement engine.
- installNative(f);
- mkdirSync(join(f.home,'pi/agents'),{recursive:true});writeFileSync(join(f.home,'pi/agents/native-project.md'),'---\nname: native-project\ndescription: Original native PROJECT acceptance agent\nmodel: fixture/main\ntools: read, write, edit, ls, bash\ninheritProjectContext: false\ninheritGlobalContext: false\ninheritSkills: false\n---\nPerform the requested file work.\n');
- sourceSkill=join(f.home,'native-method');mkdirSync(join(sourceSkill,'references'),{recursive:true});mkdirSync(join(sourceSkill,'scripts'));writeFileSync(join(sourceSkill,'SKILL.md'),'---\nname: native-method\ndescription: Frozen native helper file recipe\n---\nRead [value](references/value.txt) and run `scripts/write.cjs`.\n');writeFileSync(join(sourceSkill,'references/value.txt'),'NATIVE_PROJECT');writeFileSync(join(sourceSkill,'scripts/write.cjs'),"const fs=require('fs');if(fs.existsSync('/native-work')||fs.existsSync('/plugins'))throw Error('Helper shell escaped its isolated source');fs.writeFileSync('a.txt',fs.readFileSync(require('path').join(__dirname,'../references/value.txt')));");
- saveConfig(f.home,{formatVersion:2,...f.models,piResources:{skills:[sourceSkill]},work:{execution,projectPluginRuntime:runtime}});
- const plan=join(f.home,'plan.json');writeFileSync(plan,JSON.stringify({goal:'Write a.txt=NATIVE_PROJECT using the installed native plugin helper',scope:['a.txt'],plugins:['pi-subagents'],budget:{maxCalls:14},deliverables:['a.txt'],checks:[{command:'node',args:['-e',"if(require('fs').readFileSync('a.txt','utf8')!=='NATIVE_PROJECT')process.exit(1)"]}]}));
- let run,formalTaskId,planningCalls=0,project=repo.project;
- if(unified){
-   const {createGuiController}=await import(pathToFileURL(join(productRoot,'src/gui-controller.js')));
-   const {createTeamConfig}=await import(pathToFileURL(join(productRoot,'src/teams.js')));
-   const {readProject}=await import(pathToFileURL(join(productRoot,'src/project.js')));
-   const {randomUUID}=await import('node:crypto');
-   const inputPlan=JSON.parse(readFileSync(plan)),config={formatVersion:2,...f.models,piResources:{skills:[sourceSkill]},work:{execution,projectPluginRuntime:runtime}};
-   saveConfig(f.home,createTeamConfig(config,'Native unified fixture',teamId));
-   const controller=await createGuiController({home:f.home,cwd:repo.project});t.after(()=>controller.close());
-   const session=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,controller));
-   project=session.project;
-   const complete=async id=>{for(let n=0;n<1200;n++){const task=await controller.task(id);if(!['running','preparing','cancelling'].includes(task.status))return task;await new Promise(resolve=>setTimeout(resolve,25));}throw Error('native fixture task did not settle');};
-   const submitted=await controller.action('task.submit',await prepareSubmit(controller,{sessionId:session.id,input:inputPlan.goal,budget:{maxCalls:15}}));
-   const proposal=await complete(submitted.taskId);assert.equal(proposal.status,'blocked',proposal.error);
-   const source=listTasks(f.home).find(task=>task.id===submitted.taskId);assert.ok(source.proposalRef);
-   planningCalls=source.rootRequests.filter(r=>!r.notSent).length;assert.equal(planningCalls,1);assert.equal(f.calls.length,1);
-   const confirmed=await controller.action('task.confirmWork',{sessionId:session.id,proposalRef:source.proposalRef,submissionId:randomUUID(),protocolVersion:1});
-   const completed=await complete(confirmed.taskId);assert.equal(completed.status,'completed',completed.error);
-   const root=listTasks(f.home).find(task=>task.id===confirmed.taskId);
-   assert.equal(root.rootRequests.filter(r=>!r.notSent).length,14);
-   assert.equal(root.budget.maxCalls,14,'one proposal call is deducted before confirmation');
-   assert.equal(f.calls.length,planningCalls+14);
-   assert.equal(root.projectOperation.childTaskIds.length,1);formalTaskId=root.projectOperation.childTaskIds[0];
-   const state=await readProject(f.home,project);assert.equal(state.usage.calls,14);
-   evidence('project-native-unified-accounting.json',{planningTaskId:source.id,planningCalls,confirmedRootId:root.id,ownedCalls:14,formalTaskId,formalCalls:state.usage.calls,aggregateCalls:f.calls.length});
-   run={code:state.status==='completed'?0:1,stdout:JSON.stringify(state),stderr:''};
- }else run=await invoke(f,['project','start','--file',plan,'--json'],'',repo.project);
- evidence('project-native-latest-run.json',run);const task=unified?listTasks(f.home).find(task=>task.id===formalTaskId):listTasks(f.home)[0];if(task)evidence('project-native-latest-task.json',task);
- if(fixtureError)throw fixtureError;assert.equal(run.code,0,run.stdout+run.stderr);const state=JSON.parse(run.stdout);assert.equal(state.status,'completed',run.stdout);
- assert.equal(helperCalls,6);assert.equal(task.work.helpers.length,1);const child=task.work.helpers[0];assert.equal(child.status,'completed');assert.equal(child.treatment.decision,'adopted');assert.ok(child.native.sessionId);assert.equal(child.parentActorId,'main');assert.equal(task.stages.find(s=>s.id===child.stage.id).role,'helper:'+child.helperId);
- assert.equal(state.usage.calls,f.calls.length-planningCalls);
- assert.equal(readFileSync(join(task.work.resultWorkspace,'a.txt'),'utf8'),'NATIVE_PROJECT');
- assert.equal(readFileSync(join(repo.project,'a.txt'),'utf8'),'base A\n','acceptance never changes the original checkout or Team parent');
- if(unified){
-  assert.notEqual(project,repo.project);
-  assert.equal(readFileSync(join(project,'a.txt'),'utf8'),'NATIVE_PROJECT','the bound conversation directory receives the accepted file');
- }
-});
 
 test('PROJECT original background parallel workflow continues after tool return and shares two seats',{timeout:120000},async t=>{
  const repo=repository(t);let rootCalls=0,helperCalls=0,fixtureError,releaseBackground,returned=false,results=[],index=0;

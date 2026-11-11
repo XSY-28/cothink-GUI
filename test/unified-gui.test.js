@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
+import {readFileSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
 import { fixtureConversation, prepareSubmit, seedFixtureConversationRepository, submitDraft } from './helpers/gui-controller-fixture.js';
 import {fixture} from './helpers/pi-fixture.js';
 import {repository} from './helpers/git-fixture.js';
@@ -23,46 +25,6 @@ test('GUI protocol cutover preserves one root, branch marker and per-turn cap',a
  const turn=(await c.session(s.id)).turns[0];assert.equal(turn.flow,'unified');assert.ok(turn.endedAt);
  await assert.rejects(c.action('session.mode',{sessionId:s.id,mode:'one'}),/移除/);
 });
-test('two GUI confirmation IDs consume one immutable proposal and open accepted file through root',async t=>{
- const repo=repository(t),plan={goal:'Change a.txt',scope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"if(!require('fs').readFileSync('a.txt','utf8').includes('changed A'))process.exit(1)"]}]};
- const replies=[{toolCalls:[{name:'start_work',args:{action:'start',reason:'edit',plan}}]},
- {toolCalls:[{name:'read',args:{path:'a.txt'}}]},{toolCalls:[{name:'edit',args:{path:'a.txt',edits:[{oldText:'base A',newText:'changed A'}]}}]},{toolCalls:[{name:'accept_change',args:{}}]},{text:'Changed A'}];
- const f=await fixture(t,(_,n)=>replies[n-1]??{text:'done'}),c=await controller(t,f,{execution});
- const s=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
- const a=await submitDraft(c,{sessionId:s.id,input:'Change a.txt',submissionId:'proposal',protocolVersion:1,budget:{maxCalls:7},constraints:{allowedSubtasks:[]}});
- await complete(c,a.taskId);const source=readTask(f.home,a.taskId);
- const editorBefore=await c.session(s.id);
- const nextVersion=(await c.action("project.materials",{ownerId:s.id,source:"saved"})).version;
- const nextOptions={id:randomUUID(),readOnly:true,delegate:false,review:false,maxCalls:'2',readAllowed:true,readPaths:'a.txt',readProject:editorBefore.project,readWorkspaceId:editorBefore.workspaceId,readVersion:nextVersion};
- await c.action('session.draft',{sessionId:s.id,text:'Next turn draft stays here',workRequest:null,selectionId:null,editId:randomUUID(),expectedDraftRevision:editorBefore.draftRevision,branchAnchor:editorBefore.branchAnchor,turnOptions:nextOptions});
- const nextTeam=await c.action('team.save',{name:'Next roster',main:f.models.secondary[1],secondary:[f.models.main]});
- await c.action('session.team',{sessionId:s.id,teamId:nextTeam.id});
- const args={sessionId:s.id,proposalRef:source.proposalRef,protocolVersion:1};
- const [one,two]=await Promise.all([c.action('task.confirmWork',{...args,submissionId:'confirm1'}),c.action('task.confirmWork',{...args,submissionId:'confirm2'})]);
- assert.equal(one.taskId,two.taskId);const result=await complete(c,one.taskId);assert.equal(result.status,'completed',result.error);
- const files=await c.files(one.taskId);assert.equal(files.items[0].ref.taskId,one.taskId);
- const file=await c.file(files.items[0].ref,{purpose:'source'});assert.equal(file.bytes.toString(),'changed A\n');
- const duplicate=await c.action('task.confirmWork',{...args,submissionId:'confirm3'});assert.equal(duplicate.taskId,one.taskId);assert.equal(f.calls.length,5);
- assert.equal(readTask(f.home,one.taskId).budget.maxCalls,6);
- const preserved=await c.session(s.id);assert.equal(preserved.turns.length,2);assert.equal(preserved.draft,'Next turn draft stays here');assert.deepEqual(preserved.editor.turnOptions,nextOptions);assert.equal(preserved.team.id,nextTeam.id);assert.ok(f.calls.every(call=>call.body.model==='main'),'confirmation retains proposal roster');
-});
-
-test('reserved confirmation survives host restart and explicit continue uses original root ID',async t=>{
- const {reserveConfirmation}=await import('../src/project-turn.js');const {writePrivateJson}=await import('../src/storage.js');const {join}=await import('node:path');
- const repo=repository(t),plan={goal:'Verify a.txt',scope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"require('fs').accessSync('a.txt')"]}]};
- const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:'start_work',args:{action:'start',reason:'verify',plan}}]}:{text:'Verified'});
- const c=await controller(t,f,{execution}),s=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
- const accepted=await submitDraft(c,{sessionId:s.id,input:'Verify a.txt',submissionId:'source',protocolVersion:1});await complete(c,accepted.taskId);
- await c.close();
- const source=readTask(f.home,accepted.taskId);
- const reservation=await reserveConfirmation({home:f.home,source,proposalRef:source.proposalRef,sessionId:s.id,workspaceId:source.workspace.id,submissionId:'original-confirm',save:()=>writePrivateJson(join(f.home,'tasks',source.id+'.json'),source)});
- const reopened=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>reopened.close());
- await reopened.session(s.id);assert.equal(f.calls.length,1,'observation never resumes');
- const continued=await reopened.action('task.confirmWork',{sessionId:s.id,submissionId:'explicit-continue',proposalRef:source.proposalRef,protocolVersion:1});
- assert.equal(continued.taskId,reservation.taskId);assert.equal((await complete(reopened,continued.taskId)).status,'completed');assert.equal(f.calls.length,2);
- assert.equal(readTask(f.home,continued.taskId).submissionId,'original-confirm');
-});
-
 function twoVerifiedFiles() {
  return {goal:'Verify both files',scope:['a.txt','b.txt'],steps:['a','b'].map(id=>({id,goal:`Verify ${id}.txt`,scope:[`${id}.txt`],deliverables:[`${id}.txt`],dependsOn:id==='b'?['a']:[],checks:[{command:'node',args:['-e',`require('fs').accessSync('${id}.txt')`]}]}))};
 }
@@ -74,16 +36,24 @@ test('a verified multi-step delivery gets one manager report and follows the sel
    if(n===7)return {toolCalls:[{name:'search_context',args:{purpose:'attribution',taskId:rootId,query:'manager-final'}}]};
    if(n===8)return {toolCalls:[{name:'read_context',args:{purpose:'attribution',ref:toolResult(call).items[0].ref}}]};
    return replies[n-1]??{text:'The process facts confirm the manager.'};
- }),c=await controller(t,f,{execution});
+ });
+ const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+ for(const model of catalog.providers.fixture.models)model.reasoning=true;
+ writeFileSync(path,JSON.stringify(catalog));
+ const c=await controller(t,f,{execution});
  const s=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
+ await c.action('session.thinking',{sessionId:s.id,level:'low',scope:'all'});
  const submit=(c,sessionId,input,budget)=>submitDraft(c,{sessionId,input,submissionId:randomUUID(),protocolVersion:1,budget});
  const proposed=await submit(c,s.id,'Verify both actual files',{maxCalls:4});await complete(c,proposed.taskId);
+ await c.action('session.thinking',{sessionId:s.id,level:'high',scope:'all'});
  const root=await c.action('task.confirmWork',{sessionId:s.id,proposalRef:readTask(f.home,proposed.taskId).proposalRef,submissionId:randomUUID(),protocolVersion:1});
  rootId=root.taskId;
  const delivered=await complete(c,root.taskId);
  assert.equal(delivered.status,'completed',delivered.error);
  assert.equal(f.calls.length,4);
  assert.equal(f.calls[3].body.model,'main');assert.ok(!f.calls[3].body.tools?.length);
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort==='low'),'both executors and manager synthesis inherit the proposal snapshot');
+ assert.equal(readTask(f.home,root.taskId).stages.find(stage=>stage.phase==='manager-final').modelRef.thinkingLevel,'low');
  const synthesis=JSON.stringify(f.calls[3].body.messages);
  assert.match(synthesis,/Verify both actual files/);assert.match(synthesis,/STEP_REPORT_A/);assert.match(synthesis,/STEP_REPORT_B/);
  const original=await c.session(s.id);
@@ -94,6 +64,7 @@ test('a verified multi-step delivery gets one manager report and follows the sel
  const fork=await reopened.action('session.fork',{sessionId:s.id,taskId:root.taskId});
  const forkTurn=await submit(reopened,fork.id,'Continue on the branch');assert.equal((await complete(reopened,forkTurn.taskId)).status,'completed');
  for(const request of f.calls.slice(4)){
+   assert.equal(request.body.reasoning_effort,'high','explicit new turns and their branches use the current conversation selection');
    const messages=JSON.stringify(request.body.messages);
    assert.match(messages,/Verify both actual files/);
    assert.ok(request.body.messages.some(message=>['system','developer'].includes(message.role)&&message.content.includes('conversation manager')));
@@ -116,8 +87,13 @@ for(const missing of ['budget','unknown'])test(`missing manager report (${missin
    if(n===1)return {toolCalls:[{name:'start_work',args:{action:'start',reason:'Verify',plan}}]};
    if(n<4)return {text:n===2?'STEP_REPORT_A':'STEP_REPORT_B'};
    response.destroy();return null;
- }),c=await controller(t,f,{execution});
+ });
+ const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+ for(const model of catalog.providers.fixture.models)model.reasoning=true;
+ writeFileSync(path,JSON.stringify(catalog));
+ const c=await controller(t,f,{execution});
  const session=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
+ await c.action('session.thinking',{sessionId:session.id,level:'low',scope:'all'});
  const source=await submitDraft(c,{sessionId:session.id,input:'Verify both files',submissionId:randomUUID(),protocolVersion:1,budget:{maxCalls:missing==='budget'?3:4}});
  await complete(c,source.taskId);
  const args={sessionId:session.id,proposalRef:readTask(f.home,source.taskId).proposalRef,submissionId:randomUUID(),protocolVersion:1};
@@ -126,6 +102,7 @@ for(const missing of ['budget','unknown'])test(`missing manager report (${missin
  assert.match(result.error,/缺少经理终稿/);
  assert.equal(f.calls.length,missing==='budget'?3:4);
  assert.equal(readTask(f.home,root.taskId).finalCallId,null);
+ await c.action('session.thinking',{sessionId:session.id,level:'high',scope:'all'});
  await c.close();const reopened=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>reopened.close());
  const fileList=await reopened.files(root.taskId);
  assert.deepEqual(fileList.items.map(file=>file.name),['a.txt','b.txt']);
@@ -134,6 +111,8 @@ for(const missing of ['budget','unknown'])test(`missing manager report (${missin
  assert.match(turn.finalText,/STEP_REPORT_A[\s\S]*STEP_REPORT_B/);
  assert.equal((await reopened.action('task.confirmWork',args)).taskId,root.taskId);
  assert.equal(f.calls.length,missing==='budget'?3:4);
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort==='low'),'recovery observes the original attempt without sending again at the new selection');
+ assert.equal(readTask(f.home,root.taskId).frozenConfig.main.thinkingLevel,'low');
 });
 
 test('resume inherits completed delivery without charging or reparenting old children',async t=>{

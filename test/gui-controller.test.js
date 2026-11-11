@@ -429,49 +429,6 @@ function deferred() {
   return { promise, resolve };
 }
 
-test("accepted submit freezes mode and thinking before immediately following changes, with a cached runtime", async (t) => {
-  const f = await fixture(t);
-  const catalogPath = join(f.home, "pi/models.json");
-  const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
-  catalog.providers.fixture.models[0].reasoning = true;
-  writeFileSync(catalogPath, JSON.stringify(catalog));
-  const c = await controller(t, f),
-    s = await fixtureConversation(t, c);
-  await c.action("session.thinking", { sessionId: s.id, level: "low" });
-  const warm = await submitDraft(c, {
-    sessionId: s.id,
-    input: "warm context",
-    protocolVersion:1, submissionId: "freeze-warm",
-  });
-  await finished(c, warm.taskId);
-  const args=await prepareSubmit(c,{sessionId:s.id,input:"accepted before edits",submissionId:"freeze-current"});
-  const pending=c.action("task.submit",args);
-  const mode = assert.rejects(c.action("session.mode", { sessionId: s.id, mode:"one" }),/移除/);
-  const thinking = c.action("session.thinking", {
-    sessionId: s.id,
-    level: "high",
-  });
-  const current = await pending;
-  await Promise.all([mode, thinking]);
-  const task = await finished(c, current.taskId);
-  assert.equal(
-    task.singleModel,
-    false,
-    "accepted current task keeps its unified flow",
-  );
-  assert.equal(task.team.main.thinkingLevel, "low");
-  assert.equal(f.calls.length, 2);
-  const next = await submitDraft(c, {
-    sessionId: s.id,
-    input: "next snapshot",
-    protocolVersion:1, submissionId: "freeze-next",
-  });
-  const nextTask = await finished(c, next.taskId);
-  assert.equal(nextTask.flow, "unified");
-  assert.equal(nextTask.team.main.thinkingLevel, "high");
-  assert.equal(f.calls.length, 3);
-});
-
 test("runtime initialization handoff allows concurrent metadata saves without losing writer ownership", async (t) => {
   const { ModelRuntime } = await import(sdkUrl);
   const f = await fixture(t),

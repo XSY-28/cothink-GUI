@@ -46,6 +46,8 @@ import { singleLineCommand } from "./setup.js";
 import { releaseNotes } from "./presentation.js";
 import {
   appendConversationEntry,
+  resolveConversationThinking,
+  saveConversationThinking,
   readSessionMode,
   readSessionFlow,
   normalizeConversationEditor,
@@ -67,7 +69,6 @@ import {
   removeGuiTeam,
   saveGuiWork,
   saveGuiProvider,
-  validateGuiThinking,
   saveGuiBuiltinSkills,
   createGuiOAuthManager,saveGuiLocalSkills,guiExecutionConfigDigest,inspectGuiExecution,
 } from "./gui-settings.js";
@@ -630,6 +631,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         ...reading, viewRevision: navigation.navigation?.viewRevision ?? 0,
         forkOf: facts.forkOf,
         thinking: meta.thinking ?? null,
+        thinkingScope: meta.thinkingScope ?? null,
         turns,
         submissions: submissions(),
         readOnly: readOnly || !!membership.workspaceError || !!navigation.navigationError ||
@@ -648,7 +650,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       return safe({
         ...navigationFor(id), persisted: !!info,
         id, title: "历史不可用", project: null, mode, team: null,
-        thinking: null, draft: "", turns: [], submissions: submissions(), readOnly: true,
+        thinking: null, thinkingScope: null, draft: "", turns: [], submissions: submissions(), readOnly: true,
         selectionError: "会话历史或任务请求记录损坏、缺失或不可用；原文件保留，请修复后重新打开。禁止继续生成，未知提交不会重发。",
       });
     }
@@ -1006,8 +1008,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           const disk=readContextDisk(manager.getSessionFile(),sessionId);
           if(contextDigest(disk.getEntries())!==contextDigest(manager.getEntries()))throw sessionStateError('CONTEXT_STORAGE','内存与磁盘历史不一致。');
           const config=loadConfig(home);if(config?.formatVersion!==3||!readSessionTeam(manager.getBranch()))throw Error('请先绑定阵容。');
-          const effective=resolveConversationConfig(config,manager).config,thinking=readConversationMetadata(manager).thinking;
-          if(thinking!==undefined)effective.main.thinkingLevel=thinking;
+          const effective=await resolveConversationThinking(home,resolveConversationConfig(config,manager).config,manager,{mainOnly:true});
           return {effective,workspace:{id:membership.workspaceId??null,project:readSessionProject(manager)},before:structuredClone(manager.getEntries()),opening:runtime(sessionId,holder,effective)};
         });
         rt=await prep.opening;
@@ -1161,9 +1162,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           if (!confirmation && (continuation || snapshot.turnIntent.fileRequired)) await requireGuiFileTask(home,continuation
             ? {...snapshot.workspace,directoryIdentity:continuation.source.workspace.directoryIdentity??undefined}
             : snapshot.workspace,snapshot.config.work);
-          const thinking = readConversationMetadata(manager).thinking;
-          if (!confirmation && thinking !== undefined)
-            snapshot.config.main.thinkingLevel = thinking;
+          if (!confirmation) snapshot.config = await resolveConversationThinking(home, snapshot.config, manager);
           const requestedRead=args.readAuthorization;
           snapshot.readAuthorization=confirmation?null:await freezeReadAuthorization({home,workspace:snapshot.workspace,sessionId,submissionId,editorEditId:args.editorEditId,input:requestedRead?.version?{paths:requestedRead.paths}:requestedRead});
           if(requestedRead?.version&&snapshot.readAuthorization?.version!==requestedRead.version)
@@ -1813,12 +1812,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             }
           }
           if (name === "session.thinking") {
-            const team = readSessionTeam(holder.sessionManager.getBranch());
-            if (!team) throw Error("请先绑定 Team。");
-            await validateGuiThinking(home, team, args.level);
-            appendConversationEntry(target, "cothink-thinking", {
-              level: args.level,
-            });
+            await saveConversationThinking(home, target, args);
           }
           emit();
           const saved=await session(args.sessionId);

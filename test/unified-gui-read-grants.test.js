@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import { fixtureConversation, seedFixtureConversationRepository } from './helpers/gui-controller-fixture.js';
+import {readFileSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {execution} from './helpers/agent-sync-fixture.js';
+import {createGuiController} from '../src/gui-controller.js';
+import { fixtureConversation, seedFixtureConversationRepository, submitDraft } from './helpers/gui-controller-fixture.js';
 import {fixture} from './helpers/pi-fixture.js';
 import {repository} from './helpers/git-fixture.js';
 import {readTask} from '../src/task.js';
@@ -29,4 +33,58 @@ test('legacy editor read choice requires reselection before a model request, and
  assert.equal((await complete(c,accepted.taskId)).status,'completed');
  assert.equal(readTask(f.home,accepted.taskId).readAuthorization.version,version);
  assert.equal(f.calls.length,1);
+});
+
+test('two GUI confirmation IDs consume one immutable proposal and open accepted file through root',async t=>{
+ const repo=repository(t),plan={goal:'Change a.txt',scope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"if(!require('fs').readFileSync('a.txt','utf8').includes('changed A'))process.exit(1)"]}]};
+ const replies=[{toolCalls:[{name:'start_work',args:{action:'start',reason:'edit',plan}}]},
+ {toolCalls:[{name:'read',args:{path:'a.txt'}}]},{toolCalls:[{name:'edit',args:{path:'a.txt',edits:[{oldText:'base A',newText:'changed A'}]}}]},{toolCalls:[{name:'accept_change',args:{}}]},{text:'Changed A'}];
+ const f=await fixture(t,(_,n)=>replies[n-1]??{text:'done'});
+ const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+ for(const model of catalog.providers.fixture.models)model.reasoning=true;
+ writeFileSync(path,JSON.stringify(catalog));
+ const c=await controller(t,f,{execution});
+ const s=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
+ await c.action('session.thinking',{sessionId:s.id,level:'low',scope:'all'});
+ const a=await submitDraft(c,{sessionId:s.id,input:'Change a.txt',submissionId:'proposal',protocolVersion:1,budget:{maxCalls:7},constraints:{allowedSubtasks:[]}});
+ await complete(c,a.taskId);const source=readTask(f.home,a.taskId);
+ const editorBefore=await c.session(s.id);
+ const nextVersion=(await c.action("project.materials",{ownerId:s.id,source:"saved"})).version;
+ const nextOptions={id:randomUUID(),readOnly:true,delegate:false,review:false,maxCalls:'2',readAllowed:true,readPaths:'a.txt',readProject:editorBefore.project,readWorkspaceId:editorBefore.workspaceId,readVersion:nextVersion};
+ await c.action('session.draft',{sessionId:s.id,text:'Next turn draft stays here',workRequest:null,selectionId:null,editId:randomUUID(),expectedDraftRevision:editorBefore.draftRevision,branchAnchor:editorBefore.branchAnchor,turnOptions:nextOptions});
+ const nextTeam=await c.action('team.save',{name:'Next roster',main:f.models.secondary[1],secondary:[f.models.main]});
+ await c.action('session.team',{sessionId:s.id,teamId:nextTeam.id});
+ await c.action('session.thinking',{sessionId:s.id,level:'high',scope:'all'});
+ const args={sessionId:s.id,proposalRef:source.proposalRef,protocolVersion:1};
+ const [one,two]=await Promise.all([c.action('task.confirmWork',{...args,submissionId:'confirm1'}),c.action('task.confirmWork',{...args,submissionId:'confirm2'})]);
+ assert.equal(one.taskId,two.taskId);const result=await complete(c,one.taskId);assert.equal(result.status,'completed',result.error);
+ const files=await c.files(one.taskId);assert.equal(files.items[0].ref.taskId,one.taskId);
+ const file=await c.file(files.items[0].ref,{purpose:'source'});assert.equal(file.bytes.toString(),'changed A\n');
+ const duplicate=await c.action('task.confirmWork',{...args,submissionId:'confirm3'});assert.equal(duplicate.taskId,one.taskId);assert.equal(f.calls.length,5);
+ assert.equal(readTask(f.home,one.taskId).budget.maxCalls,6);
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort==='low'),'confirmation uses proposal thinking after the conversation changes');
+ assert.ok([readTask(f.home,one.taskId).frozenConfig.main,...readTask(f.home,one.taskId).frozenConfig.secondary].every(ref=>ref.thinkingLevel==='low'));
+ const preserved=await c.session(s.id);assert.equal(preserved.turns.length,2);assert.equal(preserved.draft,'Next turn draft stays here');assert.deepEqual(preserved.editor.turnOptions,nextOptions);assert.equal(preserved.team.id,nextTeam.id);assert.ok(f.calls.every(call=>call.body.model==='main'),'confirmation retains proposal roster');
+});
+
+test('reserved confirmation survives host restart and explicit continue uses original root ID',async t=>{
+ const {reserveConfirmation}=await import('../src/project-turn.js');const {writePrivateJson}=await import('../src/storage.js');const {join}=await import('node:path');
+ const repo=repository(t),plan={goal:'Verify a.txt',scope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"require('fs').accessSync('a.txt')"]}]};
+ const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:'start_work',args:{action:'start',reason:'verify',plan}}]}:{text:'Verified'});
+ const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+ for(const model of catalog.providers.fixture.models)model.reasoning=true;
+ writeFileSync(path,JSON.stringify(catalog));
+ const c=await controller(t,f,{execution}),s=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
+ await c.action('session.thinking',{sessionId:s.id,level:'low',scope:'all'});
+ const accepted=await submitDraft(c,{sessionId:s.id,input:'Verify a.txt',submissionId:'source',protocolVersion:1});await complete(c,accepted.taskId);
+ await c.action('session.thinking',{sessionId:s.id,level:'high',scope:'all'});
+ await c.close();
+ const source=readTask(f.home,accepted.taskId);
+ const reservation=await reserveConfirmation({home:f.home,source,proposalRef:source.proposalRef,sessionId:s.id,workspaceId:source.workspace.id,submissionId:'original-confirm',save:()=>writePrivateJson(join(f.home,'tasks',source.id+'.json'),source)});
+ const reopened=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>reopened.close());
+ await reopened.session(s.id);assert.equal(f.calls.length,1,'observation never resumes');
+ const continued=await reopened.action('task.confirmWork',{sessionId:s.id,submissionId:'explicit-continue',proposalRef:source.proposalRef,protocolVersion:1});
+ assert.equal(continued.taskId,reservation.taskId);assert.equal((await complete(reopened,continued.taskId)).status,'completed');assert.equal(f.calls.length,2);
+ assert.equal(readTask(f.home,continued.taskId).submissionId,'original-confirm');
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort==='low'),'reopening and reserving retain the original attempt configuration');
 });

@@ -2,6 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fixture } from "./helpers/pi-fixture.js";
 const api = await import("../src/pi-runtime.js").catch(() => ({}));
+test("thinking selection copies role refs, keeps source roster defaults and rejects unknown scopes", async () => {
+  const {applyThinkingSelection} = await import("../src/thinking.js");
+  const config = {main:{modelId:"manager",thinkingLevel:"high"},secondary:[{modelId:"worker",thinkingLevel:"medium"}],team:{main:{thinkingLevel:"high"}}};
+  const all = applyThinkingSelection(config,{level:"low",scope:"all"});
+  assert.equal(all.main.thinkingLevel,"low");
+  assert.equal(all.secondary[0].thinkingLevel,"low");
+  assert.equal(config.main.thinkingLevel,"high");
+  assert.equal(config.secondary[0].thinkingLevel,"medium");
+  assert.deepEqual(all.team,config.team,"named roster defaults remain the selection source");
+  assert.equal(applyThinkingSelection(config,{level:"low"}).secondary[0].thinkingLevel,"medium");
+  assert.deepEqual(applyThinkingSelection(config,{scope:"all"}),config);
+  assert.throws(()=>applyThinkingSelection(config,{scope:"future"}),/作用范围/);
+});
 test("required extension load failure rejects host creation with zero requests", async (t) => {
   assert.equal(typeof api.createRuntime, "function", "Pi host is implemented");
   const f = await fixture(t);
@@ -75,6 +88,25 @@ test('model switching defaults to high, preserves explicit levels and rejects un
   await rt.selectModel(f.models.secondary[2]);assert.equal(rt.session.thinkingLevel,'off');
   await assert.rejects(rt.selectModel(f.models.secondary[1]),/不支持.*high/);
   assert.equal(f.calls.length,0);
+});
+
+test('role thinking selection uses SDK thinkingLevelMap in the actual provider request and journal', async t => {
+  const {readFileSync,writeFileSync}=await import('node:fs'),{join}=await import('node:path');
+  const {createTask}=await import('../src/task.js');
+  const f=await fixture(t),path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+  const model=catalog.providers.fixture.models[0];
+  model.reasoning=true;
+  model.compat={supportsReasoningEffort:true,thinkingFormat:'openai'};
+  model.thinkingLevelMap={low:'medium'};
+  writeFileSync(path,JSON.stringify(catalog));
+  const ref={...f.models.main,thinkingLevel:'low'},task=createTask({home:f.home,input:'mapping',models:{main:ref,secondary:[]}});
+  const runtime=await api.createRuntime({home:f.home,cwd:f.cwd,modelRef:ref});t.after(()=>runtime.dispose());
+  runtime.bindTask(task,task.beginPhase('draft','main',ref));
+  const {call}=await runtime.prompt('mapping');
+  assert.equal(call.requestedModel.thinkingLevel,'low');
+  assert.equal(call.payload.reasoning_effort,'medium');
+  assert.equal(f.calls.length,1);
+  assert.equal(f.calls[0].body.reasoning_effort,'medium');
 });
 
 test('explicit empty and singleton tool policies remain exact under managed resource registration',async t=>{
