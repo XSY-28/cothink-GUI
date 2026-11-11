@@ -32,7 +32,9 @@ export function useEditorPersistence({api,book,draftQueue,organizingSession,conf
     if(!target||target.status!=="unknown")return;
     // Read within the same queue: a draft acknowledgement cannot cross this rebase.
     const operation=draftQueue.current.catch(()=>{}).then(async()=>{
+      if(pending.current.get(sessionId)!==target)return;
       const saved=await api.read("session",{id:sessionId});
+      if(pending.current.get(sessionId)!==target)return;
       if(saved?.id!==sessionId)throw Error("思考设置回执的对话身份不匹配。");
       const matches=saved.thinkingScope===target.scope&&(saved.thinking??null)===(target.level??null);
       if(!matches&&!adoptCurrent){
@@ -53,17 +55,22 @@ export function useEditorPersistence({api,book,draftQueue,organizingSession,conf
     // This ref changes before any await, including before the first queue turn.
     putPending(sessionId,target);
     const operation=draftQueue.current.catch(()=>{}).then(async()=>{
+      if(pending.current.get(sessionId)!==target)return;
       try{
         const saved=await api.action("session.thinking",{scope:"all",...(target.level?{level:target.level}:{}),sessionId});
+        if(pending.current.get(sessionId)!==target)return;
         adoptReceipt(sessionId,saved);
         putPending(sessionId,null);
         return saved;
       }catch(error){
+        if(pending.current.get(sessionId)!==target)return;
         if(!error.unknown){putPending(sessionId,null);throw error;}
-        putPending(sessionId,{...target,status:"unknown"});
+        const unknown={...target,status:"unknown"};
+        putPending(sessionId,unknown);
         // A lost response is never a reason to repeat the mutation.
         let saved;
         try{saved=await api.read("session",{id:sessionId});}catch{return;}
+        if(pending.current.get(sessionId)!==unknown)return;
         if(saved?.id===sessionId&&saved.thinkingScope===target.scope&&(saved.thinking??null)===(target.level??null)){
           adoptReceipt(sessionId,saved);putPending(sessionId,null);return saved;
         }

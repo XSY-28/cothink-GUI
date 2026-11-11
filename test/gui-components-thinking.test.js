@@ -68,11 +68,11 @@ async function workspaceFixture(run){
   Object.defineProperty(globalThis,"sessionStorage",{configurable:true,value:win.sessionStorage});
   const make=id=>({id,team,thinking:null,thinkingScope:null,project:null,turns:[],draft:"",editor:{text:"",workRequest:null,selectionId:null,editId:null,materials:[]},draftRevision:null,branchAnchor:"root-"+id});
   const records={a:make("a"),b:make("b")},writes=[],submits=[];
-  let gui,finishThinking,lose=false,apply=true,readFails=false;
+  let gui,finishThinking,lose=false,apply=true,readFails=false,beforeSessionRead=async()=>{};
   const api={subscribe:(_,status)=>{status("connected");return ()=>{};},read:async(kind,args={})=>{
    if(kind==="bootstrap")return {...boot,sessions:Object.values(records)};
    if(kind==="sessions")return {items:Object.values(records),nextCursor:null};
-   if(kind==="session"){if(readFails)throw Error("read unavailable");return structuredClone(records[args.id]);}
+   if(kind==="session"){if(readFails)throw Error("read unavailable");await beforeSessionRead(args.id);return structuredClone(records[args.id]);}
    if(kind==="task")return {id:args.id,status:"completed"};
   },action:async(name,args)=>{
    writes.push({name,args:structuredClone(args)});
@@ -95,6 +95,7 @@ async function workspaceFixture(run){
    await act(async()=>root.render(React.createElement(Harness)));
    await run({get gui(){return gui;},records,writes,submits,
     finish:()=>finishThinking(),unknown:({persist=true,unreadable=false}={})=>{lose=true;apply=persist;readFails=unreadable;},allowReads:()=>{readFails=false;},
+    known:()=>{lose=false;apply=true;},onSessionRead:handler=>{beforeSessionRead=handler;},
     settle:()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,700));})});
   }finally{
    await act(()=>root.unmount());
@@ -173,5 +174,34 @@ test("unknown unapplied save stays blocked until explicit adoption of persisted 
   assert.equal(f.submits.length,1);
   assert.equal(f.submits[0].thinking,null);
   assert.equal(f.writes.filter(row=>row.name==="session.thinking").length,1);
+ });
+});
+
+test("duplicate thinking recovery cannot release a newer save or submit its draft",async()=>{
+ await workspaceFixture(async f=>{
+  f.unknown({unreadable:true});let original,first,second,newer;
+  await act(async()=>{original=f.gui.commands.changeSession("session.thinking",{scope:"all",level:"low"},"a");});
+  await act(async()=>{f.finish();await original;});
+  assert.equal(f.gui.state.thinkingSave?.status,"unknown");
+  f.allowReads();f.known();
+  let reads=0,releaseSecond=()=>{};
+  f.onSessionRead(async()=>{if(++reads===2)await new Promise(resolve=>{releaseSecond=resolve;});});
+  await act(async()=>{
+   first=f.gui.commands.recoverThinkingSettings({adoptCurrent:true});
+   second=f.gui.commands.recoverThinkingSettings({adoptCurrent:true});
+   await first;
+  });
+  await act(async()=>{newer=f.gui.commands.changeSession("session.thinking",{scope:"all",level:"high"},"a");});
+  await act(async()=>{releaseSecond();await second;});
+  try{
+   assert.equal(f.gui.state.thinkingSave?.status,"saving","the stale recovery must not clear the new high save's pending identity");
+   await act(()=>f.gui.commands.setDraft("a","keep the next draft"));
+   await act(async()=>f.gui.commands.submit({sessionId:"a"}));
+   assert.equal(f.submits.length,0,"send remains blocked until the new setting's own receipt");
+   assert.equal(f.gui.state.session.thinking,"low");
+  }finally{await act(async()=>{f.finish();await newer;});}
+  assert.equal(f.gui.state.session.thinking,"high");
+  assert.equal(f.gui.state.thinkingSave,null);
+  assert.equal(f.writes.filter(row=>row.name==="session.thinking").length,2,"one original choice and one new choice, with no replay");
  });
 });
