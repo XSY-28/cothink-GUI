@@ -170,17 +170,8 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
     {!writable && <p className="field-note">当前没有可编辑的对话，无法切换当前阵容或删除保存的阵容。</p>}
     {current && <details className={styles.thinking}>
       <summary>对话参数 · 思考 {actualThinking}</summary>
-      <p>本对话主模型实际思考：<strong>{actualThinking}</strong>{session.thinking != null ? `（对话设置，覆盖阵容中的 ${current.main.thinkingLevel ?? "默认值"}）` : "（跟随阵容）"}</p>
-      {session.thinking != null && !currentModel?.thinkingLevels?.includes(session.thinking) && <p role="alert" className="error-text">此对话的思考设置不被当前模型支持；发送前请选择兼容档位或跟随阵容。</p>}
-      <label>此对话的思考设置<select aria-label="此对话的思考设置" disabled={!writable || disabled}
-        value={session.thinking ?? ""} onChange={e=>{if(!writable || disabled)return;const level=e.target.value;run(async()=>{
-          await commands.changeSession("session.thinking",level ? {level} : {},sessionId);
-          setNotice("对话思考设置已保存；仅影响之后的提交，取消阵容编辑不会撤销它。");
-        });}}>
-        <option value="">跟随阵容</option>
-        {session.thinking != null && !currentModel?.thinkingLevels?.includes(session.thinking) && <option value={session.thinking}>{session.thinking}（不支持）</option>}
-        {currentModel?.thinkingLevels?.map(level=><option key={level}>{level}</option>)}
-      </select></label>
+      <p>本对话{session.thinkingScope==="all"?"全阵容":"主模型"}思考：<strong>{session.thinking ?? "跟随阵容"}</strong>。</p>
+      <p>在输入框发送按钮左侧调整思考强度；新选档应用于后续新任务的全部模型。这里编辑各模型的阵容默认参数。</p>
     </details>}
     {error && <p className="error-text" role="alert">{error}</p>}
     {notice && <p className={styles.notice} role="status">{notice}</p>}
@@ -201,7 +192,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
           <ModelEditor label="主模型" value={draft.main} models={models} providers={providers}
             onIdentity={next=>setDraft(d=>d.main.modelId ? switchModelRoles(d,next) : {...d,main:next})}
             onParameters={main=>setDraft({...draft,main})}/>
-          {session?.thinking != null && <p className="field-note">当前对话的 {session.thinking} 会优先于这里的主模型思考参数；另存只保存阵容参数，可在上方明确选择“跟随阵容”。</p>}
+          {session?.thinking != null && <p className="field-note">当前对话的 {session.thinking} 会覆盖{session.thinkingScope==="all"?"全阵容":"主模型"}思考参数；另存只保存阵容参数，可在输入区选择“跟随阵容”。</p>}
           {draft.secondary.map((value,index)=><div key={index}>
             <ModelEditor label={`副模型 ${index+1}`} value={value} models={models} providers={providers}
               used={new Set([draft.main,...draft.secondary.filter((_,i)=>i!==index)].map(identity))}

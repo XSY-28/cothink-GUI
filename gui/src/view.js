@@ -1,5 +1,14 @@
 export const modelName = (model) =>
   model ? `${model.provider} / ${model.modelId}` : "来源未记录";
+export function conversationThinking(session, models = []) {
+  const refs=session?.team?[session.team.main,...session.team.secondary]:[];
+  const catalog=refs.map(ref=>models.find(model=>model.provider===ref.provider&&model.modelId===ref.modelId));
+  const missing=refs.filter((_,index)=>!catalog[index]);
+  const levels=missing.length?[]:(catalog[0]?.thinkingLevels??[]).filter(level=>catalog.every(model=>model.thinkingLevels?.includes(level)));
+  const reason=missing.length?`模型目录不可用：${missing.map(modelName).join("、")}；请修复目录或调整阵容。`:
+    refs.length&&!levels.length?`没有共同支持的档位：${catalog.map(model=>`${model.name??modelName(model)}（${model.thinkingLevels?.join("、")||"无档位"}）`).join("；")}。可跟随阵容或调整阵容。`:null;
+  return {level:session?.thinking??null,scope:session?.thinkingScope??(session?.thinking!=null?"main":null),levels,reason};
+}
 export function elapsedLabel(task, now = Date.now()) {
   if (task?.status === "stop_unknown") return "用时未确认";
   const active = ["running", "preparing", "cancelling"].includes(task?.status);

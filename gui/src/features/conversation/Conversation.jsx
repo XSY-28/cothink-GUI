@@ -7,6 +7,7 @@ import { ReplyHeading } from "./ReplyHeading.jsx";
 import { ConversationHeading } from "./ConversationMenu.jsx";
 import { ReplyActions, StopButton, UserMessage, WorkProposal } from "./ReplyActions.jsx";
 import { useConversationReading } from "./useConversationReading.js";
+import {conversationThinking} from "../../view.js";
 import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
@@ -243,6 +244,10 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             busy={!!boot.active || !!boot.extensionUI?.command || !!boot.shutdown?.requested || state.connection === "reconnecting"}
             submitting={submitting}
             pending={!!pending}
+            connection={state.connection}
+            thinking={{...conversationThinking(session,boot.models),save:state.thinkingSave}}
+            onThinkingChange={level=>safely(commands.changeSession("session.thinking",{scope:"all",...(level?{level}:{})},session.id))}
+            onThinkingRecover={options=>safely(commands.recoverThinkingSettings(options))}
             onPlugins={onPlugins}
             editorKey={state.editorKey??session?.id}
             materials={state.materials}
