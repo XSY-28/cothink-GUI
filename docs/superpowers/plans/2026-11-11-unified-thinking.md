@@ -1,6 +1,6 @@
 # GUI 统一思考强度施工方案
 
-> 2026-11-11 方案稿。按 executing-plans 逐项实施，复用各任务列出的现有测试入口。勾选表示该项实施与验收完成。
+> 2026-11-11 已实施并本机安装。GUI 280/280、Pi 280 通过（4 项平台跳过）、实际 App 121/121。构建与安装回执见本机 work/unified-thinking。
 
 **目标**　在发送按钮左侧提供一个思考强度按钮。用户显式选档后，本对话后续新任务的主模型、员工、过程检查、成果评审和经理汇总均使用该统一档。
 
@@ -197,10 +197,10 @@ for (const call of f.calls) {
 
 **修改文件**　`DESIGN_BASELINE.md` 的调用设置、`README.md` 的 GUI 用法、`VALIDATION.md` 的本轮证据。发布版本时按项目约定同步 `CHANGELOG.md`。
 
-- [ ] 文档准确说明按钮位置、全阵容范围、原任务冻结、跟随阵容、旧主模型设置和不兼容提示。将方案二作为后续方向，以本轮实现范围解释已交付功能。
-- [ ] 先运行下面的聚焦组合，再构建 GUI 并跑已有视觉入口。若相关运行代码发生变化，按 `package.json` 补跑 `test:pi`、`test:app`、`test:gui`；涉及正式文件或插件路径时使用现有 Docker 与插件验收命令，缺环境如实记录。
-- [ ] 记录本地请求夹具、视觉、打包和真实服务各自的结果。收费模型验收、正式安装替换及远端发布按届时明确授权执行。
-- [ ] 若进入 macOS 交付，候选 App 放 `.noindex`，核对包内代码与资源，安装后按 bundle ID 检查 Spotlight、注销测试副本登记并实际搜索。
+- [x] 文档准确说明按钮位置、全阵容范围、原任务冻结、跟随阵容、旧主模型设置和不兼容提示。将方案二作为后续方向，以本轮实现范围解释已交付功能。
+- [x] 先运行下面的聚焦组合，再构建 GUI 并跑已有视觉入口。若相关运行代码发生变化，按 `package.json` 补跑 `test:pi`、`test:app`、`test:gui`；涉及正式文件或插件路径时使用现有 Docker 与插件验收命令，缺环境如实记录。
+- [x] 记录本地请求夹具、视觉、打包和真实服务各自的结果。收费模型验收、正式安装替换及远端发布按届时明确授权执行。
+- [x] 若进入 macOS 交付，候选 App 放 `.noindex`，核对包内代码与资源，安装后按 bundle ID 检查 Spotlight、注销测试副本登记并实际搜索。
 
 ```sh
 node --test --test-concurrency=1 test/gui-controller.test.js test/gui-server.test.js test/gui-components.test.js test/gui-context.test.js test/pi-runtime.test.js test/pi-session.test.js
