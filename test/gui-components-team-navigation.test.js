@@ -291,3 +291,15 @@ test("stale homepage reservation and transfer expose draft recovery and keep the
     }
   });
 });
+
+test("turn limit details report unknown output policy when the model catalog is unavailable",async()=>{
+  await modalEnvironment(async({root,container,TurnLimits})=>{
+    const team={main:{provider:"p",modelId:"main"},secondary:[]};
+    await act(()=>root.render(React.createElement(TurnLimits,{available:true,team,models:[],onClose(){}})));
+    assert.equal(container.querySelectorAll('input[type="checkbox"]').length,2,"only read-only and delegation are regular turn controls");
+    assert.doesNotMatch(container.textContent,/必须由不同型号独立评审/);
+    await act(()=>container.querySelector("summary").click());
+    assert.match(container.querySelector("details").textContent,/模型目录不可用，输出额度要求未知/);
+    assert.doesNotMatch(container.querySelector("details").textContent,/未设本地输出上限/);
+  });
+});

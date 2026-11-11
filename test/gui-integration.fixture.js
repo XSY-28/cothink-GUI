@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 export const execution = JSON.parse(
@@ -59,6 +59,10 @@ export async function setup(h, f) {
       maxTokens: 4096,
     },
   });
+  const path=join(f.home,"pi/models.json"),catalog=JSON.parse(readFileSync(path,"utf8"));
+  Object.assign(catalog.providers.configured.models[0],{reasoning:true,thinkingLevelMap:{max:"max"}});
+  writeFileSync(path,JSON.stringify(catalog));
+  await h.action("provider.save",{providerId:"configured",apiKey:"dummy-local-key"});
   return h.action("team.save", {
     name: "HTTP integration",
     main: { provider: "configured", modelId: "main" },

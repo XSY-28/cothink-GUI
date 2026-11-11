@@ -1,3 +1,4 @@
+import {normalizeThinkingPreference,DEFAULT_THINKING_LEVEL} from "./thinking.js";
 import { createGuiMaterialActions } from "./gui-material-actions.js";
 import {contextToolNames,contextDigest,contextSnapshot,contextState,readContextDisk,compactContext,contextOperationView} from './context-management.js';
 import {GUI_INPUT_VERSION,validateEditorTurnOptions,editorTurnInput,retiredReviewOption,guiTurnIntent} from "./gui-turn-options.js";
@@ -84,7 +85,6 @@ import {
   revealGuiTask,
 } from "./gui-work.js";
 
-/** Local host adapter. Pi sessions and task records remain the sources of conversation and execution facts. */
 export async function createGuiController({ home, cwd = process.cwd(), suggestedProject = cwd, installation = "browser", updateService, oauthRuntime, executionInspector=inspectGuiExecution }) {
   assertCleanProjectProcess({unified:true});
   const directory = join(home, "pi/sessions/main");
@@ -192,7 +192,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   const updateSnapshot=()=>{if(installation === "desktop") return {channel:"desktop-local",status:"local",automatic:false,message:"桌面本地候选；更新渠道尚未启用。",instructions:[],currentVersion:releaseNotes().version};const s=updates.snapshot();return {...s,message:formatUpdateStatus(s),instructions:updateInstructions(s)};};
   const checkForUpdates=()=>installation === "desktop" ? Promise.resolve(updateSnapshot()) : updates.check();
   // Disposable summaries: stat every dependency, parse only changed durable bytes.
-  // No request bodies, reviewer text or second persisted conversation store.
   const taskCache = new Map(), sessionCache = new Map(), fileListCache = new Map();
   const hasFileWork = record => !!(record.work || record.deliveryRef || record.projectOperation?.childTaskIds?.length);
   async function files(id) {
@@ -630,8 +629,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         ...materialView(id,meta.editor,manager),draft: meta.draft, editor: meta.editor, draftRevision: meta.draftRevision, branchAnchor: meta.branchAnchor,
         ...reading, viewRevision: navigation.navigation?.viewRevision ?? 0,
         forkOf: facts.forkOf,
-        thinking: meta.thinking ?? null,
-        thinkingScope: meta.thinkingScope ?? null,
+        thinking: normalizeThinkingPreference(meta.thinking),
+        thinkingScope: "all",
         turns,
         submissions: submissions(),
         readOnly: readOnly || !!membership.workspaceError || !!navigation.navigationError ||
@@ -939,7 +938,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         catalog
           .getModels()
           .filter((m) => !m.type || m.type === "chat")
-          .map(model=>projectModelFacts(catalog,{provider:model.provider,modelId:model.id})),
+          .map(model=>projectModelFacts(catalog,{provider:model.provider,modelId:model.id,thinkingLevel:DEFAULT_THINKING_LEVEL})),
       ),
       sessions: page.items,
       sessionsCursor: page.nextCursor,
@@ -1287,7 +1286,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       const catalog=await getCatalog(),refs=resolveTeamConfig(config,roster);
       if(!refs.secondary.length)return null;
       const needed=requireAll?[refs.main,...refs.secondary]:[refs.main];
-      const routes=await Promise.all(needed.map(ref=>projectModelFacts(catalog,ref)));
+      const routes=await Promise.all(needed.map(ref=>projectModelFacts(catalog,{...ref,thinkingLevel:normalizeThinkingPreference(ref.thinkingLevel)})));
       return routes.every(route=>route.available)?roster:null;
     }catch{return null;}
   }

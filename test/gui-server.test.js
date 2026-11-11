@@ -14,14 +14,14 @@ import { GUI_INPUT_VERSION } from "../src/gui-turn-options.js";
 import { fixtureConversation, prepareSubmit } from "./helpers/gui-controller-fixture.js";
 import { completed, host, http, module } from "./gui-server.fixture.js";
 
-test("input protocol 4 rejects old writes and new submissions but keeps history and prior receipts readable", async t => {
+test("input protocol 5 rejects old writes and new submissions but keeps history and prior receipts readable", async t => {
   const f = await host(t, true), s = await fixtureConversation(t, f);
-  assert.equal(GUI_INPUT_VERSION, "4");
-  assert.equal((await f.get("/api/bootstrap")).protocol.guiInput, 4);
+  assert.equal(GUI_INPUT_VERSION, "5");
+  assert.equal((await f.get("/api/bootstrap")).protocol.guiInput, 5);
   const args = await prepareSubmit(f, {sessionId:s.id, input:"accepted", submissionId:"protocol-4"});
   const accepted = await f.action("task.submit", args);
   await completed(f, accepted.taskId);
-  const legacy = (action, args) => fetch(f.origin+"/api/action", {method:"POST", headers:{...f.headers,"Content-Type":"application/json","X-CoThink-GUI-Input":"3"}, body:JSON.stringify({action,args})});
+  const legacy = (action, args) => fetch(f.origin+"/api/action", {method:"POST", headers:{...f.headers,"Content-Type":"application/json","X-CoThink-GUI-Input":"4"}, body:JSON.stringify({action,args})});
   for (const [name, input] of [["session.thinking",{sessionId:s.id,level:"off",scope:"all"}], ["task.submit",{...args,submissionId:"new-old-page"}]]) {
     const rejected = await legacy(name,input);
     assert.equal(rejected.status,409);

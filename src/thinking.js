@@ -1,6 +1,15 @@
 /** Shared product levels; these are API values, not a token/time budget. */
 export const THINKING_LEVELS = Object.freeze(['low', 'high', 'max']);
 export const DEFAULT_THINKING_LEVEL = 'high';
+/** Upgrade current preferences only; native task/history readers retain their original levels. */
+export function normalizeThinkingPreference(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_THINKING_LEVEL;
+  if (['off', 'minimal', 'low'].includes(value)) return 'low';
+  if (['medium', 'high'].includes(value)) return 'high';
+  if (['xhigh', 'max'].includes(value)) return 'max';
+  throw new Error('无法识别思考档位。');
+}
+
 export function validateThinkingScope(scope = 'main') {
   if (scope !== 'main' && scope !== 'all') throw new Error('无法识别思考档位的作用范围。');
   return scope;
@@ -18,7 +27,7 @@ export function applyThinkingSelection(config, {level, scope = 'main'}) {
 
 export async function validateThinkingModels(home, team, level, scope = 'main') {
   validateThinkingScope(scope);
-  // Clearing a stale override must not depend on the roster/catalog being usable.
+  // Native callers may omit a selection; current GUI callers always pass an explicit level.
   if (level === undefined) return level;
   const {createModelRuntime} = await import('./pi-model-runtime.js');
   const runtime = await createModelRuntime(home);

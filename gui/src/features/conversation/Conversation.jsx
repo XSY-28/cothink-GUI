@@ -246,7 +246,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
             pending={!!pending}
             connection={state.connection}
             thinking={{...conversationThinking(session,boot.models),save:state.thinkingSave}}
-            onThinkingChange={level=>safely(commands.changeSession("session.thinking",{scope:"all",...(level?{level}:{})},session.id))}
+            onThinkingChange={level=>safely(commands.changeSession("session.thinking",{scope:"all",level},session.id))}
             onThinkingRecover={options=>safely(commands.recoverThinkingSettings(options))}
             onPlugins={onPlugins}
             editorKey={state.editorKey??session?.id}

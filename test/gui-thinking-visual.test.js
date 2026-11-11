@@ -29,13 +29,18 @@ test("thinking menu stays left of send and above the composer in both themes and
  await page.getByRole("menu",{name:"思考强度选项"}).waitFor();
  await page.keyboard.press("ArrowDown");await page.keyboard.press("Escape");
  assert.equal(await trigger.evaluate(node=>node===document.activeElement),true);
- const changed=page.waitForResponse(response=>response.url().endsWith("/api/action")&&response.request().postDataJSON()?.action==="session.thinking"&&response.ok());
- await trigger.click();await page.getByRole("menuitemradio",{name:"low",exact:true}).focus();await page.keyboard.press("Enter");
- const receipt=await (await changed).json();
- assert.equal(receipt.thinking,"low");assert.equal(receipt.thinkingScope,"all");
- await page.waitForFunction(()=>document.querySelector('[aria-label="思考强度"]')?.textContent.includes("low"));
- assert.equal((await controller.session(session.id)).thinking,"low");
- const directory=resolve("work/unified-thinking");mkdirSync(directory,{recursive:true});
+ assert.match(await trigger.textContent(),/high/,'blank conversation defaults high');
+ for(const level of ["low","high","max"]){
+  const changed=page.waitForResponse(response=>response.url().endsWith("/api/action")&&response.request().postDataJSON()?.action==="session.thinking"&&response.ok());
+  await trigger.click();
+  assert.deepEqual(await page.getByRole("menuitemradio").allTextContents(),["low","high","max"]);
+  await page.getByRole("menuitemradio",{name:level,exact:true}).focus();await page.keyboard.press("Enter");
+  const receipt=await(await changed).json();assert.equal(receipt.thinking,level);assert.equal(receipt.thinkingScope,"all");
+  await page.waitForFunction(level=>document.querySelector('[aria-label="思考强度"]')?.textContent.includes(level),level);
+  assert.equal((await controller.session(session.id)).thinking,level);
+ }
+ await page.reload();await page.waitForFunction(()=>document.querySelector('[aria-label="思考强度"]')?.textContent.includes("max"));
+ const directory=resolve("work/unified-thinking-three-levels");mkdirSync(directory,{recursive:true});
  for(const theme of ["light","dark"]){
   await page.evaluate(theme=>{document.documentElement.dataset.theme=theme;},theme);
   for(const viewport of [{width:1280,height:880},{width:460,height:650}]){

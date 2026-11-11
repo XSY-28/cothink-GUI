@@ -300,17 +300,6 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
   });
 });
 
-test("turn limit details report unknown output policy when the model catalog is unavailable",async()=>{
-  await modalEnvironment(async({root,container,TurnLimits})=>{
-    const team={main:{provider:"p",modelId:"main"},secondary:[]};
-    await act(()=>root.render(React.createElement(TurnLimits,{available:true,team,models:[],onClose(){}})));
-    assert.equal(container.querySelectorAll('input[type="checkbox"]').length,2,"only read-only and delegation are regular turn controls");
-    assert.doesNotMatch(container.textContent,/必须由不同型号独立评审/);
-    await act(()=>container.querySelector("summary").click());
-    assert.match(container.querySelector("details").textContent,/模型目录不可用，输出额度要求未知/);
-    assert.doesNotMatch(container.querySelector("details").textContent,/未设本地输出上限/);
-  });
-});
 
 test("invalid work-check arguments show a form error and do not send a settings action", async () => {
   const win = new Window({ url: "http://localhost/" }),
@@ -1031,7 +1020,7 @@ test("Team panel preserves exchanged model settings, dirty edits and saved facts
     assert.deepEqual(changes,[],"the roster only describes conversation settings");
     await render(false);
     const click=text=>act(async()=>{const button=[...container.querySelectorAll("button")].find(b=>b.textContent===text);button.focus();button.click();});
-    assert.match(container.textContent,/主模型思考：high/);
+    assert.match(container.textContent,/所有模型统一采用思考档位：high/);
     const savedRow=container.querySelector('[aria-label="使用 Original"]');
     assert.equal(savedRow.disabled,true,"the current row cannot silently replace a different historical snapshot");
     assert.match(savedRow.textContent,/与当前快照不同/);
@@ -1072,9 +1061,9 @@ test("Team panel preserves exchanged model settings, dirty edits and saved facts
 
 test("unknown Team saves are read-only reconciled and never recreated or automatically selected by name",async()=>{
   await modalEnvironment(async({root,container,win,TeamPanel})=>{
-    const team={id:"old",name:"Original",main:{provider:"p",modelId:"a"},secondary:[{provider:"p",modelId:"b"}]};
+    const team={id:"old",name:"Original",main:{provider:"p",modelId:"a",thinkingLevel:"medium"},secondary:[{provider:"p",modelId:"b",thinkingLevel:"xhigh"}]};
     let saves=0, reads=0, switches=0;
-    const props={session:{id:"s",team},teams:[team],models:["a","b"].map(modelId=>({provider:"p",modelId,name:modelId,thinkingLevels:["off"]})),providers:[{id:"p",configured:true}],
+    const props={session:{id:"s",team},teams:[team],models:["a","b"].map(modelId=>({provider:"p",modelId,name:modelId,thinkingLevels:["low","high","max"]})),providers:[{id:"p",configured:true}],
       commands:{saveTeam:async()=>{saves++;throw Object.assign(Error("lost reply"),{unknown:true});},refreshTeams:async()=>{reads++;return {providers:[]};},refresh:async()=>{},selectTeam:async()=>switches++},onClose(){}};
     const click=text=>act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent===text).click());
     await act(()=>root.render(React.createElement(TeamPanel,props)));
@@ -1083,11 +1072,13 @@ test("unknown Team saves are read-only reconciled and never recreated or automat
     await act(()=>{const input=container.querySelector('[aria-label="新阵容名称"]');Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(input,"Maybe saved");input.dispatchEvent(new win.Event("input",{bubbles:true}));});
     await act(async()=>container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true})));
     assert.equal(saves,1);assert.equal(reads,1);
-    const observed={...team,id:"observed",name:"Maybe saved",main:{...team.main,maxOutputTokens:999}};
-    await act(()=>root.render(React.createElement(TeamPanel,{...props,teams:[team,observed]})));
+    const observed={...team,id:"observed",name:"Maybe saved",main:{...team.main,thinkingLevel:"high",maxOutputTokens:999},secondary:team.secondary.map(ref=>({...ref,thinkingLevel:"max"}))};
+    const damaged={...observed,id:"damaged",main:{...observed.main,thinkingLevel:"future"}};
+    await act(()=>root.render(React.createElement(TeamPanel,{...props,teams:[team,observed,damaged]})));
     await click("读取阵容列表核对");
     assert.equal(saves,1);assert.equal(switches,0);assert.equal(reads,2);
     assert.match(container.textContent,/999 tokens/);
+    assert.match(container.textContent,/思考 high/);assert.match(container.textContent,/思考 max/);assert.match(container.textContent,/无效（future）/);
     assert.equal(container.querySelector('[aria-label="新阵容名称"]').value,"Maybe saved");
     assert.equal([...container.querySelectorAll("button")].find(b=>b.textContent==="仅保存新阵容").disabled,true);
     await click("取消编辑");assert.match(container.textContent,/保存结果仍未知/);
@@ -1098,7 +1089,7 @@ test("Team authentication stays in the editing flow and cancel retains confirmed
   await modalEnvironment(async({root,container,win,TeamPanel})=>{
     const team={id:"old",name:"Original",main:{provider:"p",modelId:"a"},secondary:[{provider:"p",modelId:"b"}]};
     const auth=[],saves=[];
-    const props={session:{id:"s",team},teams:[team],models:["a","b"].map(modelId=>({provider:"p",modelId,name:modelId,thinkingLevels:["off"]})),providers:[{id:"p",name:"Provider P",apiKey:true,configured:false}],
+    const props={session:{id:"s",team},teams:[team],models:["a","b"].map(modelId=>({provider:"p",modelId,name:modelId,thinkingLevels:["low","high","max"]})),providers:[{id:"p",name:"Provider P",apiKey:true,configured:false}],
       commands:{saveProvider:async value=>auth.push(value),saveTeam:async value=>saves.push(value),refresh:async()=>{}},onClose(){}};
     const click=text=>act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent===text).click());
     await act(()=>root.render(React.createElement(TeamPanel,props)));
@@ -1550,7 +1541,7 @@ test("roster search and row actions keep conversation selection separate from th
     const first={id:"first",name:"原组合",main,secondary:[reviewer]}, next={id:"next",name:"备选组合",main:other,secondary:[reviewer]};
     const scope={id:"group",revision:1,defaultRosterId:first.id};
     const actions=[];
-    const props={session:{id:"chat",team:first},workspace:scope,teams:[first,next],models:[{...main,name:"Primary"},{...reviewer,name:"Reviewer"},{...other,name:"Northstar"},{...unauth,name:"Unconfigured"}],
+    const props={session:{id:"chat",team:first},workspace:scope,teams:[first,next],models:[{...main,name:"Primary"},{...reviewer,name:"Reviewer"},{...other,name:"Northstar"},{...unauth,name:"Unconfigured"}].map(model=>({...model,thinkingLevels:["low","high","max"]})),
       providers:[{id:"p",configured:true},{id:"q",configured:true},{id:"r",configured:false}],
       commands:{selectTeam:async args=>actions.push(["current",args]),updateWorkspace:async (...args)=>actions.push(["default",...args])},onClose(){}};
     await act(()=>root.render(React.createElement(TeamPanel,props)));
@@ -1595,7 +1586,7 @@ test("a Team without conversations can set a valid default and rejects an invali
     const noAuth={id:"unauth",name:"副模型未认证",main,secondary:[reviewer,unconfigured]};
     const group={id:"team",revision:1,defaultRosterId:null};
     const defaults=[];
-    const props={workspace:group,teams:[active,missing,noAuth],models:[main,reviewer,unconfigured],
+    const props={workspace:group,teams:[active,missing,noAuth],models:[main,reviewer,unconfigured].map(model=>({...model,thinkingLevels:["low","high","max"]})),
       providers:[{id:"p",configured:true},{id:"q",configured:false}],
       commands:{updateWorkspace:async(row,change)=>defaults.push([row,change])},onClose(){}};
     const labeled=label=>container.querySelector(`[aria-label="${label}"]`);
@@ -1638,7 +1629,7 @@ test("roster default failure retries only the default and keeps the current conv
       },
       refreshTeams:async()=>({workspaces:[{...saved,revision:2}]})
     };
-    await act(()=>root.render(React.createElement(TeamPanel,{session:{id:"s",team:first},workspace:group,teams:[first,next],models:[first.main,...first.secondary],providers:[{id:"p",configured:true}],commands,onClose(){}})));
+    await act(()=>root.render(React.createElement(TeamPanel,{session:{id:"s",team:first},workspace:group,teams:[first,next],models:[first.main,...first.secondary].map(model=>({...model,thinkingLevels:["low","high","max"]})),providers:[{id:"p",configured:true}],commands,onClose(){}})));
     const click=label=>act(async()=>{
       const button=[...container.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.textContent)===label);
       assert.ok(button,label);

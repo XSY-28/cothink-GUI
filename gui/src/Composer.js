@@ -2,7 +2,7 @@ import {defaultTurnOptions,editorReadPaths,retiredReviewOption} from "../../src/
 import {materialExtensions} from "../../src/gui-material-types.js";
 import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import {Icon} from "./Icon.js";
-import {shouldSubmit} from "./view.js";
+import {shouldSubmit,THINKING_LEVELS} from "./view.js";
 import {GUI_INPUT_VERSION} from "../../src/gui-turn-options.js";
 const h=React.createElement;
 export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,onOpenTurnLimits,homeReady=false,creating=false,homeCreationPending=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onChooseSkill,selectedSkill,onRemoveSkill,thinking,onThinkingChange,onThinkingRecover,connection}) {
@@ -160,14 +160,14 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     adding && h("div",{className:"composer-add-menu composer-add-actions",ref:menuPanel},
       ...addActions.map(([label,action])=>h("button",{key:label,type:"button",disabled:optionDisabled,onClick:()=>doAction(action)},label))),
     h("div",{className:"composer-submit-controls"},
-      h(ThinkingControl,{scope,thinking,disabled:thinkingDisabled,next:busy,onChange:onThinkingChange}),
+      h(ThinkingControl,{scope,thinking,disabled:thinkingDisabled,onChange:onThinkingChange}),
       h("button",{type:"submit",className:"primary send",disabled:!!blocks,"aria-label":localTeam ? "打开阵容" : localCommand ? "打开本地命令" : submitting ? "确认提交" : pending ? "待确认" : busy ? "草稿保留" : "发送",title:localTeam ? "打开阵容" : "发送"},h(Icon,{name:submitting ? "more" : "send"})))
   ),
 
   );
 }
 
-function ThinkingControl({scope,thinking,disabled,next,onChange}) {
+function ThinkingControl({scope,thinking,disabled,onChange}) {
   const [openFor,setOpenFor]=useState(null),trigger=useRef(null),menu=useRef(null);
   const open=openFor===scope&&scope!=null&&!disabled;
   const close=()=>{setOpenFor(null);trigger.current?.focus();};
@@ -179,7 +179,7 @@ function ThinkingControl({scope,thinking,disabled,next,onChange}) {
     document.addEventListener("pointerdown",outside,true);document.addEventListener("focusin",outside,true);
     return()=>{document.removeEventListener("pointerdown",outside,true);document.removeEventListener("focusin",outside,true);};
   },[open]);
-  const label=thinking?.level?(thinking.scope==="main"?`主模型 ${thinking.level}`:`思考 ${thinking.level}`):"思考 默认";
+  const label=`思考 ${thinking?.level??"high"}`;
   const choose=level=>{close();onChange?.(level);};
   return h("div",{className:"composer-thinking",onKeyDown:event=>{
     if(event.key==="Escape"&&open){event.preventDefault();event.stopPropagation();close();return;}
@@ -192,10 +192,6 @@ function ThinkingControl({scope,thinking,disabled,next,onChange}) {
       title:disabled?"先选择对话阵容，并等待设置、连接与提交确认。":"调整本对话后续任务的思考强度",
       onClick:()=>setOpenFor(open?null:scope),onKeyDown:event=>{if(!open&&["ArrowDown","ArrowUp"].includes(event.key)){event.preventDefault();setOpenFor(scope);}}},label,h("span",{"aria-hidden":true}," ▾")),
     open&&h("div",{className:"composer-thinking-menu",ref:menu,role:"menu","aria-label":"思考强度选项"},
-      h("p",null,next?"作用于下一条消息":"用于本对话后续新任务"),
-      thinking?.scope==="main"&&thinking.level&&h("p",null,`历史设置仅作用于主模型 ${thinking.level}；重新选档后统一应用于阵容。`),
-      h("button",{type:"button",role:"menuitemradio","aria-checked":thinking?.level==null,onClick:()=>choose(null)},"跟随阵容"),
-      h("p",{className:"thinking-default-note"},"跟随阵容各模型参数；未指定的可思考模型默认 high。"),
-      ...(thinking?.levels??[]).map(level=>h("button",{key:level,type:"button",role:"menuitemradio","aria-checked":thinking?.scope==="all"&&thinking.level===level,onClick:()=>choose(level)},level)),
+      ...THINKING_LEVELS.map(level=>h("button",{key:level,type:"button",role:"menuitemradio","aria-checked":thinking?.scope==="all"&&thinking.level===level,onClick:()=>choose(level)},level)),
       thinking?.reason&&h("p",{role:"status"},thinking.reason)));
 }

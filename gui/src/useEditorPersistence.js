@@ -1,5 +1,5 @@
 import {useRef,useState} from "react";
-import {readGuiStorage,writeGuiStorage} from "./view.js";
+import {readGuiStorage,writeGuiStorage,THINKING_LEVELS} from "./view.js";
 
 const HOME="@home";
 // Draft and setting mutations share one host ordering and editor version boundary.
@@ -11,7 +11,7 @@ export function useEditorPersistence({api,book,draftQueue,organizingSession,conf
     const rows=Array.isArray(saved)?saved:[];
     pending.current=new Map(rows.filter(row=>Array.isArray(row)&&row.length===2&&
       typeof row[0]==="string"&&row[1]?.scope==="all"&&
-      (row[1].level===undefined||typeof row[1].level==="string"))
+      (row[1].level==null||typeof row[1].level==="string"))
       .map(([id,row])=>[id,{...row,status:"unknown"}]));
   }
   const [thinkingSaves,setThinkingSaves]=useState(()=>Object.fromEntries(pending.current));
@@ -37,7 +37,7 @@ export function useEditorPersistence({api,book,draftQueue,organizingSession,conf
       if(pending.current.get(sessionId)!==target)return;
       if(saved?.id!==sessionId)throw Error("思考设置回执的对话身份不匹配。");
       const matches=saved.thinkingScope===target.scope&&(saved.thinking??null)===(target.level??null);
-      if(!matches&&!adoptCurrent){
+      if(!matches&&!adoptCurrent&&THINKING_LEVELS.includes(target.level)){
         onSessionSaved(saved,sessionId);
         putPending(sessionId,{...target,observed:true});
         return saved;
@@ -51,13 +51,15 @@ export function useEditorPersistence({api,book,draftQueue,organizingSession,conf
   }
   function saveThinking(args,sessionId){
     if(pending.current.has(sessionId))return Promise.resolve();
-    const target={scope:"all",...(args.level?{level:args.level}:{}),status:"saving"};
+    const level=args.level===undefined?"high":args.level;
+    if(!THINKING_LEVELS.includes(level))return Promise.reject(Error("思考档位只接受 low、high、max。"));
+    const target={scope:"all",level,status:"saving"};
     // This ref changes before any await, including before the first queue turn.
     putPending(sessionId,target);
     const operation=draftQueue.current.catch(()=>{}).then(async()=>{
       if(pending.current.get(sessionId)!==target)return;
       try{
-        const saved=await api.action("session.thinking",{scope:"all",...(target.level?{level:target.level}:{}),sessionId});
+        const saved=await api.action("session.thinking",{scope:"all",level:target.level,sessionId});
         if(pending.current.get(sessionId)!==target)return;
         adoptReceipt(sessionId,saved);
         putPending(sessionId,null);

@@ -1,7 +1,5 @@
 import { join } from "node:path";
-import { createProvider, envApiKeyAuth } from "@earendil-works/pi-ai";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { moonshotaiCnProvider } from "@earendil-works/pi-ai/providers/moonshotai-cn";
 import { moonshotaiProvider } from "@earendil-works/pi-ai/providers/moonshotai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -110,48 +108,78 @@ export async function createModelRuntime(home) {
     pending = run.catch(() => {});
     return run;
   };
+  function officialEndpoint(baseUrl) {
+    try {
+      const url = new URL(baseUrl), path = url.pathname.replace(/\/+$/, "");
+      if (url.protocol !== "https:" || url.port || url.username || url.password || url.search || url.hash) return null;
+      if (["api.moonshot.cn", "api.moonshot.ai"].includes(url.hostname) && path === "/v1") return "moonshot";
+      if (url.hostname === "api.deepseek.com" && ["", "/v1"].includes(path)) return "deepseek";
+    } catch { /* Unknown endpoints retain their declared capabilities. */ }
+    return null;
+  }
   function addModels() {
-    // Fixed additions use Pi's public provider API; credentials and models.json stay owned by Pi/the user.
-    for (const provider of runtime.getProviders()) {
-      let official = false;
-      try {
-        const url = new URL(provider.baseUrl);
-        official = url.protocol === "https:" &&
-          ["api.moonshot.cn", "api.moonshot.ai"].includes(url.hostname) &&
-          !url.port && !url.username && !url.password && !url.search && !url.hash &&
-          url.pathname.replace(/\/+$/, "") === "/v1";
-      } catch { /* Other providers keep their own model catalog. */ }
+    // Register only current model definitions; Pi keeps ownership of endpoints and authentication.
+    // The extension model layer must follow models.json: native providers alone cannot repair
+    // imported reasoning:false declarations. Explicit user modelOverrides still apply last.
+    for (let provider of runtime.getProviders()) {
+      let models = [...(provider.getAllModels?.() ?? provider.getModels())], changed = false;
       const moonshot = ["moonshotai-cn", "moonshotai"].includes(provider.id);
-      if (!moonshot && (!official || builtinIds.has(provider.id))) continue;
-      if (!provider.getModels().some((model) => model.api === "openai-completions")) continue;
-      // Never capture a composed provider: it can retain revoked user keys/headers after refresh.
-      const base = provider.id === "moonshotai-cn" ? moonshotaiCnProvider()
-        : provider.id === "moonshotai" ? moonshotaiProvider()
-          : createProvider({
-              id: provider.id, name: provider.name, baseUrl: provider.baseUrl, models: [],
-              auth: { apiKey: envApiKeyAuth("API key", []) }, api: openAICompletionsApi(),
-            });
-      const model = {
-        type: "chat", id: "kimi-k3.1-pro", name: "Kimi K3.1 Pro",
-        provider: provider.id, api: "openai-completions", baseUrl: base.baseUrl,
-        reasoning: true, input: ["text", "image"],
-        contextWindow: 1048576, maxTokens: 1048576,
-        thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
-        // Pi's zero-price sentinel leaves CoThink's catalog estimate null, never a claim of free usage.
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        compat: {
-          supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: true,
-          maxTokensField: "max_completion_tokens", supportsStrictMode: false,
-          thinkingFormat: "openai", requiresReasoningContentOnAssistantMessages: true,
-          supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true,
-        },
-      };
-      managedProviders.add(provider.id);
-      runtime.registerNativeProvider({
-        ...base,
-        getModels: () => [...base.getModels(), model],
-        getAllModels: () => [...(base.getAllModels?.() ?? base.getModels()), model],
+      const canAddPro = (moonshot || (officialEndpoint(provider.baseUrl) === "moonshot" && !builtinIds.has(provider.id))) &&
+        models.some(model => (!model.type || model.type === "chat") && model.api === "openai-completions");
+      if (canAddPro && !models.some(model => (!model.type || model.type === "chat") && model.id === "kimi-k3.1-pro")) {
+        const pro = {
+          type: "chat", id: "kimi-k3.1-pro", name: "Kimi K3.1 Pro",
+          provider: provider.id, api: "openai-completions", baseUrl: provider.baseUrl,
+          reasoning: true, input: ["text", "image"],
+          contextWindow: 1048576, maxTokens: 1048576,
+          thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+          // Pi's zero-price sentinel leaves CoThink's catalog estimate null, never a claim of free usage.
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: {
+            supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: true,
+            maxTokensField: "max_completion_tokens", supportsStrictMode: false,
+            thinkingFormat: "openai", requiresReasoningContentOnAssistantMessages: true,
+            supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true,
+          },
+        };
+        if (moonshot) {
+          // Preserve the existing builtin fallback even if Pi rejects an empty user
+          // provider overlay. Rebuild from the credential-free factory, never a composed provider.
+          const base = provider.id === "moonshotai-cn" ? moonshotaiCnProvider() : moonshotaiProvider();
+          const nativePro = { ...pro, baseUrl: base.baseUrl };
+          runtime.registerNativeProvider({
+            ...base, getModels: () => [...base.getModels(), nativePro],
+            getAllModels: () => [...(base.getAllModels?.() ?? base.getModels()), nativePro],
+          });
+          managedProviders.add(provider.id);
+          provider = runtime.getProvider(provider.id);
+          models = [...(provider.getAllModels?.() ?? provider.getModels())];
+        } else models.push(pro);
+        changed = true;
+      }
+      models = models.map(model => {
+        if ((model.type && model.type !== "chat") || model.api !== "openai-completions") return model;
+        const endpoint = officialEndpoint(model.baseUrl);
+        const kimi = endpoint === "moonshot" && ["kimi-k3", "kimi-k3.1-pro"].includes(model.id);
+        const deepseek = endpoint === "deepseek" && model.id === "deepseek-flash";
+        if (!kimi && !deepseek) return model;
+        changed = true;
+        return {
+          ...model, reasoning: true,
+          thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+          compat: { ...model.compat, supportsReasoningEffort: true, supportsDeveloperRole: false,
+            requiresReasoningContentOnAssistantMessages: true, thinkingFormat: deepseek ? "deepseek" : "openai" },
+        };
       });
+      if (!changed) continue;
+      managedProviders.add(provider.id);
+      try { runtime.registerProvider(provider.id, { models }); }
+      catch (error) {
+        // Native registration historically retains builtin models on invalid user
+        // overlays. Keep Pi's existing diagnostic and fallback rather than throwing
+        // out the whole local catalog; new registration errors must still surface.
+        if (!runtime.getError()?.includes(error.message)) throw error;
+      }
     }
   }
   await runtime.refresh({ allowNetwork: false });

@@ -245,7 +245,7 @@ test('resource isolation preserves stage-owned main and reviewer prompts and exc
   assert.equal(task.record.status,'completed',task.record.error);assert.equal(f.calls.length,3);
   const main=readFileSync(new URL('../prompts/main.md',import.meta.url),'utf8').trim();
   const review=readFileSync(new URL('../prompts/review.md',import.meta.url),'utf8').trim();
-  const systems=f.calls.map(c=>c.body.messages.find(m=>m.role==='system').content);
+  const systems=f.calls.map(c=>c.body.messages.find(m=>['system','developer'].includes(m.role)).content);
   assert.ok(systems[0].includes(main),'initial model must receive CoThink main prompt');
   assert.ok(systems[1].includes(review),'reviewer must receive review prompt');
   assert.ok(!systems[1].includes(main),'main stage prompt must not leak into review');

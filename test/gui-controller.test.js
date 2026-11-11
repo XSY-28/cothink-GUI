@@ -185,6 +185,8 @@ test("settings initialize custom API key and named team without model requests o
       maxTokens: 4096,
     },
   });
+  const customPath=join(f.home,"pi/models.json"),customCatalog=JSON.parse(readFileSync(customPath,"utf8"));
+  customCatalog.providers.localcustom.models[0].reasoning=true;writeFileSync(customPath,JSON.stringify(customCatalog));
   await c.action("team.save", {
     name: "New team",
     main: { provider: "localcustom", modelId: "newmodel" },
@@ -562,6 +564,9 @@ test("provider saves refresh idle cached catalog and auth while preserving conte
       modelId: "new-main",
     },
   });
+  const customPath=join(f.home,"pi/models.json"),customCatalog=JSON.parse(readFileSync(customPath,"utf8"));
+  customCatalog.providers["added-later"].models[0].reasoning=true;writeFileSync(customPath,JSON.stringify(customCatalog));
+  await c.action("provider.save",{providerId:"added-later",apiKey:"first-local-key"});
   const team = await c.action("team.save", {
     name: "Added provider",
     main: { provider: "added-later", modelId: "new-main" },
@@ -711,7 +716,7 @@ test("saving a Team validates the real directory and thinking of later secondary
   await assert.rejects(c.action("team.save",{name:"missing later seat",main:f.models.main,
     secondary:[f.models.secondary[0],{provider:"fixture",modelId:"missing"}]}),/模型不可用/);
   await assert.rejects(c.action("team.save",{name:"unsupported later setting",main:f.models.main,
-    secondary:[f.models.secondary[0],{...f.models.secondary[1],thinkingLevel:"not-a-level"}]}),/不支持思考档位/);
+    secondary:[f.models.secondary[0],{...f.models.secondary[1],thinkingLevel:"not-a-level"}]}),/思考档位/);
   assert.equal(readFileSync(join(f.home,"config.json"),"utf8"),original);
   assert.equal(f.calls.length,0);
   const provider=(await c.bootstrap()).providers.find(p=>p.id==="fixture");
@@ -720,30 +725,6 @@ test("saving a Team validates the real directory and thinking of later secondary
   assert.doesNotMatch(JSON.stringify(provider),/fixture-secret/);
 });
 
-test("an explicit follow-Team choice clears a durable conversation thinking override without rewriting older tasks",async t=>{
-  const f=await fixture(t), path=join(f.home,"pi/models.json"), catalog=JSON.parse(readFileSync(path,"utf8"));
-  catalog.providers.fixture.models[0].reasoning=true;
-  writeFileSync(path,JSON.stringify(catalog));
-  const c=await controller(t,f), s=await fixtureConversation(t, c);
-  await c.action("session.thinking",{sessionId:s.id,level:"high"});
-  const team=await c.action("team.save",{name:"Low team",main:{...f.models.main,thinkingLevel:"low"},secondary:f.models.secondary});
-  await c.action("session.team",{sessionId:s.id,teamId:team.id});
-  assert.equal((await c.session(s.id)).thinking,"high");
-  const first=await submitDraft(c,{sessionId:s.id,input:"with conversation override",protocolVersion:1, submissionId:"override-first"});
-  assert.equal((await finished(c,first.taskId)).team.main.thinkingLevel,"high");
-  await c.action("session.thinking",{sessionId:s.id});
-  assert.equal((await c.session(s.id)).thinking,null);
-  await c.close();
-  const reopened=await controllerModule.createGuiController({home:f.home,cwd:f.cwd});t.after(()=>reopened.close());
-  assert.equal((await reopened.session(s.id)).thinking,null,"following Team survives closing and reopening the host");
-  const second=await submitDraft(reopened,{sessionId:s.id,input:"follow selected team",protocolVersion:1, submissionId:"override-second"});
-  assert.equal((await finished(reopened,second.taskId)).team.main.thinkingLevel,"low");
-  assert.equal((await reopened.task(first.taskId)).team.main.thinkingLevel,"high");
-  assert.equal((await reopened.bootstrap()).teams.length,2,"the previous Team remains saved");
-  assert.equal(f.calls.length,2,"two ordinary answers use one main request each");
-  assert.deepEqual(f.calls.filter(call=>call.body.model==="main").map(call=>call.body.reasoning_effort),
-    ["high","low"], "the fixture receives the effective thinking level, not only a matching task label");
-});
 
 test("unified GUI never imports native command code and directs unmanaged commands away from the clean host",async t=>{
  const f=await fixture(t),root=join(f.home,'native-gui');mkdirSync(root);
@@ -1288,4 +1269,16 @@ test("unverified probe cleanup blocks shutdown until the same named probe is rem
   assert.equal(new Set(removals.map(args=>args.at(-1))).size,1);
   assert.deepEqual(removals[0].slice(0,-1),["--host","unix:///fixture/docker.sock","rm","--force","--volumes"]);
   assert.equal(c.shutdownState().settled,true);
+});
+
+
+test("GUI roster saves normalize old parameters and pure reads retain their source bytes",async t=>{
+ const f=await fixture(t),c=await controller(t,f),path=join(f.home,"config.json");
+ const original=readFileSync(path,"utf8");
+ await c.bootstrap();assert.equal(readFileSync(path,"utf8"),original);
+ const team=await c.action("team.save",{name:"Normalized legacy roster",main:{...f.models.main,thinkingLevel:"minimal"},
+  secondary:[{...f.models.secondary[0],thinkingLevel:"medium"},{...f.models.secondary[1],thinkingLevel:"xhigh"},f.models.secondary[2]]});
+ assert.deepEqual([team.main,...team.secondary].map(ref=>ref.thinkingLevel),["low","high","max","high"]);
+ const saved=readFileSync(path,"utf8");await c.bootstrap();assert.equal(readFileSync(path,"utf8"),saved);
+ assert.equal(f.calls.length,0);
 });

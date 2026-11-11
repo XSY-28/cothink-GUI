@@ -58,7 +58,8 @@ export async function fixture(t, handler = () => ({ text: "fixture answer" })) {
           models: ["main", "r1", "r2", "r3"].map((id) => ({
             id,
             name: id,
-            reasoning: false,
+            reasoning: true,
+            thinkingLevelMap: {max:"max"},
             input: ["text"],
             cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
             contextWindow: 32000,

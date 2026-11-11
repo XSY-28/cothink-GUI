@@ -1,13 +1,33 @@
 export const modelName = (model) =>
   model ? `${model.provider} / ${model.modelId}` : "来源未记录";
+export const THINKING_LEVELS = Object.freeze(["low","high","max"]);
+export function normalizeThinkingPreference(value) {
+  if (value === undefined || value === null || value === '') return 'high';
+  if (['off','minimal','low'].includes(value)) return 'low';
+  if (['medium','high'].includes(value)) return 'high';
+  if (['xhigh','max'].includes(value)) return 'max';
+  throw Error('无法识别思考档位。');
+}
+// Rendering preserves damaged values as an explicit error; writes still use strict normalization.
+export function thinkingPreferenceView(value) {
+  try {return {level:normalizeThinkingPreference(value),error:null};}
+  catch {return {level:null,error:`无法识别思考档位 ${String(value)}；请选择 low、high、max。`};}
+}
 export function conversationThinking(session, models = []) {
+  const level=normalizeThinkingPreference(session?.thinking);
   const refs=session?.team?[session.team.main,...session.team.secondary]:[];
-  const catalog=refs.map(ref=>models.find(model=>model.provider===ref.provider&&model.modelId===ref.modelId));
-  const missing=refs.filter((_,index)=>!catalog[index]);
-  const levels=missing.length?[]:(catalog[0]?.thinkingLevels??[]).filter(level=>catalog.every(model=>model.thinkingLevels?.includes(level)));
-  const reason=missing.length?`模型目录不可用：${missing.map(modelName).join("、")}；请修复目录或调整阵容。`:
-    refs.length&&!levels.length?`没有共同支持的档位：${catalog.map(model=>`${model.name??modelName(model)}（${model.thinkingLevels?.join("、")||"无档位"}）`).join("；")}。可跟随阵容或调整阵容。`:null;
-  return {level:session?.thinking??null,scope:session?.thinkingScope??(session?.thinking!=null?"main":null),levels,reason};
+  const problems=refs.map(ref=>{
+    const model=models.find(model=>model.provider===ref.provider&&model.modelId===ref.modelId);
+    if(!model)return `模型目录不可用：${modelName(ref)}；请修复目录或调整阵容。`;
+    if(model.transport==='unsupported'||model.auth&&model.auth!=='configured')return model.unavailableReason??`${modelName(ref)}：模型服务配置不可用。`;
+    if(model.thinkingLevels&&!model.thinkingLevels.includes(level))return `${model.name??modelName(model)} 不支持思考档位 ${level}；请修复型号配置或调整阵容。`;
+    if((model.outputLimitRequired??model.api==='anthropic-messages')&&ref.maxOutputTokens==null)return `${modelName(ref)} 协议要求 maxOutputTokens，请明确配置输出额度后再发送。`;
+    // Catalog facts use high and no per-ref cap. Re-evaluate those two parameter failures
+    // above, while retaining errors from authentication, transport and other configuration.
+    const staleThinking=model.unavailableCode==='MODEL_UNAVAILABLE'&&model.auth==='configured'&&model.transport==='project-http'&&model.thinkingLevel!=null&&model.thinkingLevels&&!model.thinkingLevels.includes(model.thinkingLevel);
+    return model.available===false&&model.unavailableCode!=='REQUIRED_OUTPUT_LIMIT'&&!staleThinking?model.unavailableReason:null;
+  }).filter(Boolean);
+  return {level,scope:"all",levels:THINKING_LEVELS,reason:problems.join("；")||null};
 }
 export function elapsedLabel(task, now = Date.now()) {
   if (task?.status === "stop_unknown") return "用时未确认";

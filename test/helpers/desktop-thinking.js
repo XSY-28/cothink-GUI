@@ -15,7 +15,7 @@ export async function verifyPackagedThinking(t,{appPath,launchCandidate}) {
   mkdirSync(join(home,"pi"),{recursive:true});
   writeFileSync(join(home,"pi/models.json"),JSON.stringify({providers:{fixture:{
    api:"openai-completions",baseUrl:"http://127.0.0.1:9/v1",apiKey:"fixture-only",
-   models:["main","worker"].map(id=>({id,name:id,reasoning:true,input:["text"],
+   models:["main","worker"].map(id=>({id,name:id,reasoning:true,thinkingLevelMap:{max:"max"},input:["text"],
     cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:32000,maxTokens:4096})),
   }}}));
   const [{saveConfig},{createTeamConfig},{createGuiController}]=await Promise.all([
@@ -46,16 +46,19 @@ export async function verifyPackagedThinking(t,{appPath,launchCandidate}) {
  ]);
  assert.ok(thinkingBounds.x+thinkingBounds.width<=sendBounds.x);
  assert.ok(menuBounds.y+menuBounds.height<=thinkingBounds.y);
- const selected=page.waitForResponse(response=>response.url().endsWith("/api/action")&&response.ok()&&
-  response.request().postDataJSON()?.action==="session.thinking");
- await page.getByRole("menuitemradio",{name:"low",exact:true}).click();
- const receipt=await (await selected).json();
- assert.equal(receipt.id,sessionId);assert.equal(receipt.thinkingScope,"all");assert.equal(receipt.thinking,"low");
+ assert.deepEqual(await page.getByRole("menuitemradio").allTextContents(),["low","high","max"]);
+ for(const level of ["low","high","max"]){
+  if(level!=="low")await trigger.click();
+  const selected=page.waitForResponse(response=>response.url().endsWith("/api/action")&&response.ok()&&response.request().postDataJSON()?.action==="session.thinking");
+  await page.getByRole("menuitemradio",{name:level,exact:true}).click();
+  const receipt=await(await selected).json();assert.equal(receipt.id,sessionId);assert.equal(receipt.thinkingScope,"all");assert.equal(receipt.thinking,level);
+  await page.waitForFunction(level=>document.querySelector('[aria-label="思考强度"]')?.textContent.includes(level),level);
+ }
  await draftSaved;
  await page.reload();
- await page.waitForFunction(()=>document.querySelector('[aria-label="思考强度"]')?.textContent.includes("low"));
+ await page.waitForFunction(()=>document.querySelector('[aria-label="思考强度"]')?.textContent.includes("max"));
  assert.equal(await page.getByLabel("输入问题",{exact:true}).inputValue(),"打包候选中的中文草稿");
- assert.equal(mutations.filter(row=>row.action==="session.thinking").length,1);
+ assert.equal(mutations.filter(row=>row.action==="session.thinking").length,3);
  assert.equal(mutations.find(row=>row.action==="session.thinking").args.scope,"all");
  assert.equal(mutations.filter(row=>["task.submit","context.organize","extension.command"].includes(row.action)).length,0);
  const files=join(home,"pi/sessions/main");
@@ -63,8 +66,9 @@ export async function verifyPackagedThinking(t,{appPath,launchCandidate}) {
   JSON.parse(readFileSync(path,"utf8").split("\n")[0]).id===sessionId);
  const events=readFileSync(path,"utf8").trim().split("\n").map(JSON.parse);
  assert.equal(events.findLast(row=>row.customType==="cothink-thinking").data.scope,"all");
+ assert.deepEqual(events.filter(row=>row.customType==="cothink-thinking").map(row=>row.data.level),["low","high","max"]);
  assert.equal(events.filter(row=>row.customType==="cothink-task").length,0);
- const evidence=resolve("work/unified-thinking");mkdirSync(evidence,{recursive:true});
+ const evidence=resolve("work/unified-thinking-three-levels");mkdirSync(evidence,{recursive:true});
  await trigger.click();await page.screenshot({path:join(evidence,"thinking-packaged.png")});await page.keyboard.press("Escape");
  const closed=app.waitForEvent("close");await app.evaluate(({app})=>app.quit());await closed;
  assert.equal(appProcess.exitCode,0);

@@ -1,5 +1,5 @@
 // Pure editor schema shared by the versioned draft and its renderer. This is not an authority store.
-export const GUI_INPUT_VERSION = "4";
+export const GUI_INPUT_VERSION = "5";
 export const defaultTurnOptions = () => ({id:null,readOnly:false,delegate:true,review:false,maxCalls:'',readAllowed:false,readPaths:[],readProject:null,readWorkspaceId:null,readVersion:null});
 export const retiredReviewOption = value => value?.review === true || value?.delegate === "review-only";
 

@@ -1,5 +1,5 @@
 import {validateEditorTurnOptions} from "./gui-turn-options.js";
-import {applyThinkingSelection, validateThinkingScope, validateThinkingModels} from "./thinking.js";
+import {applyThinkingSelection, validateThinkingScope, validateThinkingModels, normalizeThinkingPreference, parseThinkingLevel, DEFAULT_THINKING_LEVEL} from "./thinking.js";
 import { dirname, join, resolve, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -258,9 +258,9 @@ export function readConversationMetadata(manager) {
 
 /** GUI admission validates the models this operation can actually call. */
 export async function resolveConversationThinking(home, config, manager, {mainOnly = false} = {}) {
-  const {thinking:level, thinkingScope:scope} = readConversationMetadata(manager);
-  const effective = applyThinkingSelection(config, {level, scope});
-  await validateThinkingModels(home, effective, mainOnly ? effective.main.thinkingLevel : level, mainOnly ? "main" : scope);
+  const level = normalizeThinkingPreference(readConversationMetadata(manager).thinking);
+  const effective = applyThinkingSelection(config, {level, scope:"all"});
+  await validateThinkingModels(home, effective, level, mainOnly ? "main" : "all");
   return effective;
 }
 
@@ -276,8 +276,10 @@ export function restoreConversationThinking(config, manager) {
 export async function saveConversationThinking(home, owner, {level, scope}) {
   const team = readSessionTeam(owner.sessionManager.getBranch());
   if (!team) throw Error("请先绑定 Team。");
-  await validateThinkingModels(home, team, level, scope);
-  appendConversationEntry(owner, "cothink-thinking", {level, scope:scope ?? "main"});
+  if (scope !== undefined && scope !== "all") throw Error("新思考设置的作用范围必须为 all。");
+  level = level === undefined ? DEFAULT_THINKING_LEVEL : parseThinkingLevel(level);
+  await validateThinkingModels(home, team, level, "all");
+  appendConversationEntry(owner, "cothink-thinking", {level, scope:"all"});
 }
 
 export function sessionWriteIncomplete(owner) {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {readFileSync,writeFileSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
 import {join} from 'node:path';
 import { fixtureConversation, prepareSubmit, seedFixtureConversationRepository, submitDraft } from './helpers/gui-controller-fixture.js';
 import {fixture} from './helpers/pi-fixture.js';
@@ -28,7 +28,8 @@ test('GUI protocol cutover preserves one root, branch marker and per-turn cap',a
 function twoVerifiedFiles() {
  return {goal:'Verify both files',scope:['a.txt','b.txt'],steps:['a','b'].map(id=>({id,goal:`Verify ${id}.txt`,scope:[`${id}.txt`],deliverables:[`${id}.txt`],dependsOn:id==='b'?['a']:[],checks:[{command:'node',args:['-e',`require('fs').accessSync('${id}.txt')`]}]}))};
 }
-test('a verified multi-step delivery gets one manager report and follows the selected conversation endpoint',async t=>{
+for(const thinking of ['low','high','max'])test(`verified multi-step delivery sends ${thinking} for manager synthesis and retains the proposal freeze`,async t=>{
+ const nextThinking=thinking==='high'?'max':'high';
  const repo=repository(t),plan=twoVerifiedFiles();
  const replies=[{toolCalls:[{name:'start_work',args:{action:'start',reason:'PROPOSAL_PROCESS_SENTINEL',plan}}]}, {text:'STEP_REPORT_A'}, {text:'STEP_REPORT_B'}, {text:'ADOPTED_MANAGER_REPORT'}, {text:'LATER_REPLY_SENTINEL'}, {text:'FORK_REPLY'}];
  let rootId;const toolResult=call=>JSON.parse(call.body.messages.findLast(message=>message.role==='tool').content);
@@ -40,20 +41,23 @@ test('a verified multi-step delivery gets one manager report and follows the sel
  const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
  for(const model of catalog.providers.fixture.models)model.reasoning=true;
  writeFileSync(path,JSON.stringify(catalog));
+ f.models.secondary=f.models.secondary.slice(0,2);
  const c=await controller(t,f,{execution});
  const s=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));
- await c.action('session.thinking',{sessionId:s.id,level:'low',scope:'all'});
+ await c.action('session.thinking',{sessionId:s.id,level:thinking,scope:'all'});
  const submit=(c,sessionId,input,budget)=>submitDraft(c,{sessionId,input,submissionId:randomUUID(),protocolVersion:1,budget});
  const proposed=await submit(c,s.id,'Verify both actual files',{maxCalls:4});await complete(c,proposed.taskId);
- await c.action('session.thinking',{sessionId:s.id,level:'high',scope:'all'});
+ await c.action('session.thinking',{sessionId:s.id,level:nextThinking,scope:'all'});
  const root=await c.action('task.confirmWork',{sessionId:s.id,proposalRef:readTask(f.home,proposed.taskId).proposalRef,submissionId:randomUUID(),protocolVersion:1});
  rootId=root.taskId;
  const delivered=await complete(c,root.taskId);
  assert.equal(delivered.status,'completed',delivered.error);
  assert.equal(f.calls.length,4);
  assert.equal(f.calls[3].body.model,'main');assert.ok(!f.calls[3].body.tools?.length);
- assert.ok(f.calls.every(call=>call.body.reasoning_effort==='low'),'both executors and manager synthesis inherit the proposal snapshot');
- assert.equal(readTask(f.home,root.taskId).stages.find(stage=>stage.phase==='manager-final').modelRef.thinkingLevel,'low');
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort===thinking),'both executors and manager synthesis inherit the proposal snapshot');
+ assert.equal(readTask(f.home,root.taskId).stages.find(stage=>stage.phase==='manager-final').modelRef.thinkingLevel,thinking);
+ mkdirSync('work/unified-thinking-three-levels',{recursive:true});
+ writeFileSync(join('work/unified-thinking-three-levels',`synthesis-3-${thinking}.json`),JSON.stringify({thinking,phase:'manager-final',role:'main',model:f.calls[3].body.model,effort:f.calls[3].body.reasoning_effort,wire:f.calls.slice(0,4).map((call,index)=>({index:index+1,model:call.body.model,effort:call.body.reasoning_effort}))},null,2));
  const synthesis=JSON.stringify(f.calls[3].body.messages);
  assert.match(synthesis,/Verify both actual files/);assert.match(synthesis,/STEP_REPORT_A/);assert.match(synthesis,/STEP_REPORT_B/);
  const original=await c.session(s.id);
@@ -64,7 +68,7 @@ test('a verified multi-step delivery gets one manager report and follows the sel
  const fork=await reopened.action('session.fork',{sessionId:s.id,taskId:root.taskId});
  const forkTurn=await submit(reopened,fork.id,'Continue on the branch');assert.equal((await complete(reopened,forkTurn.taskId)).status,'completed');
  for(const request of f.calls.slice(4)){
-   assert.equal(request.body.reasoning_effort,'high','explicit new turns and their branches use the current conversation selection');
+   assert.equal(request.body.reasoning_effort,nextThinking,'explicit new turns and their branches use the current conversation selection');
    const messages=JSON.stringify(request.body.messages);
    assert.match(messages,/Verify both actual files/);
    assert.ok(request.body.messages.some(message=>['system','developer'].includes(message.role)&&message.content.includes('conversation manager')));

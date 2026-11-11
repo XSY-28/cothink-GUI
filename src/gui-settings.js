@@ -14,10 +14,13 @@ import {
 } from "./teams.js";
 import { selectModelRef } from "./setup.js";
 import { acquireSessionWriter, privateDirectory, writePrivateJson } from "./storage.js";
+import {normalizeThinkingPreference} from "./thinking.js";
 export {validateThinkingModels as validateGuiThinking} from "./thinking.js";
 export { saveGuiBuiltinSkills, saveGuiLocalSkills } from "./gui-skills.js";
 
 export async function saveGuiTeam(home, { name, main, secondary }) {
+  main = {...main, thinkingLevel:normalizeThinkingPreference(main?.thinkingLevel)};
+  secondary = secondary.map(ref=>({...ref,thinkingLevel:normalizeThinkingPreference(ref.thinkingLevel)}));
   const team = {
     id: randomUUID(),
     name: normalizeTeamName(name),

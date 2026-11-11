@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import {modelName} from "../../view.js";
+import React, { useState, useLayoutEffect, useRef } from "react";
+import {modelName,THINKING_LEVELS,thinkingPreferenceView} from "../../view.js";
 import styles from "./TeamPanel.module.css";
 
 export const identity = ref => JSON.stringify([ref?.provider, ref?.modelId]);
@@ -12,6 +12,8 @@ export const outputLimitRequired = model => model?.outputLimitRequired ?? model?
 export function ModelEditor({label, value, models, providers, used, onIdentity, onParameters}) {
   const [search,setSearch]=useState("");
   const model = catalogModel(models,value);
+  const thinking=thinkingPreferenceView(value.thinkingLevel),thinkingSelect=useRef(null);
+  useLayoutEffect(()=>{if(thinking.error&&thinkingSelect.current)thinkingSelect.current.selectedIndex=-1;});
   const options=models.filter(m=>matchesSearch(search,[m.name,m.provider,m.modelId]));
   return <section className={styles.model}>
     <label>搜索{label}<input type="search" aria-label={`搜索${label}`} value={search}
@@ -33,12 +35,10 @@ export function ModelEditor({label, value, models, providers, used, onIdentity, 
     {value.modelId && !model && <p className="field-note">所选模型已不在当前目录中，请选择可用的模型。</p>}
     <details className={styles.parameters}><summary>思考与输出额度</summary>
       <div className="form-grid">
-        <label>思考档位<select aria-label={`${label}思考档位`} value={value.thinkingLevel ?? ""}
-          disabled={!model?.thinkingLevels?.length} onChange={e=>{const next={...value};if(e.target.value)next.thinkingLevel=e.target.value;else delete next.thinkingLevel;onParameters(next);}}>
-          <option value="">{model?.reasoning ? "默认 high" : "默认 off（不启用思考）"}</option>
-          {value.thinkingLevel && !model?.thinkingLevels?.includes(value.thinkingLevel) && <option value={value.thinkingLevel} disabled>{value.thinkingLevel}（当前模型不支持）</option>}
-          {model?.thinkingLevels?.map(level=><option key={level}>{level}</option>)}
-        </select></label>
+        <label>思考档位<select aria-label={`${label}思考档位`} ref={thinkingSelect} required aria-invalid={thinking.error?true:undefined} value={thinking.level??""}
+          onChange={e=>onParameters({...value,thinkingLevel:e.target.value})}>
+          {THINKING_LEVELS.map(level=><option key={level}>{level}</option>)}
+        </select>{thinking.error&&<span className="field-note" role="alert">{thinking.error}</span>}</label>
         <label>输出额度{outputLimitRequired(model) ? "（协议必填）" : "（可留空）"}
           <input aria-label={`${label}输出额度`} type="number" min="1" step="1" required={outputLimitRequired(model)}
             value={value.maxOutputTokens ?? ""} placeholder="不设本地上限"
