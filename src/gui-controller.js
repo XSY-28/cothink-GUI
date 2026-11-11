@@ -1,3 +1,4 @@
+import {normalizeThinkingPreference,DEFAULT_THINKING_LEVEL} from "./thinking.js";
 import { createGuiMaterialActions } from "./gui-material-actions.js";
 import {contextToolNames,contextDigest,contextSnapshot,contextState,readContextDisk,compactContext,contextOperationView} from './context-management.js';
 import {GUI_INPUT_VERSION,validateEditorTurnOptions,editorTurnInput,retiredReviewOption,guiTurnIntent} from "./gui-turn-options.js";
@@ -46,6 +47,8 @@ import { singleLineCommand } from "./setup.js";
 import { releaseNotes } from "./presentation.js";
 import {
   appendConversationEntry,
+  resolveConversationThinking,
+  saveConversationThinking,
   readSessionMode,
   readSessionFlow,
   normalizeConversationEditor,
@@ -67,7 +70,6 @@ import {
   removeGuiTeam,
   saveGuiWork,
   saveGuiProvider,
-  validateGuiThinking,
   saveGuiBuiltinSkills,
   createGuiOAuthManager,saveGuiLocalSkills,guiExecutionConfigDigest,inspectGuiExecution,
 } from "./gui-settings.js";
@@ -83,7 +85,6 @@ import {
   revealGuiTask,
 } from "./gui-work.js";
 
-/** Local host adapter. Pi sessions and task records remain the sources of conversation and execution facts. */
 export async function createGuiController({ home, cwd = process.cwd(), suggestedProject = cwd, installation = "browser", updateService, oauthRuntime, executionInspector=inspectGuiExecution }) {
   assertCleanProjectProcess({unified:true});
   const directory = join(home, "pi/sessions/main");
@@ -191,7 +192,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   const updateSnapshot=()=>{if(installation === "desktop") return {channel:"desktop-local",status:"local",automatic:false,message:"桌面本地候选；更新渠道尚未启用。",instructions:[],currentVersion:releaseNotes().version};const s=updates.snapshot();return {...s,message:formatUpdateStatus(s),instructions:updateInstructions(s)};};
   const checkForUpdates=()=>installation === "desktop" ? Promise.resolve(updateSnapshot()) : updates.check();
   // Disposable summaries: stat every dependency, parse only changed durable bytes.
-  // No request bodies, reviewer text or second persisted conversation store.
   const taskCache = new Map(), sessionCache = new Map(), fileListCache = new Map();
   const hasFileWork = record => !!(record.work || record.deliveryRef || record.projectOperation?.childTaskIds?.length);
   async function files(id) {
@@ -629,7 +629,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         ...materialView(id,meta.editor,manager),draft: meta.draft, editor: meta.editor, draftRevision: meta.draftRevision, branchAnchor: meta.branchAnchor,
         ...reading, viewRevision: navigation.navigation?.viewRevision ?? 0,
         forkOf: facts.forkOf,
-        thinking: meta.thinking ?? null,
+        thinking: normalizeThinkingPreference(meta.thinking),
+        thinkingScope: "all",
         turns,
         submissions: submissions(),
         readOnly: readOnly || !!membership.workspaceError || !!navigation.navigationError ||
@@ -648,7 +649,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       return safe({
         ...navigationFor(id), persisted: !!info,
         id, title: "历史不可用", project: null, mode, team: null,
-        thinking: null, draft: "", turns: [], submissions: submissions(), readOnly: true,
+        thinking: null, thinkingScope: null, draft: "", turns: [], submissions: submissions(), readOnly: true,
         selectionError: "会话历史或任务请求记录损坏、缺失或不可用；原文件保留，请修复后重新打开。禁止继续生成，未知提交不会重发。",
       });
     }
@@ -937,7 +938,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         catalog
           .getModels()
           .filter((m) => !m.type || m.type === "chat")
-          .map(model=>projectModelFacts(catalog,{provider:model.provider,modelId:model.id})),
+          .map(model=>projectModelFacts(catalog,{provider:model.provider,modelId:model.id,thinkingLevel:DEFAULT_THINKING_LEVEL})),
       ),
       sessions: page.items,
       sessionsCursor: page.nextCursor,
@@ -1006,8 +1007,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           const disk=readContextDisk(manager.getSessionFile(),sessionId);
           if(contextDigest(disk.getEntries())!==contextDigest(manager.getEntries()))throw sessionStateError('CONTEXT_STORAGE','内存与磁盘历史不一致。');
           const config=loadConfig(home);if(config?.formatVersion!==3||!readSessionTeam(manager.getBranch()))throw Error('请先绑定阵容。');
-          const effective=resolveConversationConfig(config,manager).config,thinking=readConversationMetadata(manager).thinking;
-          if(thinking!==undefined)effective.main.thinkingLevel=thinking;
+          const effective=await resolveConversationThinking(home,resolveConversationConfig(config,manager).config,manager,{mainOnly:true});
           return {effective,workspace:{id:membership.workspaceId??null,project:readSessionProject(manager)},before:structuredClone(manager.getEntries()),opening:runtime(sessionId,holder,effective)};
         });
         rt=await prep.opening;
@@ -1161,9 +1161,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           if (!confirmation && (continuation || snapshot.turnIntent.fileRequired)) await requireGuiFileTask(home,continuation
             ? {...snapshot.workspace,directoryIdentity:continuation.source.workspace.directoryIdentity??undefined}
             : snapshot.workspace,snapshot.config.work);
-          const thinking = readConversationMetadata(manager).thinking;
-          if (!confirmation && thinking !== undefined)
-            snapshot.config.main.thinkingLevel = thinking;
+          if (!confirmation) snapshot.config = await resolveConversationThinking(home, snapshot.config, manager);
           const requestedRead=args.readAuthorization;
           snapshot.readAuthorization=confirmation?null:await freezeReadAuthorization({home,workspace:snapshot.workspace,sessionId,submissionId,editorEditId:args.editorEditId,input:requestedRead?.version?{paths:requestedRead.paths}:requestedRead});
           if(requestedRead?.version&&snapshot.readAuthorization?.version!==requestedRead.version)
@@ -1288,7 +1286,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       const catalog=await getCatalog(),refs=resolveTeamConfig(config,roster);
       if(!refs.secondary.length)return null;
       const needed=requireAll?[refs.main,...refs.secondary]:[refs.main];
-      const routes=await Promise.all(needed.map(ref=>projectModelFacts(catalog,ref)));
+      const routes=await Promise.all(needed.map(ref=>projectModelFacts(catalog,{...ref,thinkingLevel:normalizeThinkingPreference(ref.thinkingLevel)})));
       return routes.every(route=>route.available)?roster:null;
     }catch{return null;}
   }
@@ -1813,12 +1811,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             }
           }
           if (name === "session.thinking") {
-            const team = readSessionTeam(holder.sessionManager.getBranch());
-            if (!team) throw Error("请先绑定 Team。");
-            await validateGuiThinking(home, team, args.level);
-            appendConversationEntry(target, "cothink-thinking", {
-              level: args.level,
-            });
+            await saveConversationThinking(home, target, args);
           }
           emit();
           const saved=await session(args.sessionId);

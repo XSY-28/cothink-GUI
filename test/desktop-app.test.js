@@ -10,27 +10,9 @@ import {mkdtempSync,readdirSync,readFileSync,renameSync,mkdirSync,rmdirSync,rmSy
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
-import {_electron as electron} from 'playwright';
+import {appPath,launchCandidate} from './helpers/desktop-candidate.js';
+import {verifyPackagedThinking} from './helpers/desktop-thinking.js';
 import {verifyPackagedTeamPortraits} from './helpers/desktop-team-portrait.js';
-const appPath=process.env.COTHINK_DESKTOP_APP;
-assert.ok(appPath,'COTHINK_DESKTOP_APP must name the actual isolated packaged App');
-async function launchCandidate(t, seed, home=mkdtempSync(join(tmpdir(),'cothink-app-lifecycle-'))) {
- let app;
- try {
-  await seed?.(home);
-  app=await electron.launch({executablePath:join(appPath,'Contents/MacOS/CoThink'),args:[`--user-data-dir=${join(home,'chromium')}`],env:{...process.env,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',NODE_OPTIONS:'',NODE_PATH:'',COTHINK_HOME:home,PI_OFFLINE:'1'},timeout:30000});
- } catch (error) {
-  rmSync(home,{recursive:true,force:true});
-  throw error;
- }
- const appProcess=app.process();
- t.after(async()=>{if(appProcess.exitCode===null && appProcess.signalCode===null){
-   // Failure-fixture cleanup only: a forced kill is never counted as shutdown success.
-   const exited=new Promise(resolve=>appProcess.once('exit',resolve));appProcess.kill('SIGKILL');await exited;
-  }rmSync(home,{recursive:true,force:true});});
- const page=await app.firstWindow();await page.waitForURL('http://127.0.0.1:*/**');
- return {home,app,page,appProcess};
-}
 async function fixture(t) {
  const {home,app,page,appProcess}=await launchCandidate(t);
  await page.getByRole('navigation',{name:'工作导航'}).getByRole('button',{name:'新建',exact:true}).click();
@@ -86,6 +68,10 @@ async function pendingQuit(f) {
  for(let n=0;n<100;n++){if(await f.app.evaluate(()=>desktopTest.held.length))return;await new Promise(r=>setTimeout(r,10));}
  throw Error('phase-one receipt not observed');
 }
+test('packaged thinking control saves all-roster selection without model calls',async t=>{
+ await verifyPackagedThinking(t,{appPath,launchCandidate});
+});
+
 test('packaged Team portraits reveal the name only after hover dwell',async t=>{
  await verifyPackagedTeamPortraits(t,{appPath,launchCandidate});
 });

@@ -36,7 +36,7 @@ test('read_skill accepts its advertised URI and rejects paths outside the select
  writeFileSync(join(dir,'references','layout.md'),'FROZEN_LAYOUT_REFERENCE');
  const o=opts(f);o.frozenConfig.piResources={skills:[dir]};const task=await runProjectTurn(o);
  assert.equal(task.record.status,'completed',task.record.error);
- assert.ok(f.calls[0].body.messages.some(m=>m.role==='system'&&m.content.includes(uri)));
+ assert.ok(f.calls[0].body.messages.some(m=>['system','developer'].includes(m.role)&&m.content.includes(uri)));
  const results=Object.fromEntries(f.calls[1].body.messages.filter(m=>m.role==='tool').map(m=>[m.tool_call_id,m.content]));
  assert.match(results.uri,/FROZEN_DESIGN_BODY/);
  assert.deepEqual(JSON.parse(results.uri),JSON.parse(results.relative));

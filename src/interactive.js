@@ -5,6 +5,7 @@ import {
   selectConversationTeam, resolveConversationConfig, readSessionProject, conversationCwd,
   readConversationMetadata, appendConversationEntry, sessionWriteIncomplete,
   conversationTaskIds,
+  restoreConversationThinking,
 } from "./conversation.js";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -419,13 +420,9 @@ export async function runInteractive({
     const saved = readSessionTeam(manager.getBranch());
     const latest = loadConfig(home) ?? config;
     const inherited = saved ?? (fresh ? configState.value.team : null);
-    const effective = latest.formatVersion === 3 ? resolveConversationConfig(latest, manager, {fresh, inheritedTeam: inherited}).config : structuredClone(configState.value);
+    let effective = latest.formatVersion === 3 ? resolveConversationConfig(latest, manager, {fresh, inheritedTeam: inherited}).config : structuredClone(configState.value);
     if (!inherited && !fresh) delete effective.team;
-    const savedThinking = readConversationMetadata(manager).thinking;
-    if(savedThinking !== undefined) {
-      effective.main.thinkingLevel = savedThinking;
-      if(effective.team) effective.team = snapshotTeam({...effective.team, main: effective.main});
-    }
+    effective = restoreConversationThinking(effective, manager);
     const catalog = await createModelRuntime(home);
     const intended = effective.main;
     const available = catalog.getModel(intended.provider,intended.modelId);
@@ -483,16 +480,12 @@ export async function runInteractive({
         const latest = loadConfig(home);
         rt.effectiveConfig = resolveTeamConfig(latest, saved);
         if (!saved) delete rt.effectiveConfig.team;
-        const savedThinking = readConversationMetadata(rt.sessionManager).thinking;
-        if(savedThinking !== undefined) {
-          rt.effectiveConfig.main.thinkingLevel = savedThinking;
-          if(rt.effectiveConfig.team) rt.effectiveConfig.team = snapshotTeam({...rt.effectiveConfig.team, main: rt.effectiveConfig.main});
-        }
+        rt.effectiveConfig = restoreConversationThinking(rt.effectiveConfig, rt.sessionManager);
         rt.needsTeam = !saved;
         rt.singleModel = readSessionMode(rt.sessionManager);
         rt.projectMode = readTerminalMode(rt.sessionManager) === "project";
         configState.value = rt.effectiveConfig;
-        if (saved && rt.modelRuntime.getModel(saved.main.provider,saved.main.modelId)) await rt.selectModel(saved.main);
+        if (saved && rt.modelRuntime.getModel(saved.main.provider,saved.main.modelId)) await rt.selectModel(rt.effectiveConfig.main);
         try { rememberRecent(saved); } catch(error) { notify(error.message,"warning"); }
         refreshTeamStatus();
       });

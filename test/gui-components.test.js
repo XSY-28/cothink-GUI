@@ -1,3 +1,4 @@
+import {GUI_INPUT_VERSION} from "../src/gui-turn-options.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import React, { act } from "react";
@@ -5,6 +6,8 @@ import { Window } from "happy-dom";
 import { Composer } from "../gui/src/Composer.js";
 import { fixtureConversation } from "./helpers/gui-controller-fixture.js";
 import { componentUrl, modalEnvironment } from "./gui-modal.fixture.js";
+
+const protocol={unified:1,guiInput:Number(GUI_INPUT_VERSION)};
 
 test('skill settings show host capabilities and save only explicit disabled names',async()=>{
  await modalEnvironment(async({root,container,Settings})=>{
@@ -64,7 +67,7 @@ test("Settings contains Tab focus while work fields are disabled by an active ta
     let finishSave;
     for (const state of ["active", "busy"]) {
       const props = {
-        boot: {protocol:{unified:1},
+        boot: {protocol,
           ...base,
           active: state === "active" ? { taskId: "running" } : null,
         },
@@ -219,7 +222,7 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
     };
     const base = {
       session: { id: "s", mode: "cothink", team },
-      boot: {protocol:{unified:1},
+      boot: {protocol,
         teams: [team],
         models: [
           { provider: "p", modelId: "main", thinkingLevels: ["low", "high"] },
@@ -297,17 +300,6 @@ test("composer blocks IME confirmation, keeps drafts editable during a run and l
   });
 });
 
-test("turn limit details report unknown output policy when the model catalog is unavailable",async()=>{
-  await modalEnvironment(async({root,container,TurnLimits})=>{
-    const team={main:{provider:"p",modelId:"main"},secondary:[]};
-    await act(()=>root.render(React.createElement(TurnLimits,{available:true,team,models:[],onClose(){}})));
-    assert.equal(container.querySelectorAll('input[type="checkbox"]').length,2,"only read-only and delegation are regular turn controls");
-    assert.doesNotMatch(container.textContent,/必须由不同型号独立评审/);
-    await act(()=>container.querySelector("summary").click());
-    assert.match(container.querySelector("details").textContent,/模型目录不可用，输出额度要求未知/);
-    assert.doesNotMatch(container.querySelector("details").textContent,/未设本地输出上限/);
-  });
-});
 
 test("invalid work-check arguments show a form error and do not send a settings action", async () => {
   const win = new Window({ url: "http://localhost/" }),
@@ -338,7 +330,7 @@ test("invalid work-check arguments show a form error and do not send a settings 
   win.document.body.append(container);
   const root = createRoot(container),
     actions = [];
-  const boot = {protocol:{unified:1},
+  const boot = {protocol,
     configured: true,
     teams: [],
     models: [],
@@ -510,7 +502,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     let result;
     if (url.pathname === "/api/bootstrap")
       result = {
-        protocol:{unified:1},
+        protocol,
         configured: true,
         version: "fixture",
         teams: [team],
@@ -696,7 +688,7 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     await act(()=>[...archivedRow.querySelectorAll("button")].find(b=>b.textContent==="恢复对话").click());
     await settle();
     assertUngrouped();
-    assert.equal(container.querySelector("textarea").disabled,true,"restoring in settings does not select a conversation");
+    assert.equal(container.querySelector("textarea").value,"","restoring in settings leaves the empty homepage editor");
     await act(()=>container.querySelector('[aria-label="关闭设置"]').click());
     await settle();
     await showHistory();
@@ -795,7 +787,7 @@ test('update settings keep controls disabled during a check and show a save fail
     const home=mkdtempSync(join(tmpdir(),'gui-update-settings-'));
     const service=createUpdateService({home,currentVersion:'1.0.0',env:{},fetchImpl:async()=>new Response(JSON.stringify({name:'cothink-v2',version:'2.0.0'}))});
     await service.check({manual:true});const s=service.snapshot();
-    const boot={protocol:{unified:1},configured:true,teams:[],models:[],providers:[],work:{},version:'1.0.0',releaseNotes:{full:'local'},updates:{...s,message:formatUpdateStatus(s),instructions:updateInstructions(s)}};
+    const boot={protocol,configured:true,teams:[],models:[],providers:[],work:{},version:'1.0.0',releaseNotes:{full:'local'},updates:{...s,message:formatUpdateStatus(s),instructions:updateInstructions(s)}};
     let calls=0,fail;
     const commands={configureUpdates:async()=>{calls++;await new Promise((_,reject)=>fail=reject);}};
     try {
@@ -840,7 +832,7 @@ test("removed Option+M mode shortcut leaves text and submission untouched", asyn
   await modalEnvironment(async ({win, container, root}) => {
     const changes = [], drafts = [], submissions = [];
     const base = {
-      session: {id: "s", mode: "cothink"}, boot: {protocol:{unified:1},models: [], teams: []},
+      session: {id: "s", mode: "cothink"}, boot: {protocol,models: [], teams: []},
       draft: "keep this draft", onDraft: value => drafts.push(value),
       onSubmit: () => submissions.push(true), onChange: (...args) => changes.push(args),
       onSettings: () => {},
@@ -875,7 +867,7 @@ test("removed Option+M mode shortcut leaves text and submission untouched", asyn
 
 test("archived settings search and restore stay in settings while viewing selects the matched message",async()=>{
   await modalEnvironment(async({root,container,Settings,win})=>{
-    const boot={protocol:{unified:1},configured:true,teams:[],models:[],providers:[],work:{},version:"fixture",releaseNotes:{full:"local"}};
+    const boot={protocol,configured:true,teams:[],models:[],providers:[],work:{},version:"fixture",releaseNotes:{full:"local"}};
     let archived=true,closes=0; const requests=[], changes=[], opens=[];
     const row={id:"archived",title:"Saved answer",project:null,persisted:true,navigation:{revision:3,archived:true,pinned:false},match:{snippet:"needle answer",taskId:"old-task",field:"finalText"}};
     const commands={
@@ -911,7 +903,7 @@ test("archived settings search and restore stay in settings while viewing select
 test("archived composer preserves draft and blocks submission without claiming another writer",async()=>{
   await modalEnvironment(async({root,container,win})=>{
     let sends=0;
-    await act(()=>root.render(React.createElement(Composer,{session:{id:"a",navigation:{archived:true},mode:"one",team:{id:"t",main:{provider:"p",modelId:"m"},secondary:[]}},boot:{protocol:{unified:1},models:[],teams:[]},draft:"keep unsent",onDraft(){},onSubmit(){sends++;},onChange(){},onSettings(){}})));
+    await act(()=>root.render(React.createElement(Composer,{session:{id:"a",navigation:{archived:true},mode:"one",team:{id:"t",main:{provider:"p",modelId:"m"},secondary:[]}},boot:{protocol,models:[],teams:[]},draft:"keep unsent",onDraft(){},onSubmit(){sends++;},onChange(){},onSettings(){}})));
     assert.equal(container.querySelector('textarea').disabled,true);
     assert.equal(container.querySelector('textarea').value,"keep unsent");
     assert.match(container.textContent,/已归档/); assert.doesNotMatch(container.textContent,/被其他入口占用/);
@@ -933,7 +925,7 @@ test("delayed new-chat preserves the old draft and a newer navigation wins",asyn
       read:async(kind,args={})=>{
         const key=kind === "session" ? "session:"+args.id : kind === "sessions" && args.project ? "project:"+args.project : null;
         if(key && delays.has(key)){const wait=delays.get(key);delays.delete(key);await wait.promise;}
-        if(kind === "bootstrap")return {teams:[],models:[],providers:[],sessions:[records.a],work:{},active:null};
+        if(kind === "bootstrap")return {protocol,teams:[],models:[],providers:[],sessions:[records.a],work:{},active:null};
         if(kind === "session")return records[args.id];
         if(kind === "sessions")return {items:Object.values(records).filter(s=>!args.project || s.project===args.project),nextCursor:null};
       },
@@ -1024,16 +1016,11 @@ test("Team panel preserves exchanged model settings, dirty edits and saved facts
       React.createElement(TeamPanel,{ref:panel,busy,session:{id:"session",team,thinking:"high"},teams:[{...team,main:{...main,maxOutputTokens:789}}],models,providers:[{id:"p",configured:true,authKind:"api_key"}],commands,onClose:()=>closes++}))));
     await render(true);
     assert.match(container.textContent,/阵容暂只读/);
-    const thinking=container.querySelector('[aria-label="此对话的思考设置"]');
-    await act(()=>{
-      thinking.value="low";
-      thinking.dispatchEvent(new win.Event("change",{bubbles:true}));
-    });
-    assert.equal(thinking.disabled,true);
-    assert.deepEqual(changes,[],"busy roster must not send a thinking mutation");
+    assert.equal(container.querySelector('[aria-label="此对话的思考设置"]'),null);
+    assert.deepEqual(changes,[],"the roster only describes conversation settings");
     await render(false);
     const click=text=>act(async()=>{const button=[...container.querySelectorAll("button")].find(b=>b.textContent===text);button.focus();button.click();});
-    assert.match(container.textContent,/实际思考：high（对话设置，覆盖阵容中的 low）/);
+    assert.match(container.textContent,/所有模型统一采用思考档位：high/);
     const savedRow=container.querySelector('[aria-label="使用 Original"]');
     assert.equal(savedRow.disabled,true,"the current row cannot silently replace a different historical snapshot");
     assert.match(savedRow.textContent,/与当前快照不同/);
@@ -1042,8 +1029,6 @@ test("Team panel preserves exchanged model settings, dirty edits and saved facts
     await act(()=>container.querySelector('[aria-label="管理 Original"]').click());
     await click("使用已保存参数");
     assert.deepEqual(switches,[{sessionId:"session",teamId:"old"}],"an older effective snapshot can explicitly return to its saved Team without creating another Team");
-    await act(async()=>{const select=container.querySelector('[aria-label="此对话的思考设置"]');select.value="";select.dispatchEvent(new win.Event("change",{bubbles:true}));});
-    assert.deepEqual(changes,[["session.thinking",{},"session"]]);
     await click("按当前快照另存");
     assert.match(container.textContent,/协作候选/);
     assert.doesNotMatch(container.textContent,/普通问答的评审模型/);
@@ -1076,9 +1061,9 @@ test("Team panel preserves exchanged model settings, dirty edits and saved facts
 
 test("unknown Team saves are read-only reconciled and never recreated or automatically selected by name",async()=>{
   await modalEnvironment(async({root,container,win,TeamPanel})=>{
-    const team={id:"old",name:"Original",main:{provider:"p",modelId:"a"},secondary:[{provider:"p",modelId:"b"}]};
+    const team={id:"old",name:"Original",main:{provider:"p",modelId:"a",thinkingLevel:"medium"},secondary:[{provider:"p",modelId:"b",thinkingLevel:"xhigh"}]};
     let saves=0, reads=0, switches=0;
-    const props={session:{id:"s",team},teams:[team],models:["a","b"].map(modelId=>({provider:"p",modelId,name:modelId,thinkingLevels:["off"]})),providers:[{id:"p",configured:true}],
+    const props={session:{id:"s",team},teams:[team],models:["a","b"].map(modelId=>({provider:"p",modelId,name:modelId,thinkingLevels:["low","high","max"]})),providers:[{id:"p",configured:true}],
       commands:{saveTeam:async()=>{saves++;throw Object.assign(Error("lost reply"),{unknown:true});},refreshTeams:async()=>{reads++;return {providers:[]};},refresh:async()=>{},selectTeam:async()=>switches++},onClose(){}};
     const click=text=>act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent===text).click());
     await act(()=>root.render(React.createElement(TeamPanel,props)));
@@ -1087,11 +1072,13 @@ test("unknown Team saves are read-only reconciled and never recreated or automat
     await act(()=>{const input=container.querySelector('[aria-label="新阵容名称"]');Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(input,"Maybe saved");input.dispatchEvent(new win.Event("input",{bubbles:true}));});
     await act(async()=>container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true})));
     assert.equal(saves,1);assert.equal(reads,1);
-    const observed={...team,id:"observed",name:"Maybe saved",main:{...team.main,maxOutputTokens:999}};
-    await act(()=>root.render(React.createElement(TeamPanel,{...props,teams:[team,observed]})));
+    const observed={...team,id:"observed",name:"Maybe saved",main:{...team.main,thinkingLevel:"high",maxOutputTokens:999},secondary:team.secondary.map(ref=>({...ref,thinkingLevel:"max"}))};
+    const damaged={...observed,id:"damaged",main:{...observed.main,thinkingLevel:"future"}};
+    await act(()=>root.render(React.createElement(TeamPanel,{...props,teams:[team,observed,damaged]})));
     await click("读取阵容列表核对");
     assert.equal(saves,1);assert.equal(switches,0);assert.equal(reads,2);
     assert.match(container.textContent,/999 tokens/);
+    assert.match(container.textContent,/思考 high/);assert.match(container.textContent,/思考 max/);assert.match(container.textContent,/无效（future）/);
     assert.equal(container.querySelector('[aria-label="新阵容名称"]').value,"Maybe saved");
     assert.equal([...container.querySelectorAll("button")].find(b=>b.textContent==="仅保存新阵容").disabled,true);
     await click("取消编辑");assert.match(container.textContent,/保存结果仍未知/);
@@ -1102,7 +1089,7 @@ test("Team authentication stays in the editing flow and cancel retains confirmed
   await modalEnvironment(async({root,container,win,TeamPanel})=>{
     const team={id:"old",name:"Original",main:{provider:"p",modelId:"a"},secondary:[{provider:"p",modelId:"b"}]};
     const auth=[],saves=[];
-    const props={session:{id:"s",team},teams:[team],models:["a","b"].map(modelId=>({provider:"p",modelId,name:modelId,thinkingLevels:["off"]})),providers:[{id:"p",name:"Provider P",apiKey:true,configured:false}],
+    const props={session:{id:"s",team},teams:[team],models:["a","b"].map(modelId=>({provider:"p",modelId,name:modelId,thinkingLevels:["low","high","max"]})),providers:[{id:"p",name:"Provider P",apiKey:true,configured:false}],
       commands:{saveProvider:async value=>auth.push(value),saveTeam:async value=>saves.push(value),refresh:async()=>{}},onClose(){}};
     const click=text=>act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent===text).click());
     await act(()=>root.render(React.createElement(TeamPanel,props)));
@@ -1142,7 +1129,7 @@ test("workspace handles /team locally while busy and freezes one HTML submission
     let active={sessionId:"other",taskId:"running"}, unknown=false, found=false, workspace, taskStatus="completed";
     const submits=[],actions=[],taskReads=[];
     const api={subscribe:()=>()=>{},read:async(kind,args={})=>{
-      if(kind==="bootstrap")return {teams:[],models:[],providers:[],sessions:Object.values(records),work:{},active};
+      if(kind==="bootstrap")return {protocol,teams:[],models:[],providers:[],sessions:Object.values(records),work:{},active};
       if(kind==="sessions")return {items:Object.values(records).filter(r=>!args.project || r.project===args.project),nextCursor:null};
       if(kind==="session")return records[args.id];
       if(kind==="task"){taskReads.push(args.id);if(args.id==="reserved")throw Error("ENOENT reserved task record");return {id:args.id,status:taskStatus};}
@@ -1316,7 +1303,7 @@ test("Team creation requires a folder even without a default roster",async()=>{
 test("reply branch action targets its own completed reply and compact composer omits permanent hints",async()=>{
  await modalEnvironment(async({root,container,win,Conversation})=>{
   const forks=[],team={id:"t",name:"T",main:{provider:"p",modelId:"m"},secondary:[{provider:"p",modelId:"r"}]};
-  const state={bootstrap:{protocol:{unified:1},teams:[team],models:[],sessions:[],active:null},session:{id:"a",title:"Title",project:"/repo",projectStatus:{executionReady:false},team,turns:[{taskId:"first",input:"question",finalText:"answer",status:"completed",canFork:true}]},task:null,draft:"draft",ready:true,errors:[]};
+  const state={bootstrap:{protocol,teams:[team],models:[],sessions:[],active:null},session:{id:"a",title:"Title",project:"/repo",projectStatus:{executionReady:false},team,turns:[{taskId:"first",input:"question",finalText:"answer",status:"completed",canFork:true}]},task:null,draft:"draft",ready:true,errors:[]};
   const props={state,commands:{setDraft(){},setError(){},openSession(){},refresh(){},abandonSubmission(){}},onFork:id=>{forks.push(id);},onSettings(){},onToggleNavigation(){},onCopy(){}};
   await act(()=>root.render(React.createElement(Conversation,props)));
   assert.equal(container.querySelector('[aria-label="重命名对话"]'),null);
@@ -1335,7 +1322,7 @@ test("file proposal shows the frozen collaboration requirements beside confirmat
     proposalRef:{sourceTaskId:"proposal"},proposal:{collaboration:[
       {workers:2,parallel:true,distinctModels:true,stepIds:["compare-a","compare-b"],source:{kind:"plan"}},
     ]}};
-  const state={bootstrap:{protocol:{unified:1},teams:[],models:[],sessions:[],active:null},
+  const state={bootstrap:{protocol,teams:[],models:[],sessions:[],active:null},
     session:{id:"a",title:"Title",turns:[turn]},draft:"",ready:true,errors:[]};
   await act(()=>root.render(React.createElement(Conversation,{state,commands:{}})));
   const requirements=container.querySelector('[aria-label="协作要求"]');
@@ -1349,7 +1336,7 @@ test("reply headers use their own persisted elapsed time without opening task de
  await modalEnvironment(async({root,container,Conversation})=>{
   const base={createdAt:"2026-11-08T00:00:00Z",endedAt:"2026-11-08T00:00:18Z",input:"question",finalText:"answer"};
   const turns=[{...base,taskId:"done",status:"completed"},{...base,taskId:"failed",status:"failed"},{...base,taskId:"cancel",status:"cancelled",cancelSettledAt:"2026-11-08T00:00:25Z"},{...base,taskId:"unknown",status:"stop_unknown"},{...base,taskId:"old",status:"completed",endedAt:null}];
-  const state={bootstrap:{protocol:{unified:1},teams:[],models:[],sessions:[],active:null},session:{id:"a",title:"Title",turns},task:null,tasksById:{},draft:"",ready:true,errors:[]};
+  const state={bootstrap:{protocol,teams:[],models:[],sessions:[],active:null},session:{id:"a",title:"Title",turns},task:null,tasksById:{},draft:"",ready:true,errors:[]};
   const props={state,commands:{setDraft(){},setError(){},openSession(){},refresh(){},abandonSubmission(){}}};
   await act(()=>root.render(React.createElement(Conversation,props)));
   const headers=[...container.querySelectorAll("article > header")].map(node=>node.textContent);
@@ -1368,7 +1355,7 @@ test("workspace editor queue keeps complete snapshots across navigation, lost ac
     const records={a:make("a"),b:make("b")}, saves=[];
     let workspace, releaseFirst, first=true, lose=false;
     const api={subscribe:()=>()=>{},read:async(kind,args={})=>{
-      if(kind==="bootstrap")return {teams:[],models:[],providers:[],sessions:Object.values(records),work:{},active:null};
+      if(kind==="bootstrap")return {protocol,teams:[],models:[],providers:[],sessions:Object.values(records),work:{},active:null};
       if(kind==="sessions")return {items:Object.values(records),nextCursor:null};
       if(kind==="session")return structuredClone(records[args.id]);
     },action:async(name,args)=>{
@@ -1434,7 +1421,7 @@ test("a delayed post-submit task read cannot overwrite the next saved editor on 
     let workspace,releaseTask,taskReadStarted;
     const entered=new Promise(resolve=>{taskReadStarted=resolve;});
     const api={subscribe:()=>()=>{},read:async(kind,args={})=>{
-      if(kind==="bootstrap")return {teams:[],models:[],providers:[],sessions:Object.values(records),work:{},active:null};
+      if(kind==="bootstrap")return {protocol,teams:[],models:[],providers:[],sessions:Object.values(records),work:{},active:null};
       if(kind==="sessions")return {items:Object.values(records),nextCursor:null};
       if(kind==="session")return structuredClone(records[args.id]);
       if(kind==="task"){
@@ -1492,7 +1479,7 @@ test("view updates use the acknowledged revision and keep a newer selected sessi
     let workspace, release, lostSeen;
     const blocked=new Promise(resolve=>{release=resolve;});
     const api={subscribe:()=>()=>{},read:async(kind,{id}={})=>{
-      if(kind==="bootstrap")return {teams:[],models:[],providers:[],sessions:Object.values(records),work:{},active:null};
+      if(kind==="bootstrap")return {protocol,teams:[],models:[],providers:[],sessions:Object.values(records),work:{},active:null};
       if(kind==="sessions")return {items:Object.values(records),nextCursor:null};
       if(kind==="session")return structuredClone(records[id]);
       return {id};
@@ -1554,7 +1541,7 @@ test("roster search and row actions keep conversation selection separate from th
     const first={id:"first",name:"原组合",main,secondary:[reviewer]}, next={id:"next",name:"备选组合",main:other,secondary:[reviewer]};
     const scope={id:"group",revision:1,defaultRosterId:first.id};
     const actions=[];
-    const props={session:{id:"chat",team:first},workspace:scope,teams:[first,next],models:[{...main,name:"Primary"},{...reviewer,name:"Reviewer"},{...other,name:"Northstar"},{...unauth,name:"Unconfigured"}],
+    const props={session:{id:"chat",team:first},workspace:scope,teams:[first,next],models:[{...main,name:"Primary"},{...reviewer,name:"Reviewer"},{...other,name:"Northstar"},{...unauth,name:"Unconfigured"}].map(model=>({...model,thinkingLevels:["low","high","max"]})),
       providers:[{id:"p",configured:true},{id:"q",configured:true},{id:"r",configured:false}],
       commands:{selectTeam:async args=>actions.push(["current",args]),updateWorkspace:async (...args)=>actions.push(["default",...args])},onClose(){}};
     await act(()=>root.render(React.createElement(TeamPanel,props)));
@@ -1599,7 +1586,7 @@ test("a Team without conversations can set a valid default and rejects an invali
     const noAuth={id:"unauth",name:"副模型未认证",main,secondary:[reviewer,unconfigured]};
     const group={id:"team",revision:1,defaultRosterId:null};
     const defaults=[];
-    const props={workspace:group,teams:[active,missing,noAuth],models:[main,reviewer,unconfigured],
+    const props={workspace:group,teams:[active,missing,noAuth],models:[main,reviewer,unconfigured].map(model=>({...model,thinkingLevels:["low","high","max"]})),
       providers:[{id:"p",configured:true},{id:"q",configured:false}],
       commands:{updateWorkspace:async(row,change)=>defaults.push([row,change])},onClose(){}};
     const labeled=label=>container.querySelector(`[aria-label="${label}"]`);
@@ -1642,7 +1629,7 @@ test("roster default failure retries only the default and keeps the current conv
       },
       refreshTeams:async()=>({workspaces:[{...saved,revision:2}]})
     };
-    await act(()=>root.render(React.createElement(TeamPanel,{session:{id:"s",team:first},workspace:group,teams:[first,next],models:[first.main,...first.secondary],providers:[{id:"p",configured:true}],commands,onClose(){}})));
+    await act(()=>root.render(React.createElement(TeamPanel,{session:{id:"s",team:first},workspace:group,teams:[first,next],models:[first.main,...first.secondary].map(model=>({...model,thinkingLevels:["low","high","max"]})),providers:[{id:"p",configured:true}],commands,onClose(){}})));
     const click=label=>act(async()=>{
       const button=[...container.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.textContent)===label);
       assert.ok(button,label);
@@ -1667,7 +1654,7 @@ test("lost stop acknowledgement remains pending on the original task until the h
     let active={taskId:"running",sessionId:"a"}, workspace;
     const stops=[];
     const api={subscribe:()=>()=>{},read:async kind=>{
-      if(kind==="bootstrap")return {teams:[],models:[],providers:[],sessions:[],work:{},active};
+      if(kind==="bootstrap")return {protocol,teams:[],models:[],providers:[],sessions:[],work:{},active};
       if(kind==="sessions")return {items:[]};
       return {id:"running",status:"running"};
     },action:async(name,args)=>{
@@ -1704,7 +1691,7 @@ test("a confirmed workspace default stays visible during and after a stale boots
       if(kind==="bootstrap"){
         const before=saved;
         if(block){block=false;await wait;}
-        return {teams:[],models:[],providers:[],sessions:[],workspaces:[before],work:{},active:null};
+        return {protocol,teams:[],models:[],providers:[],sessions:[],workspaces:[before],work:{},active:null};
       }
       return {items:[]};
     },action:async(name,args)=>{
@@ -1761,10 +1748,12 @@ test('versioned per-session turn options survive reopen and unknown submit witho
    await act(async()=>workspace.commands.openSession(b.id));assert.equal(workspace.state.turnOptions,null,'A opt-in never becomes B consent');
    await act(()=>workspace.commands.setTurnOptions(b.id,{maxCalls:'1'}));await act(async()=>workspace.commands.flushAllDrafts());
    await act(()=>root.render(null));await controller.close();controller=await createGuiController({home:f.home,cwd:f.cwd});
-   await act(async()=>root.render(React.createElement(Harness)));await act(async()=>workspace.commands.openSession(a.id));
+   await act(async()=>root.render(React.createElement(Harness)));
+   for(let n=0;n<50&&!workspace.state.ready;n++)await act(async()=>new Promise(r=>setTimeout(r,10)));
+   await act(async()=>workspace.commands.openSession(a.id));
    assert.equal(workspace.state.turnOptions.maxCalls,'3');assert.equal(workspace.state.turnOptions.readOnly,true);assert.equal(workspace.state.turnOptions.readAllowed,true);
    await assert.rejects(controller.action('task.submit',{sessionId:b.id,input:savedA.draft,submissionId:'foreign-editor',protocolVersion:1,editorEditId:savedA.editor.editId,budget:{maxCalls:3},constraints:{readOnly:true,allowedSubtasks:[]},readAuthorization:{paths:['a.txt']}}),/草稿|选项/);assert.equal(f.calls.length,0);
-   loseSubmit=true;await act(async()=>workspace.commands.submit({sessionId:a.id}));assert.ok(workspace.state.pending);assert.equal(workspace.state.turnOptions.maxCalls,'3');
+   loseSubmit=true;await act(async()=>workspace.commands.submit({sessionId:a.id}));assert.ok(workspace.state.pending,JSON.stringify(workspace.state.errors));assert.equal(workspace.state.turnOptions.maxCalls,'3');
    await act(()=>workspace.commands.setTurnOptions(a.id,{maxCalls:'9'}));assert.equal(workspace.state.turnOptions.maxCalls,'3','unknown submission retains its original options');
    await act(async()=>workspace.commands.openSession(b.id));assert.equal(workspace.state.turnOptions.maxCalls,'1');assert.equal(workspace.state.turnOptions.readAllowed,false);
    await act(async()=>workspace.commands.openSession(a.id));await act(async()=>workspace.commands.recoverSubmission());assert.equal(workspace.state.turnOptions,null,'acknowledgement consumes only the submitted choice');
@@ -1854,7 +1843,7 @@ test("local skill settings submit the selected list and preserve its draft after
 test("composer keeps add actions separate and refuses incomplete materials", async () => {
   await modalEnvironment(async ({win, root, container}) => {
     const imports=[], removes=[], sends=[];
-    const props={boot:{protocol:{unified:1}},homeReady:true,draft:"",onDraft(){},onSubmit:()=>sends.push(true),
+    const props={boot:{protocol},homeReady:true,draft:"",onDraft(){},onSubmit:()=>sends.push(true),
       onImportMaterials:files=>imports.push(...files),onRemoveMaterial:item=>removes.push(item),
       onTurnOptions(){}};
     const material={key:"upload",name:"plot.png",mediaType:"image/png",byteLength:10,status:"failed",error:"图片未保存"};

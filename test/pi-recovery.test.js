@@ -130,7 +130,7 @@ test("preload refreshes per turn and follows new/resume/fork/reload without prom
   update("V2"); const second = await turn("second"); assert.equal(second.record.status, "completed", second.record.error);
   assert.equal(f.calls.length, 6);
   for (const c of f.calls.slice(3, 4)) {
-    const system = c.body.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+    const system = c.body.messages.filter((m) => ["system", "developer"].includes(m.role)).map((m) => m.content).join("\n");
     assert.equal(system.match(/SKILL_BODY_V2/g)?.length, 1);
     assert.doesNotMatch(system, /SKILL_BODY_V1/);
   }

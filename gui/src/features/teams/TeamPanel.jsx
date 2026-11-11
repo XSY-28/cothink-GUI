@@ -1,15 +1,16 @@
 import React, {forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState} from "react";
 import {switchModelRoles} from "../../../../src/model-roster.js";
-import {modelName} from "../../view.js";
+import {modelName,thinkingPreferenceView} from "../../view.js";
 import styles from "./TeamPanel.module.css";
 import { ModelEditor, catalogModel, identity, matchesSearch, outputLimitRequired } from "./ModelEditor.jsx";
 
 const emptyRef = () => ({provider:"",modelId:""});
-// Model refs have four allowed fields. Compare their values, not object key order.
-const rosterParameters = team => JSON.stringify([team.main,...team.secondary].map(r=>[r.provider,r.modelId,r.thinkingLevel ?? null,r.maxOutputTokens ?? null]));
+// Compare normalized parameter values, not object key order.
+const rosterParameters = team => JSON.stringify([team.main,...team.secondary].map(r=>[r.provider,r.modelId,thinkingPreferenceView(r.thinkingLevel).level??r.thinkingLevel,r.maxOutputTokens ?? null]));
 const rosterText = team => `主：${modelName(team.main)}；副：${team.secondary.map(modelName).join("、")}`;
 function parameterText(ref) {
-  return `${modelName(ref)} · 思考 ${ref.thinkingLevel ?? "默认"} · ${ref.maxOutputTokens == null ? "未设输出额度" : ref.maxOutputTokens+" tokens"}`;
+  const preference=thinkingPreferenceView(ref.thinkingLevel);
+  return `${modelName(ref)} · 思考 ${preference.level??`无效（${String(ref.thinkingLevel)}）`} · ${ref.maxOutputTokens == null ? "未设输出额度" : ref.maxOutputTokens+" tokens"}`;
 }
 function routeIssue(ref, models, providers) {
   const model = catalogModel(models, ref);
@@ -17,7 +18,9 @@ function routeIssue(ref, models, providers) {
   if (model.transport === "unsupported") return `${modelName(ref)}：当前协议不可用于统一会话`;
   if (!(model.auth ? model.auth === "configured" : providers.find(provider => provider.id === ref.provider)?.configured))
     return `${ref.provider} 缺少认证（${modelName(ref)}）`;
-  const thinking = ref.thinkingLevel ?? model.thinkingLevel;
+  const preference=thinkingPreferenceView(ref.thinkingLevel);
+  if(preference.error)return `${modelName(ref)}：${preference.error}`;
+  const thinking=preference.level;
   if (thinking != null && !model.thinkingLevels?.includes(thinking))
     return `${modelName(ref)} 不支持思考档位 ${thinking}`;
   if (outputLimitRequired(model) && ref.maxOutputTokens == null)
@@ -59,8 +62,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
   const disabled=busy || pending;
   const canSetDefault=!!workspace?.id && !workspace.archived;
   const defaultRoster=teams.find(team=>team.id===workspace?.defaultRosterId);
-  const currentModel=catalogModel(models,current?.main);
-  const actualThinking=session?.thinking ?? current?.main.thinkingLevel ?? (currentModel?.reasoning ? "high" : currentModel ? "off" : "未知");
+  const actualThinking=thinkingPreferenceView(session?.thinking).level??"无效";
   function requestLeave(action) {
     if(operation.current){setNotice("正在确认操作结果，请稍候。");return;}
     if(dirty || unknown || hasKeys){focusRequest.current="[data-team-continue]";setLeave(()=>action);return;}
@@ -170,17 +172,8 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
     {!writable && <p className="field-note">当前没有可编辑的对话，无法切换当前阵容或删除保存的阵容。</p>}
     {current && <details className={styles.thinking}>
       <summary>对话参数 · 思考 {actualThinking}</summary>
-      <p>本对话主模型实际思考：<strong>{actualThinking}</strong>{session.thinking != null ? `（对话设置，覆盖阵容中的 ${current.main.thinkingLevel ?? "默认值"}）` : "（跟随阵容）"}</p>
-      {session.thinking != null && !currentModel?.thinkingLevels?.includes(session.thinking) && <p role="alert" className="error-text">此对话的思考设置不被当前模型支持；发送前请选择兼容档位或跟随阵容。</p>}
-      <label>此对话的思考设置<select aria-label="此对话的思考设置" disabled={!writable || disabled}
-        value={session.thinking ?? ""} onChange={e=>{if(!writable || disabled)return;const level=e.target.value;run(async()=>{
-          await commands.changeSession("session.thinking",level ? {level} : {},sessionId);
-          setNotice("对话思考设置已保存；仅影响之后的提交，取消阵容编辑不会撤销它。");
-        });}}>
-        <option value="">跟随阵容</option>
-        {session.thinking != null && !currentModel?.thinkingLevels?.includes(session.thinking) && <option value={session.thinking}>{session.thinking}（不支持）</option>}
-        {currentModel?.thinkingLevels?.map(level=><option key={level}>{level}</option>)}
-      </select></label>
+      <p>本对话所有模型统一采用思考档位：<strong>{actualThinking}</strong>。</p>
+      <p>在输入框发送按钮左侧调整思考强度；新选档应用于后续新任务的全部模型。这里编辑各模型的阵容默认参数。</p>
     </details>}
     {error && <p className="error-text" role="alert">{error}</p>}
     {notice && <p className={styles.notice} role="status">{notice}</p>}
@@ -201,7 +194,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
           <ModelEditor label="主模型" value={draft.main} models={models} providers={providers}
             onIdentity={next=>setDraft(d=>d.main.modelId ? switchModelRoles(d,next) : {...d,main:next})}
             onParameters={main=>setDraft({...draft,main})}/>
-          {session?.thinking != null && <p className="field-note">当前对话的 {session.thinking} 会优先于这里的主模型思考参数；另存只保存阵容参数，可在上方明确选择“跟随阵容”。</p>}
+          <p className="field-note">本对话统一采用 {actualThinking}，提交时覆盖所有模型的思考参数；另存保留各模型的三档配置。</p>
           {draft.secondary.map((value,index)=><div key={index}>
             <ModelEditor label={`副模型 ${index+1}`} value={value} models={models} providers={providers}
               used={new Set([draft.main,...draft.secondary.filter((_,i)=>i!==index)].map(identity))}

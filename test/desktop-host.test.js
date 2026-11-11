@@ -10,13 +10,14 @@ import {createRequire} from 'node:module';
 import {randomUUID} from 'node:crypto';
 import {createGuiController} from '../src/gui-controller.js';
 import {startGuiServer} from '../src/gui-server.js';
+import {GUI_INPUT_VERSION} from '../src/gui-turn-options.js';
 import {fixtureConversation,prepareSubmit} from './helpers/gui-controller-fixture.js';
 
 function home(t) { const p=mkdtempSync(join(tmpdir(),'cothink-desktop-test-'));t.after(()=>rmSync(p,{recursive:true,force:true}));return p; }
 test('desktop shutdown freezes writes but keeps authenticated history and draft persistence until final close', async t=>{
  const controller=await createGuiController({home:home(t),suggestedProject:null,installation:'desktop'});
  const h=await startGuiServer({controller,open:false});t.after(()=>h.close());
- const headers={Authorization:`Bearer ${h.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"3"};
+ const headers={Authorization:`Bearer ${h.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":GUI_INPUT_VERSION};
  const origin=new URL(h.url).origin;
  const read=()=>fetch(origin+'/api/bootstrap',{headers});
  const action=(action,args={})=>fetch(origin+'/api/action',{method:'POST',headers,body:JSON.stringify({action,args})});
@@ -109,7 +110,7 @@ test('IPC parent loss cancels an in-flight real HTTP fixture request and persist
  const defaultRosterId=randomUUID();
  saveConfig(model.home,createTeamConfig({formatVersion:2,...model.models},'Fixture',defaultRosterId));
  const f=await childHost(t,{COTHINK_HOME:model.home});const ready=await f.next('ready');
- const action=async(action,args)=>{const r=await fetch(ready.origin+'/api/action',{method:'POST',headers:{Authorization:`Bearer ${ready.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":"3"},body:JSON.stringify({action,args})});assert.equal(r.status,200,await r.clone().text());return r.json();};
+ const action=async(action,args)=>{const r=await fetch(ready.origin+'/api/action',{method:'POST',headers:{Authorization:`Bearer ${ready.token}`,'Content-Type':'application/json', "X-CoThink-GUI-Input":GUI_INPUT_VERSION},body:JSON.stringify({action,args})});assert.equal(r.status,200,await r.clone().text());return r.json();};
  const session=await fixtureConversation(t,{action},{defaultRosterId});
  const input='local fixture only';
  const savedDraft=await action('session.draft',{sessionId:session.id,text:input,expectedDraftRevision:session.draftRevision,branchAnchor:session.branchAnchor,workRequest:null,selectionId:null,editId:randomUUID()});

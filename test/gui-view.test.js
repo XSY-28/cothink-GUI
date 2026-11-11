@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Window } from "happy-dom";
+import {GUI_INPUT_VERSION} from "../src/gui-turn-options.js";
 const view = await import("../gui/src/view.js").catch(() => ({}));
 const api = await import("../gui/src/api.js").catch(() => ({}));
 const markdown = await import("../gui/src/Markdown.js").catch(() => ({}));
@@ -144,8 +145,8 @@ test("both JSON actions and binary material writes advertise the current input c
   await client.action("session.draft", {sessionId:"room",text:"Keep me"});
   await client.uploadMaterial("room","upload",new Uint8Array([1]));
   assert.deepEqual(writes, [
-    ["/api/action","POST","3"],
-    ["/api/materials?ownerId=room&uploadId=upload","POST","3"],
+    ["/api/action","POST",GUI_INPUT_VERSION],
+    ["/api/materials?ownerId=room&uploadId=upload","POST",GUI_INPUT_VERSION],
   ]);
 });
 test("startup token is removed from address and kept only in the current tab", () => {

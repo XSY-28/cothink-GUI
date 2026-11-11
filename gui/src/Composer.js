@@ -2,9 +2,10 @@ import {defaultTurnOptions,editorReadPaths,retiredReviewOption} from "../../src/
 import {materialExtensions} from "../../src/gui-material-types.js";
 import React, {useEffect,useLayoutEffect,useRef,useState} from "react";
 import {Icon} from "./Icon.js";
-import {shouldSubmit} from "./view.js";
+import {shouldSubmit,THINKING_LEVELS} from "./view.js";
+import {GUI_INPUT_VERSION} from "../../src/gui-turn-options.js";
 const h=React.createElement;
-export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,onOpenTurnLimits,homeReady=false,creating=false,homeCreationPending=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onChooseSkill,selectedSkill,onRemoveSkill}) {
+export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pending,onSettings,onPlugins,workRequest,onWorkRequest,draftConflict,onResolveDraft,turnOptions,onTurnOptions,onOpenTurnLimits,homeReady=false,creating=false,homeCreationPending=false,editorKey,materials=[],materialCapabilities,materialError,onImportMaterials,onRemoveMaterial,onRetryMaterial,onPreviewMaterial,onChooseProjectFiles,onChooseSkill,selectedSkill,onRemoveSkill,thinking,onThinkingChange,onThinkingRecover,connection}) {
   const composing=useRef(false), input=useRef(null), fileInput=useRef(null), addTrigger=useRef(null), menuPanel=useRef(null), importing=useRef(new Map());
   const [addingFor,setAddingFor]=useState(), [importError,setImportError]=useState(null), [,showImportState]=useState(0), team=session?.team;
   const scope=editorKey??session?.id??null, importScope=session?.id??null;
@@ -44,10 +45,13 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
   const localCommand=/^\/(?:team|models|settings|help)$/.test(draft.trim());
   const localTeam=/^\/(?:team|models)$/.test(draft.trim());
   const incomplete=!!importing.current.get(importScope)||materials.some(item=>item.status!=="ready");
-  const blocks=boot.protocol?.unified!==1 || disabled || draftConflict || (!draft.trim()&&!materials.length) ||
+  const oldProtocol=boot.protocol?.guiInput!==Number(GUI_INPUT_VERSION);
+  const blocks=boot.protocol?.unified!==1 || oldProtocol || disabled || draftConflict || thinking?.save || (!draft.trim()&&!materials.length) ||
     (creating || homeCreationPending || !localCommand && (busy || submitting || pending || incomplete || needsReviewUpdate || !team && !homeReady));
   const send=async()=>{if(!blocks&&(localCommand||!importing.current.get(importScope)))await onSubmit();};
   const optionDisabled=disabled||submitting||pending||creating||session?.contextOrganizing;
+  const thinkingDisabled=optionDisabled||!team||!!thinking?.save||boot.protocol?.guiInput!==Number(GUI_INPUT_VERSION)||
+    connection==="reconnecting"||connection==="connecting"||!!boot.shutdown?.requested;
   const importFiles=async files=>{
     if(optionDisabled||!onImportMaterials||!files.length)return;
     importing.current.set(importScope,(importing.current.get(importScope)??0)+1);
@@ -94,6 +98,11 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     if(onImportMaterials&&files.length){e.preventDefault();importFiles(files);}
   }},
   boot.protocol?.unified!==1 && h("p",{className:"error-text",role:"alert"},"前后端协议不匹配，请重新打开新版界面；草稿保留。"),
+  oldProtocol && h("p",{className:"error-text",role:"alert"},"请重新打开新版界面后调整思考强度或发送；草稿保留。"),
+  thinking?.save && h("p",{className:"composer-notice",role:"status"},thinking.save.status==="saving"?"正在保存思考强度；草稿保留，确认前暂不发送。":"思考设置保存结果未知；核对原对话前暂不发送。",
+    thinking.save.status==="unknown"&&h(React.Fragment,null,
+      h("button",{type:"button",onClick:()=>onThinkingRecover?.({})},"查询思考设置"),
+      h("button",{type:"button",onClick:()=>onThinkingRecover?.({adoptCurrent:true})},"采用当前保存设置"))),
   session?.selectionError && h("p",{className:"error-text",role:"alert"},session.selectionError," 当前记录保留；可重新读取，或切到健康对话继续。请先处理占用或诊断，不要重新发送结果未知的请求。"),
   session?.workspaceError && h("p",{className:"error-text",role:"alert"},session.workspaceError),
   session?.viewError && h("p",{className:"composer-notice",role:"status"},session.viewError),
@@ -150,8 +159,39 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
     addActions.length>0 && h("button",{type:"button",ref:addTrigger,disabled:optionDisabled,"aria-label":"添加本次操作","aria-expanded":adding,onClick:()=>setAddingFor(adding?undefined:scope)},h(Icon,{name:"plus"})),
     adding && h("div",{className:"composer-add-menu composer-add-actions",ref:menuPanel},
       ...addActions.map(([label,action])=>h("button",{key:label,type:"button",disabled:optionDisabled,onClick:()=>doAction(action)},label))),
-    h("button",{type:"submit",className:"primary send",disabled:blocks,"aria-label":localTeam ? "打开阵容" : localCommand ? "打开本地命令" : submitting ? "确认提交" : pending ? "待确认" : busy ? "草稿保留" : "发送",title:localTeam ? "打开阵容" : "发送"},h(Icon,{name:submitting ? "more" : "send"}))
+    h("div",{className:"composer-submit-controls"},
+      h(ThinkingControl,{scope,thinking,disabled:thinkingDisabled,onChange:onThinkingChange}),
+      h("button",{type:"submit",className:"primary send",disabled:!!blocks,"aria-label":localTeam ? "打开阵容" : localCommand ? "打开本地命令" : submitting ? "确认提交" : pending ? "待确认" : busy ? "草稿保留" : "发送",title:localTeam ? "打开阵容" : "发送"},h(Icon,{name:submitting ? "more" : "send"})))
   ),
 
   );
+}
+
+function ThinkingControl({scope,thinking,disabled,onChange}) {
+  const [openFor,setOpenFor]=useState(null),trigger=useRef(null),menu=useRef(null);
+  const open=openFor===scope&&scope!=null&&!disabled;
+  const close=()=>{setOpenFor(null);trigger.current?.focus();};
+  useEffect(()=>{setOpenFor(null);},[scope,disabled]);
+  useLayoutEffect(()=>{if(open)menu.current?.querySelector('[role="menuitemradio"]')?.focus();},[open]);
+  useEffect(()=>{
+    if(!open)return;
+    const outside=event=>{if(!menu.current?.contains(event.target)&&!trigger.current?.contains(event.target))setOpenFor(null);};
+    document.addEventListener("pointerdown",outside,true);document.addEventListener("focusin",outside,true);
+    return()=>{document.removeEventListener("pointerdown",outside,true);document.removeEventListener("focusin",outside,true);};
+  },[open]);
+  const label=`思考 ${thinking?.level??"high"}`;
+  const choose=level=>{close();onChange?.(level);};
+  return h("div",{className:"composer-thinking",onKeyDown:event=>{
+    if(event.key==="Escape"&&open){event.preventDefault();event.stopPropagation();close();return;}
+    if(!open)return;
+    const items=Array.from(menu.current?.querySelectorAll('[role="menuitemradio"]')??[]),index=items.indexOf(document.activeElement);
+    const target=event.key==="ArrowDown"?(index+1)%items.length:event.key==="ArrowUp"?(index+items.length-1)%items.length:event.key==="Home"?0:event.key==="End"?items.length-1:null;
+    if(target!==null){event.preventDefault();items[target]?.focus();}
+  }},
+    h("button",{type:"button",ref:trigger,className:"composer-thinking-trigger",disabled,"aria-label":"思考强度","aria-haspopup":"menu","aria-expanded":open,
+      title:disabled?"先选择对话阵容，并等待设置、连接与提交确认。":"调整本对话后续任务的思考强度",
+      onClick:()=>setOpenFor(open?null:scope),onKeyDown:event=>{if(!open&&["ArrowDown","ArrowUp"].includes(event.key)){event.preventDefault();setOpenFor(scope);}}},label,h("span",{"aria-hidden":true}," ▾")),
+    open&&h("div",{className:"composer-thinking-menu",ref:menu,role:"menu","aria-label":"思考强度选项"},
+      ...THINKING_LEVELS.map(level=>h("button",{key:level,type:"button",role:"menuitemradio","aria-checked":thinking?.scope==="all"&&thinking.level===level,onClick:()=>choose(level)},level)),
+      thinking?.reason&&h("p",{role:"status"},thinking.reason)));
 }

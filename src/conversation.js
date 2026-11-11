@@ -1,4 +1,5 @@
 import {validateEditorTurnOptions} from "./gui-turn-options.js";
+import {applyThinkingSelection, validateThinkingScope, validateThinkingModels, normalizeThinkingPreference, parseThinkingLevel, DEFAULT_THINKING_LEVEL} from "./thinking.js";
 import { dirname, join, resolve, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -243,14 +244,42 @@ export function readConversationMetadata(manager) {
   const draftEntry = entries.findLast(e => e.type === "custom" && e.customType === "cothink-draft");
   const data = draftEntry?.data;
   const editor = normalizeConversationEditor(data);
+  const thinking = last("cothink-thinking");
   return {
     title: last("cothink-title")?.title ?? entries.findLast((e) => e.type === "session_info")?.name ?? "",
     draft: editor.text,
     editor,
     draftRevision: draftEntry?.id ?? null,
     branchAnchor: manager.getLeafId(),
-    thinking: last("cothink-thinking")?.level,
+    thinking: thinking?.level,
+    thinkingScope: thinking ? validateThinkingScope(thinking.scope) : undefined,
   };
+}
+
+/** GUI admission validates the models this operation can actually call. */
+export async function resolveConversationThinking(home, config, manager, {mainOnly = false} = {}) {
+  const level = normalizeThinkingPreference(readConversationMetadata(manager).thinking);
+  const effective = applyThinkingSelection(config, {level, scope:"all"});
+  await validateThinkingModels(home, effective, level, mainOnly ? "main" : "all");
+  return effective;
+}
+
+/** Legacy CLI restores its displayed Team snapshot from the selected branch. */
+export function restoreConversationThinking(config, manager) {
+  const {thinking:level, thinkingScope:scope} = readConversationMetadata(manager);
+  const effective = applyThinkingSelection(config, {level, scope});
+  if (level !== undefined && effective.team)
+    effective.team = snapshotTeam({...effective.team, main:effective.main, secondary:effective.secondary});
+  return effective;
+}
+
+export async function saveConversationThinking(home, owner, {level, scope}) {
+  const team = readSessionTeam(owner.sessionManager.getBranch());
+  if (!team) throw Error("请先绑定 Team。");
+  if (scope !== undefined && scope !== "all") throw Error("新思考设置的作用范围必须为 all。");
+  level = level === undefined ? DEFAULT_THINKING_LEVEL : parseThinkingLevel(level);
+  await validateThinkingModels(home, team, level, "all");
+  appendConversationEntry(owner, "cothink-thinking", {level, scope:"all"});
 }
 
 export function sessionWriteIncomplete(owner) {

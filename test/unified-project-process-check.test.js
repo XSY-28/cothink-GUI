@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
+import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+import {join} from 'node:path';
 import {fixture} from './helpers/pi-fixture.js';
 import { repository } from './helpers/git-fixture.js';
 import { runProjectTurn } from '../src/project-turn.js';
 import { confirmProject, projectSession } from "./unified-project.fixture.js";
 
-async function processGroup(t, { projectBudget, rootBudget, attachPrivateMaterial, worker, inspect, onReports } = {}) {
+async function processGroup(t, { projectBudget, rootBudget, attachPrivateMaterial, worker, inspect, onReports, thinking, rosterSize } = {}) {
   const repo = repository(t);
   const plan = {
     goal: 'Change a.txt with an employee check of b.txt',
@@ -50,6 +52,14 @@ async function processGroup(t, { projectBudget, rootBudget, attachPrivateMateria
     const reply = responses[leaderTurn++];
     return reply ? {toolCalls:[reply]} : {text:'Changed a.txt after the b.txt investigation.'};
   });
+  if (thinking) {
+    const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+    for(const model of catalog.providers.fixture.models)model.reasoning=true;
+    writeFileSync(path,JSON.stringify(catalog));
+    for(const ref of [f.models.main,...f.models.secondary])ref.thinkingLevel=thinking;
+  }
+  if(rosterSize===2) f.models.secondary=[f.models.secondary[1]];
+  if(rosterSize===3) f.models.secondary=f.models.secondary.slice(0,2);
   const base = await projectSession(t,repo,f);
   const materials = [];
   if (attachPrivateMaterial) {
@@ -66,8 +76,9 @@ async function processGroup(t, { projectBudget, rootBudget, attachPrivateMateria
   return {f,base,source,observations};
 }
 
-test('a short formal GUI group receives a tool-free process check of actual employee requests', async t => {
-  const {f,base,source,observations} = await processGroup(t,{attachPrivateMaterial:true});
+for(const rosterSize of [2,3])for(const thinking of ['low','high','max'])
+test(`formal ${rosterSize}-model group sends ${thinking} for manager, employee and checker`, async t => {
+  const {f,base,source,observations} = await processGroup(t,{attachPrivateMaterial:true,thinking,rosterSize});
   assert.match(JSON.stringify(f.calls[0].body),/PRIVATE_ROOT_ATTACHMENT_MARKER/);
   const root = await confirmProject(base,source);
   assert.ok(observations.length >= 1,JSON.stringify({error:root.record.error,process:root.record.processCheck,toolResults:f.calls.flatMap(call=>call.body.messages.filter(message=>message.role==='tool').slice(-1).map(message=>message.content))}));
@@ -82,6 +93,22 @@ test('a short formal GUI group receives a tool-free process check of actual empl
   assert.equal(request.phase,'process-check');
   assert.equal(request.projectSend.cause,'observe:'+covered.id);
   assert.equal(request.sent,true);
+  assert.ok(f.calls.every(call=>call.body.reasoning_effort===thinking));
+  const {readRequests}=await import('../src/task.js');
+  for(const record of [source.record,root.record,child])
+    for(const sent of readRequests(f.home,record).filter(request=>request.sent)){
+      assert.equal(sent.requestedModel.thinkingLevel,thinking);
+      assert.equal(sent.payload.reasoning_effort,thinking);
+    }
+  assert.equal([source.record.team?.main??base.frozenConfig.main,...base.frozenConfig.secondary].length,rosterSize);
+  assert.ok(f.calls.some(call=>call.body.model==='r2'),'actual employee request');
+  assert.ok(f.calls.some(call=>call.body.messages.at(-1)?.role==='tool'),'actual leader tool continuation request');
+  const evidenceDir='work/unified-thinking-three-levels';mkdirSync(evidenceDir,{recursive:true});
+  writeFileSync(join(evidenceDir,`formal-${rosterSize}-${thinking}-roles.json`),JSON.stringify({rosterSize,thinking,
+    requests:[source.record,root.record,child].flatMap(record=>readRequests(f.home,record).filter(row=>row.sent).map(row=>({
+      phase:row.phase,role:row.role,model:row.requestedModel?.modelId,level:row.requestedModel?.thinkingLevel,effort:row.payload?.reasoning_effort}))),
+    wire:f.calls.map((call,index)=>({index:index+1,model:call.body.model,effort:call.body.reasoning_effort})),
+  },null,2));
   assert.equal(new Set(checks.map(check=>check.sessionId)).size,1);
   for (const {snapshot,tools} of observations) {
     assert.deepEqual(tools,[]);

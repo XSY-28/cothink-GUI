@@ -1,3 +1,4 @@
+import {GUI_INPUT_VERSION} from "../src/gui-turn-options.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import React, { act } from "react";
@@ -234,7 +235,7 @@ test("stale homepage reservation and transfer expose draft recovery and keep the
       editor:host.editor,materials:material,draftRevision:"transferred",branchAnchor:"transferred"});
     const conflict=()=>Object.assign(Error("首页保存稿已变化"),{code:"DRAFT_CONFLICT"});
     const api={subscribe:()=>()=>{},read:async(kind,args)=>{
-      if(kind==="bootstrap")return {protocol:{unified:1,guiInput:3},homeDraft:structuredClone(host),
+      if(kind==="bootstrap")return {protocol:{unified:1,guiInput:Number(GUI_INPUT_VERSION)},homeDraft:structuredClone(host),
         teams:[],models:[],providers:[],sessions:[],workspaces:[],work:{},active:null};
       if(kind==="sessions")return {items:[]};
       if(kind==="session-creation"){
@@ -279,6 +280,7 @@ test("stale homepage reservation and transfer expose draft recovery and keep the
       const expected=phase==="reserve"?"Other window's saved text":editor.text;
       assert.equal(container.querySelector("textarea").value,expected);
       await act(async()=>button("查询原会话").click());
+      assert.ok(gui.state.session,JSON.stringify({phase,errors:gui.state.errors,requests}));
       assert.equal(gui.state.session.id,sessionId);
       assert.equal(container.querySelector("textarea").value,expected);
       assert.ok(requests.filter(row=>row.name==="query").every(row=>row.id===sessionId));
@@ -287,5 +289,17 @@ test("stale homepage reservation and transfer expose draft recovery and keep the
       await act(()=>root.unmount());
       if(previous)Object.defineProperty(globalThis,"sessionStorage",previous);else delete globalThis.sessionStorage;
     }
+  });
+});
+
+test("turn limit details report unknown output policy when the model catalog is unavailable",async()=>{
+  await modalEnvironment(async({root,container,TurnLimits})=>{
+    const team={main:{provider:"p",modelId:"main"},secondary:[]};
+    await act(()=>root.render(React.createElement(TurnLimits,{available:true,team,models:[],onClose(){}})));
+    assert.equal(container.querySelectorAll('input[type="checkbox"]').length,2,"only read-only and delegation are regular turn controls");
+    assert.doesNotMatch(container.textContent,/必须由不同型号独立评审/);
+    await act(()=>container.querySelector("summary").click());
+    assert.match(container.querySelector("details").textContent,/模型目录不可用，输出额度要求未知/);
+    assert.doesNotMatch(container.querySelector("details").textContent,/未设本地输出上限/);
   });
 });

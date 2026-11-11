@@ -11,9 +11,21 @@ import { readTask } from "../src/task.js";
 import { createRuntime } from "../src/pi-runtime.js";
 import { saveConfig } from "../src/config.js";
 import { createTeamConfig, addTeam, selectTeam, resolveTeamConfig, readSessionTeam } from "../src/teams.js";
+import {readConversationMetadata} from "../src/conversation.js";
 
 const a = "7c8094cd-3476-4bfa-8f53-055d87972896";
 const b = "7d51ceaf-2b56-4c1d-a34f-dd51da8b36c5";
+test("unknown persisted thinking scope refuses interpretation and preserves original history bytes", async t => {
+  const f=await fixture(t),manager=SessionManager.create(f.cwd,join(f.home,"pi/sessions/main"));
+  manager.appendMessage({role:"user",content:"saved original history",timestamp:Date.now()});
+  manager.appendCustomEntry("cothink-thinking",{level:"low"});
+  assert.equal(readConversationMetadata(manager).thinkingScope,"main");
+  manager.appendCustomEntry("cothink-thinking",{level:"low",scope:"future"});
+  const before=readFileSync(manager.getSessionFile());
+  assert.throws(()=>readConversationMetadata(manager),/作用范围/);
+  assert.deepEqual(readFileSync(manager.getSessionFile()),before);
+  assert.equal(f.calls.length,0);
+});
 test("tasks freeze the full team, keep only one reviewer and do not expose names to models", async (t) => {
   const f=await fixture(t);
   const c=createTeamConfig({formatVersion:2,...f.models},"PRIVATE_TEAM_LABEL",a);

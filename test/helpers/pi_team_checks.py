@@ -2,7 +2,7 @@
 import errno, fcntl, hashlib, json, os, pty, select, signal, struct, subprocess, tempfile, termios, threading, time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from team_fixture import team_config, TEAM_ID
+from team_fixture import team_config, TEAM_ID, check_branch_restoration
 from terminal_screen import visible_rows
 ROOT = Path(__file__).resolve().parents[2]
 CLI = Path(os.environ.get('COTHINK_TEST_CLI', str(ROOT / 'bin/cothink.js')))
@@ -229,26 +229,7 @@ with tempfile.TemporaryDirectory(prefix='cothink-team-legacy-session-') as folde
     finally:s.stop()
     checks.append('legacy session remains readable and requires explicit team binding before generation')
 
-# Native clone and fork use the branch origin rather than the latest global selection.
-with tempfile.TemporaryDirectory(prefix='cothink-team-branches-') as folder:
-    home=Path(folder);seed(home);seed_conversation(home);s=Session(home,('-c',))
-    try:
-        s.command('/team','选择 team');s.pick(0,'选择 team（下一条生效）');s.pick(1,'从下一条任务生效')
-        s.command('/clone','Cloned to new session');s.command('/team','Team · B');s.send('\x1b');time.sleep(.1);s.pump()
-        s.command('/fork','Fork from Message');s.pick(0,'Forked to new session')
-        # There is one original user message, so forking before it must recover A.
-        s.command('/team','Team · A');s.send('\x1b');time.sleep(.1);s.pump()
-        s.send('\x15/one branch-origin\r')
-        s.wait(lambda:any(json.loads(p.read_text())['status']=='completed' for p in (home/'tasks').glob('*.json')))
-        task=next(json.loads(p.read_text()) for p in (home/'tasks').glob('*.json'))
-        assert task['team']['id']==TEAM_ID and calls[-1]['model']=='main'
-        before_calls=len(calls)
-        s.command('/team','选择 team');s.pick(0,'选择 team（下一条生效）');s.pick(1,'从下一条任务生效')
-        s.command('/tree','Session Tree');s.send('branch-origin');s.pick(0,'Summarize branch?');s.pick(0,'Navigated to selected point')
-        s.command('/team','Team · A');s.send('\x1b');time.sleep(.1);s.pump()
-        assert len(calls)==before_calls, 'tree navigation without summary generated a request'
-    finally:s.stop()
-    checks.append('native clone keeps current team; fork and tree restore their ancestry without generation')
+check_branch_restoration(Session, seed, seed_conversation, calls, checks, ROOT, CLI)
 
 # Import copies session metadata, never registers a team or imports auth.
 with tempfile.TemporaryDirectory(prefix='cothink-team-import-') as folder:

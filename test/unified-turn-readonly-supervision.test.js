@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import {join} from 'node:path';
 import {fixture} from './helpers/pi-fixture.js';
 import {runProjectTurn} from '../src/project-turn.js';
 import { opts } from "./unified-turn.fixture.js";
+import {applyThinkingSelection} from '../src/thinking.js';
 
 test('process checking can return an actionable report to the manager during collect',async t=>{
  const controller=new AbortController();
@@ -28,15 +29,21 @@ test('process checking can return an actionable report to the manager during col
    controller.abort();
    return null;
  });
- const running=runProjectTurn({...opts(f),input:'Compare evidence.',signal:controller.signal,processCheckClock:{interval:20}});
+ const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+ for(const model of catalog.providers.fixture.models)model.reasoning=true;
+ writeFileSync(path,JSON.stringify(catalog));
+ const options=opts(f);
+ const running=runProjectTurn({...options,frozenConfig:applyThinkingSelection(options.frozenConfig,{level:'low',scope:'all'}),input:'Compare evidence.',signal:controller.signal,processCheckClock:{interval:20}});
  const timer=setTimeout(()=>controller.abort(),5000);timer.unref();
  const task=await running.finally(()=>clearTimeout(timer));
  assert.equal(sawIssue,true);
  assert.ok(task.record.processCheck.reports.some(report=>report.status==='forwarded'));
  assert.notEqual(task.record.status,'completed');
+ assert.ok(task.record.processCheck.observations.some(observation=>observation.kind==='periodic'));
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort==='low'));
 });
 
-test('a delegated supervisor collects and corrects its direct report in the original role session',async t=>{
+for(const thinking of ['low','high','max'])test(`supervisor and direct report retain ${thinking} across corrections`,async t=>{
  let supervisorCalls=0;
  const f=await fixture(t,({body})=>{
    if(JSON.stringify(body.messages).includes('cothink-process-observation'))return {text:'{"issues":[]}'};
@@ -61,7 +68,12 @@ test('a delegated supervisor collects and corrects its direct report in the orig
    if(tools.length===1)return {toolCalls:[{name:'collect',args:{assignmentId:JSON.parse(tools[0].content).assignmentId}}]};
    return {text:JSON.parse(tools.at(-1).content).report};
  });
- const task=await runProjectTurn({...opts(f),input:'Check the measurement.'});
+ const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+ for(const model of catalog.providers.fixture.models)model.reasoning=true;
+ writeFileSync(path,JSON.stringify(catalog));
+ f.models.secondary=f.models.secondary.filter(ref=>ref.modelId!=='r3');
+ const options=opts(f);
+ const task=await runProjectTurn({...options,frozenConfig:applyThinkingSelection(options.frozenConfig,{level:thinking,scope:'all'}),input:'Check the measurement.'});
  assert.ok(f.calls.find(call=>call.body.model==='r1'&&call.body.tools?.some(tool=>tool.function.name==='feedback')),
    'authorized supervisor must advertise direct-report feedback');
  assert.equal(task.record.status,'completed',task.record.error);
@@ -71,9 +83,17 @@ test('a delegated supervisor collects and corrects its direct report in the orig
  assert.equal(stages[0].assignment.leaderId,stages[1].assignment.leaderId);
  assert.equal(stages[1].assignment.feedback,'Include the units');
  assert.equal(task.requests().find(call=>call.id===task.record.finalCallId).text,'Corrected value 2 m');
+ assert.ok(task.record.stages.some(stage=>stage.assignment?.canDelegate));
+ assert.ok(task.requests().some(request=>request.phase==='process-check'));
+ assert.ok(f.calls.length>4);
+ for(const request of task.requests().filter(request=>request.sent)){
+   assert.equal(request.requestedModel.thinkingLevel,thinking);
+   assert.equal(request.payload.reasoning_effort,thinking);
+ }
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort===thinking));
 });
 
-test('strict review rejects an actual contributor’s route before sending and only exposes the fixed report to a different role',async t=>{
+for(const thinking of ['low','high','max'])test(`three-model strict review sends ${thinking} and rejects the contributor route`,async t=>{
  let mainCalls=0;
  const f=await fixture(t,({body})=>{
    if(JSON.stringify(body.messages).includes('cothink-process-observation'))return {text:'{"issues":[]}'};
@@ -94,8 +114,13 @@ test('strict review rejects an actual contributor’s route before sending and o
    if(mainCalls===5)return {toolCalls:[{name:'collect',args:{assignmentId:JSON.parse(tools.at(-1).content).assignmentId}}]};
    return {text:'Review result saved for the manager'};
  });
- const task=await runProjectTurn({...opts(f),input:'Compare the evidence.'});
- const roleCalls=f.calls.filter(call=>call.body.model==='r2');
+ const path=join(f.home,'pi/models.json'),catalog=JSON.parse(readFileSync(path,'utf8'));
+ for(const model of catalog.providers.fixture.models)model.reasoning=true;
+ writeFileSync(path,JSON.stringify(catalog));
+ f.models.secondary=f.models.secondary.filter(ref=>ref.modelId!=='r1');
+ const options=opts(f);
+ const task=await runProjectTurn({...options,frozenConfig:applyThinkingSelection(options.frozenConfig,{level:thinking,scope:'all'}),input:'Compare the evidence.'});
+ const roleCalls=f.calls.filter(call=>call.body.model==='r2'&&!JSON.stringify(call.body.messages).includes('cothink-process-observation'));
  assert.equal(roleCalls.length,1,'same contributor route must not receive a review request');
  const reviewerCall=f.calls.find(call=>call.body.model==='r3');
  assert.ok(reviewerCall,JSON.stringify({error:task.record.error,tools:f.calls.map(c=>c.body.messages.filter(m=>m.role==='tool').at(-1)?.content)}));
@@ -107,6 +132,13 @@ test('strict review rejects an actual contributor’s route before sending and o
  assert.equal(review.assignment.reviewReceipt.certified,false,'opaque loopback provider cannot certify independence');
  assert.equal(task.record.status,'partial');
  assert.match(task.record.error,/Independent review/);
+ assert.ok(f.calls.every(call=>call.body.reasoning_effort===thinking));
+ assert.ok(task.requests().filter(request=>request.sent).every(request=>request.requestedModel.thinkingLevel===thinking&&request.payload.reasoning_effort===thinking));
+ mkdirSync('work/unified-thinking-three-levels',{recursive:true});
+ writeFileSync(join('work/unified-thinking-three-levels',`review-3-${thinking}-roles.json`),JSON.stringify({thinking,
+  requests:task.requests().filter(row=>row.sent).map(row=>({phase:row.phase,role:row.role,model:row.requestedModel?.modelId,level:row.requestedModel?.thinkingLevel,effort:row.payload?.reasoning_effort})),
+  wire:f.calls.map((call,index)=>({index:index+1,model:call.body.model,effort:call.body.reasoning_effort})),
+ },null,2));
 });
 
 test('a supervisor pauses its direct report at the dispatch boundary and preserves the original request',async t=>{

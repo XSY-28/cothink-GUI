@@ -1,3 +1,4 @@
+import {useEditorPersistence} from "./useEditorPersistence.js";
 import {defaultTurnOptions,editorTurnInput,GUI_INPUT_VERSION,retiredReviewOption} from "../../src/gui-turn-options.js";
 import {materialType} from "../../src/gui-material-types.js";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -164,48 +165,10 @@ export function useGuiWorkspace(api) {
     // Keep the local editor and its revision until the user resolves the conflict.
     markDraftConflict(HOME,observed);
   }
-  function saveDraft(snapshot) {
-    if (!snapshot?.sessionId || !snapshot.editId) return Promise.resolve();
-    const operation = draftQueue.current.catch(() => {}).then(async () => {
-      if(organizingSession.current===snapshot.sessionId)return;
-      const latest=book.current.snapshot(snapshot.sessionId);
-      if (conflicts.current.has(snapshot.sessionId)) throw Error("草稿存在保存冲突，请先读取保存稿或明确使用本机稿。");
-      // A deferred caller may enqueue an obsolete cleanup after a newer edit.
-      // Only the current editor can borrow the latest acknowledged host version.
-      // In-flight writes still acknowledge normally; newer snapshots stay queued.
-      if (latest.editId !== snapshot.editId || latest.revision !== snapshot.revision ||
-          latest.savedEditId === snapshot.editId) return;
-      const editor={editorVersion:2,text:snapshot.text,workRequest:snapshot.workRequest,
-        selectionId:snapshot.selectionId,editId:snapshot.editId,materials:snapshot.materials??[],
-        ...(snapshot.turnOptions!==undefined?{turnOptions:snapshot.turnOptions}:{})};
-      const isHome=snapshot.sessionId===HOME;
-      const args=isHome?{draftId:home.current?.draftId??crypto.randomUUID(),expectedRevision:latest.expectedDraftRevision,editor}:
-        {sessionId:snapshot.sessionId,...editor,expectedDraftRevision:latest.expectedDraftRevision,branchAnchor:latest.branchAnchor};
-      const homeAck=saved=>{setHome(saved);return {editor:saved.editor,draftRevision:saved.revision,branchAnchor:null};};
-      try {
-        const row=await api.action(isHome?"home.draft":"session.draft",args);
-        const saved=isHome?homeAck(row):row;
-        book.current.confirmed(snapshot,saved);
-        return saved;
-      } catch(error) {
-        if (error.unknown || error.code === "DRAFT_CONFLICT") {
-          const row=await (isHome?readBootstrap().then(b=>b.homeDraft):api.read("session",{id:snapshot.sessionId})).catch(()=>null);
-          const saved=isHome?{editor:row?.editor,draftRevision:row?.revision??null,branchAnchor:null}:row;
-          if (error.unknown && saved?.editor?.editId === snapshot.editId) {
-            if(isHome)homeAck(row);
-            book.current.confirmed(snapshot,saved); return saved;
-          }
-          markDraftConflict(snapshot.sessionId,saved);
-        }
-        throw error;
-      }
-    });
-    draftQueue.current = operation;
-    operation.catch(e => {
-      if (mounted.current) setError("草稿未保存到宿主：" + e.message + " 当前页面仍保留输入。");
-    });
-    return operation;
-  }
+  const {saveDraft,saveThinking,recoverThinkingSettings,thinkingSaves,thinkingPending}=useEditorPersistence({
+    api,book,draftQueue,organizingSession,conflicts,home,setHome,readBootstrap,markDraftConflict,mounted,setError,
+    onSessionSaved:(value,id)=>{if(selected.current===id)setSession(rememberView(value));},
+  });
   function scheduleDraft(sessionId) {
     if(organizingSession.current===sessionId)return;
     clearTimeout(draftTimers.current.get(sessionId));
@@ -830,6 +793,12 @@ export function useGuiWorkspace(api) {
   }
   async function changeSession(name, args = {}, sessionId = selected.current) {
     if (!sessionId) return;
+    if(name==="session.thinking"){
+      if(bootstrap.protocol?.guiInput!==inputVersion)throw Error("请重新打开新版界面后调整思考强度。");
+      if(selected.current!==sessionId||session?.id!==sessionId||session.readOnly||session.navigation?.archived||
+        session.selectionError||session.contextOrganizing||connection!=="connected"||submissionBusy.current||pendingRef.current||!session.team)return;
+      return saveThinking(args,sessionId);
+    }
     const value = await api.action(name, {...args, sessionId});
     if (selected.current === sessionId) setSession(rememberView(value));
     await refresh();
@@ -1071,7 +1040,8 @@ export function useGuiWorkspace(api) {
     if(retiredReviewOption(snapshot.turnOptions)){setError("请先在草稿中确认采用现行规则。");return;}
     if(materialBatches.current.has(sessionId)||materialRowsFor(sessionId,session).some(row=>row.status!=="ready")){setError("请完成、核对或移除未就绪材料。");return;}
     if (connection === "reconnecting" || bootstrap.shutdown?.requested) {setError("宿主未连接或正在退出；草稿保留，不发送新任务。");return;}
-    if (bootstrap.active || bootstrap.extensionUI?.command || submissionBusy.current || pendingRef.current || !session.team) return;
+    if (thinkingPending(sessionId) || bootstrap.protocol?.guiInput!==inputVersion ||
+        bootstrap.active || bootstrap.extensionUI?.command || submissionBusy.current || pendingRef.current || !session.team) return;
     const choice = {request:snapshot.workRequest??null,id:snapshot.selectionId,turnOptions:snapshot.turnOptions??null};
     submissionBusy.current = true;
     setSubmitting(true);
@@ -1126,7 +1096,7 @@ export function useGuiWorkspace(api) {
   }
   async function organizeContext() {
     const sessionId=selected.current;
-    if(!sessionId||bootstrap.active||pendingRef.current||submissionBusy.current)return;
+    if(!sessionId||thinkingPending(sessionId)||bootstrap.active||pendingRef.current||submissionBusy.current)return;
     submissionBusy.current=true;setSubmitting(true);setError('');
     let sent=false;
     try{
@@ -1250,6 +1220,7 @@ export function useGuiWorkspace(api) {
       creating:creating?.request===selectionRequest.current,creationNotice,
       materials:materialRowsFor(homeEditorId(selectedSessionId)),materialCapabilities:bootstrap.materialCapabilities,
       editorKey:selectedSessionId??homeDraft?.draftId??HOME,selectedSkill:/^\/skill:([^\s]+)/.exec(draft)?.[1]??null,
+      thinkingSave:thinkingSaves[selectedSessionId]??null,
       pendingStatus, submitting, connection, ready, errors: error ? [error] : []},
     commands: {flushAllDrafts, querySessions, loadSessions, searchSessions, selectProject, selectWorkspace, openWorkspaceAttention, setSessionNavigation, closeSession,
       createWorkspace: args => manageWorkspace("workspace.create",{workspaceId:crypto.randomUUID(),...args},true),
@@ -1258,7 +1229,7 @@ export function useGuiWorkspace(api) {
       queryWorkspaceRebind: args => api.action("workspace.rebind.query",args),
       queryWorkspaceCreation: async id => (await readWorkspaces()).find(row=>row.id===id),
       clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, recoverCreation, transferHome, showHome, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, recoverSubmission, abandonSubmission,
-      selectTask, changeSession, recordView, refresh, cancelTask, acknowledgeNotes, setWorkRequest,setTurnOptions, refreshTeams,
+      selectTask, changeSession, recoverThinkingSettings:options=>recoverThinkingSettings({sessionId:selected.current,...options}), recordView, refresh, cancelTask, acknowledgeNotes, setWorkRequest,setTurnOptions, refreshTeams,
       saveTeam: args => manageTeam("team.save", args),
       removeTeam: args => manageTeam("team.remove", args),
       saveProvider: args => manageTeam("provider.save", args),

@@ -1,6 +1,45 @@
 /** Shared product levels; these are API values, not a token/time budget. */
 export const THINKING_LEVELS = Object.freeze(['low', 'high', 'max']);
 export const DEFAULT_THINKING_LEVEL = 'high';
+/** Upgrade current preferences only; native task/history readers retain their original levels. */
+export function normalizeThinkingPreference(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_THINKING_LEVEL;
+  if (['off', 'minimal', 'low'].includes(value)) return 'low';
+  if (['medium', 'high'].includes(value)) return 'high';
+  if (['xhigh', 'max'].includes(value)) return 'max';
+  throw new Error('无法识别思考档位。');
+}
+
+export function validateThinkingScope(scope = 'main') {
+  if (scope !== 'main' && scope !== 'all') throw new Error('无法识别思考档位的作用范围。');
+  return scope;
+}
+
+/** Apply conversation overrides to task role refs, leaving roster defaults intact. */
+export function applyThinkingSelection(config, {level, scope = 'main'}) {
+  validateThinkingScope(scope);
+  const effective = structuredClone(config);
+  if (level === undefined) return effective;
+  const models = scope === 'all' ? [effective.main, ...effective.secondary] : [effective.main];
+  for (const model of models) model.thinkingLevel = level;
+  return effective;
+}
+
+export async function validateThinkingModels(home, team, level, scope = 'main') {
+  validateThinkingScope(scope);
+  // Native callers may omit a selection; current GUI callers always pass an explicit level.
+  if (level === undefined) return level;
+  const {createModelRuntime} = await import('./pi-model-runtime.js');
+  const runtime = await createModelRuntime(home);
+  const refs = scope === 'all' ? [team.main, ...team.secondary] : [team.main];
+  for (const ref of refs) {
+    const model = runtime.getModel(ref.provider, ref.modelId);
+    if (!model) throw Error(`${ref.provider}/${ref.modelId} 不在模型目录中，请先修复阵容。`);
+    await validateModelThinking(model, level);
+  }
+  return level;
+}
+
 export function parseThinkingLevel(value) {
   const level = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!THINKING_LEVELS.includes(level)) throw new Error('思考强度只接受 low、high、max（低／中／高）。');

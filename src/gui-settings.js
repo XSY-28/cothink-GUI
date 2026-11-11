@@ -14,10 +14,13 @@ import {
 } from "./teams.js";
 import { selectModelRef } from "./setup.js";
 import { acquireSessionWriter, privateDirectory, writePrivateJson } from "./storage.js";
-import { validateModelThinking } from "./thinking.js";
+import {normalizeThinkingPreference} from "./thinking.js";
+export {validateThinkingModels as validateGuiThinking} from "./thinking.js";
 export { saveGuiBuiltinSkills, saveGuiLocalSkills } from "./gui-skills.js";
 
 export async function saveGuiTeam(home, { name, main, secondary }) {
+  main = {...main, thinkingLevel:normalizeThinkingPreference(main?.thinkingLevel)};
+  secondary = secondary.map(ref=>({...ref,thinkingLevel:normalizeThinkingPreference(ref.thinkingLevel)}));
   const team = {
     id: randomUUID(),
     name: normalizeTeamName(name),
@@ -134,15 +137,6 @@ export async function saveGuiProvider(home, { providerId, apiKey, custom }) {
     lock.release();
   }
 }
-export async function validateGuiThinking(home, team, level) {
-  const runtime = await createModelRuntime(home);
-  await validateModelThinking(
-    runtime.getModel(team.main.provider, team.main.modelId),
-    level,
-  );
-  return level;
-}
-
 const authPromptMessages = {
   text:"请输入服务商要求的内容。",
   secret:"请输入服务商要求的密钥。",
