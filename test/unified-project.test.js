@@ -10,6 +10,34 @@ import {runProjectCommand} from '../src/project.js';
 import {guiFiles,guiFile} from '../src/gui-files.js';
 import { confirmProject, deliveryContext, projectSession } from "./unified-project.fixture.js";
 
+test('a shell rejected before kernel dispatch does not make checked delivery unknown',async t=>{
+ const repo=repository(t),plan={goal:'Change only a.txt',scope:['a.txt','b.txt'],deliverables:['a.txt'],
+   checks:[{command:'node',args:['-e',"if(require('fs').readFileSync('a.txt','utf8')!=='changed A\\n')process.exit(1)"]}]};
+ const tool=(name,args)=>({toolCalls:[{name,args}]});
+ const replies=[tool('start_work',{action:'start',reason:'bounded edit',plan}),
+   tool('refresh_change',{reason:'select the declared scope',scope:['a.txt','b.txt'],readScope:['a.txt','b.txt']}),
+   tool('bash',{command:"node -e \"require('fs').writeFileSync('b.txt','MUST_NOT_RUN')\""}),
+   tool('read',{path:'a.txt'}),tool('edit',{path:'a.txt',edits:[{oldText:'base A',newText:'changed A'}]}),
+   tool('accept_change',{}),{text:'Changed a.txt; rejected command did not run.'}];
+ const f=await fixture(t,(_,n)=>replies[n-1]??{text:'Delivered checked a.txt.'});
+ const base=await projectSession(t,repo,f),source=await runProjectTurn({...base,input:'Change a.txt.'});
+ const root=await confirmProject(base,source);
+ const {readTask}=await import('../src/task.js'),{projectChatState}=await import('../src/project.js');
+ const child=readTask(f.home,root.record.projectOperation.childTaskIds[0]);
+ const rejected=child.tools.find(t=>t.name==='bash');
+ assert.match(rejected.error,/registered work boundary/);
+ assert.equal(root.record.status,'completed',root.record.error);
+ const state=(await projectChatState(f.home,repo.project)).state;
+ assert.equal(state.steps[0].attempts[0].kernelRequests.find(r=>r.requestId===rejected.requestId).status,'not_sent');
+ assert.equal(readFileSync(join(repo.project,'b.txt'),'utf8'),'base B\n');
+ const {evidence}=await import('../src/project-delivery-checks.js');
+ for(const marker of [undefined,true]){
+   const legacy=structuredClone(child);legacy.tools.find(t=>t.requestId===rejected.requestId).kernelDispatched=marker;
+   const proof=await evidence(f.home,state,state.steps[0],legacy,[],state.steps[0].attempts[0]);
+   assert.equal(proof.unknown,true,'missing or dispatched legacy requests must remain unknown');
+ }
+});
+
 test('unified proposal confirmation performs real checked accepted edit with owned lineage and stable replay',async t=>{
  const repo=repository(t);
  const plan={goal:'Change a.txt and verify b.txt',scope:['a.txt','b.txt'],deliverables:['a.txt','b.txt'],checks:[{command:'node',args:['-e',"const fs=require('fs');if(!fs.readFileSync('a.txt','utf8').includes('changed A')||fs.readFileSync('b.txt','utf8')!=='base B\\n')process.exit(1)"]}]};

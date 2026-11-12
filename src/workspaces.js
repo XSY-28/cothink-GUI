@@ -109,7 +109,7 @@ export function workspaceTools({
       if(!isAbsolute(path))break;
     }
     const nativeRel = relative(c.workspace, resolve(c.workspace, path));
-    // Normalize native Windows paths before portable kernel scope checks.
+    // Normalize Windows paths before scope checks.
     const rel = nativeRel.replaceAll("\\", "/");
     if (
       isAbsolute(nativeRel) ||
@@ -159,8 +159,7 @@ export function workspaceTools({
     const started = performance.now();
     guard();
     if (!["write","edit","bash"].includes(def.name)) task.projectPolicy?.admit("read", {actor:role().role});
-    // Explicit selected skill references/scripts are read from the task copy, never the live home.
-    // Script execution still uses the existing offline Docker Shell after reading its contents.
+    // Read selected skills from the task copy; run inspected scripts in offline Docker.
     const resource = def.name === "read" && readTaskSkillResource(task,args.path);
     if(resource) {
       const native=createReadToolDefinition(resource.record.root,{operations:{access:async()=>{},readFile:async()=>resource.bytes,detectImageMimeType:async()=>imageMime(resource.bytes)}});
@@ -185,7 +184,7 @@ export function workspaceTools({
     const trace = prior ?? {
       toolCallId: id,
       name: def.name,
-      ...(def.name==="bash"?{registeredAt:new Date().toISOString()}:{}),
+      ...(def.name==="bash"?{registeredAt:new Date().toISOString(),kernelDispatched:false}:{}),
       stageId: s.id,
       requestId: randomUUID(),
       status: "preparing",
@@ -555,6 +554,8 @@ export function workspaceTools({
               trace.outputRef = trace.requestId;
               save();
               projectWrite(true);
+              trace.kernelDispatched = true;
+              save();
               lastKernel = await versioning.exec(c.changeId, input, {
                 signal: combined,
                 onData: opts.onData,

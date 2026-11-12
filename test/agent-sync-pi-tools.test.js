@@ -3,6 +3,24 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { managed, execution } from "./helpers/agent-sync-fixture.js";
+test("a rejected replay cannot erase previous kernel dispatch evidence", async t => {
+  const f=await managed(t,{scope:["a.txt"],execution});
+  let denied=false,attempts=0;
+  const original=f.v.exec;t.after(()=>{f.v.exec=original;});
+  f.v.exec=async()=>{attempts++;throw Error("kernel reply lost");};
+  f.task.projectPolicy={admit:(_action,detail)=>{if(denied&&detail.commit)throw Error("scope changed");}};
+  const invoke=()=>f.call("bash","same-call",{command:"node -e '0'"});
+  await assert.rejects(invoke(),/kernel reply lost/);
+  const trace=f.task.record.tools.at(-1);
+  assert.equal(trace.kernelDispatched,true);
+  denied=true;
+  for(const marker of [true,undefined]){
+    trace.kernelDispatched=marker;
+    await assert.rejects(invoke(),/scope changed/);
+    assert.equal(trace.kernelDispatched,marker,"a later denial cannot prove the original was unsent");
+  }
+  assert.equal(attempts,1);
+});
 test("A04 native file operations require actual reads and atomically advance private tree", async (t) => {
   const f = await managed(t);
   await assert.rejects(

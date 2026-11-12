@@ -117,7 +117,10 @@ export async function evidence(home, state, step, record, requests, attempt) {
     const facts = [];
     for (const id of ids)
       facts.push({ id, fact: await v.inspect({ requestId: id }) });
-    const undispatched = new Set((w.requests ?? []).filter(r => r.dispatched === false).map(r => r.requestId));
+    const undispatched = new Set([
+      ...(w.requests ?? []).filter(r => r.dispatched === false),
+      ...(record.tools ?? []).filter(t => t.kernelInput && t.kernelDispatched === false),
+    ].map(r => r.requestId));
     evidence.kernelRequests = facts.map(({ id, fact }) => ({
       requestId: id,
       status: fact.status === "not_found" && undispatched.has(id) ? "not_sent" : fact.status,
