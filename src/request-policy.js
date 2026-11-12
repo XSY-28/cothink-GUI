@@ -60,7 +60,8 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
           fenced = Boolean(task.projectPolicy || task.rootOwner);
           if(fenced)assertFencedModelTransport(model,options?.client);
           const sendIntent = task.projectPolicy?.locateSend({ task, stage, context, model });
-          if (stage.phase === "process-check") context = {...context, messages:[context.messages.at(-1)]};
+          if (stage.phase === "process-check") context = {...context,
+            messages:context.messages.filter(message=>message.role==="system"||message===context.messages.at(-1))};
           const materialContext=await applyMaterials(binding,context,model,imageAutoResize());
           context=materialContext.context;
           if((fenced||binding.task.materialContext?.length)&&model.contextWindow>0){

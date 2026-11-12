@@ -11,7 +11,7 @@ export function validateWorkIntent(task,args) {
   if(!args||Object.keys(args).some(key=>!["action","reason","plan","planRef"].includes(key))||
     !["start","resume","revise"].includes(args.action)||typeof args.reason!=="string"||!args.reason.trim()||
     (args.action==="resume"?(!args.planRef||args.plan!==undefined):(!args.plan||args.planRef!==undefined)))
-    throw problem("WORK_PLAN","start/revise require a complete plan, resume requires planRef, and reason must be nonempty");
+    throw problem("WORK_PLAN","Use only plan for start/revise, only planRef for resume; never combine them. Provide a nonempty reason.");
   let plan=args.plan,previous,authorityRoot,planCollaboration;
   if(args.planRef){
     const ref=args.planRef;

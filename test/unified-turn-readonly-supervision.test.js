@@ -85,6 +85,12 @@ for(const thinking of ['low','high','max'])test(`supervisor and direct report re
  assert.equal(task.requests().find(call=>call.id===task.record.finalCallId).text,'Corrected value 2 m');
  assert.ok(task.record.stages.some(stage=>stage.assignment?.canDelegate));
  assert.ok(task.requests().some(request=>request.phase==='process-check'));
+ for(const request of task.requests().filter(r=>r.phase==='process-check')){
+   const messages=request.payload.messages;
+   assert.ok(messages.some(m=>['system','developer'].includes(m.role)&&JSON.stringify(m.content).includes('issues')),
+     'the observer report contract must reach the provider');
+   assert.deepEqual(messages.filter(m=>!['system','developer'].includes(m.role)).map(m=>m.role),['user']);
+ }
  assert.ok(f.calls.length>4);
  for(const request of task.requests().filter(request=>request.sent)){
    assert.equal(request.requestedModel.thinkingLevel,thinking);
