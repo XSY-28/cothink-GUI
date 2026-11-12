@@ -10,7 +10,7 @@ import {mkdtempSync,readdirSync,readFileSync,renameSync,mkdirSync,rmdirSync,rmSy
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
-import {appPath,launchCandidate} from './helpers/desktop-candidate.js';
+import {appPath,launchCandidate,verifyPackagedExecution} from './helpers/desktop-candidate.js';
 import {verifyPackagedThinking} from './helpers/desktop-thinking.js';
 import {verifyPackagedTeamPortraits} from './helpers/desktop-team-portrait.js';
 async function fixture(t) {
@@ -68,6 +68,10 @@ async function pendingQuit(f) {
  for(let n=0;n<100;n++){if(await f.app.evaluate(()=>desktopTest.held.length))return;await new Promise(r=>setTimeout(r,10));}
  throw Error('phase-one receipt not observed');
 }
+test('packaged minimal PATH inspects execution without model calls then delivers a managed file',{timeout:45000},async t=>{
+ await verifyPackagedExecution(t);
+});
+
 test('packaged thinking control saves all-roster selection without model calls',async t=>{
  await verifyPackagedThinking(t,{appPath,launchCandidate});
 });

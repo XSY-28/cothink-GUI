@@ -183,8 +183,11 @@ else {
       startupFailure('检测到 Node 预加载环境。请移除 NODE_OPTIONS、NODE_PATH 或 ELECTRON_RUN_AS_NODE 后重新打开 App。');return;
     }
     const nonce=randomUUID();
+    const backendEnv={...process.env,COTHINK_DESKTOP_NONCE:nonce,COTHINK_NO_UPDATE_CHECK:'1'};
+    if(process.platform==='darwin')backendEnv.PATH=[process.env.PATH||'/usr/bin:/bin:/usr/sbin:/sbin',join(app.getPath('home'),'.docker/bin'),
+      '/usr/local/bin','/opt/homebrew/bin','/Applications/Docker.app/Contents/Resources/bin'].filter(Boolean).join(':');
     child=spawn(join(process.resourcesPath,'node/bin/node'),[join(__dirname,'host.mjs')],{
-      cwd:__dirname,env:{...process.env,COTHINK_DESKTOP_NONCE:nonce,COTHINK_NO_UPDATE_CHECK:'1'},stdio:['ignore','ignore','ignore','ipc'],windowsHide:true,
+      cwd:__dirname,env:backendEnv,stdio:['ignore','ignore','ignore','ipc'],windowsHide:true,
     });
     const startupTimer=setTimeout(()=>{if(!ready){startupFailure('后台未完成启动。请检查 App 资源是否完整；退出后重新打开，不会重发任务。');requestQuit();}},30000);
     child.on('error',()=>{clearTimeout(startupTimer);hostStopped=true;startupFailure('随包 Node 无法启动。请重新生成或取得完整的 CoThink App；不需要安装全局 Node。');});

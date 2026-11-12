@@ -25,7 +25,7 @@ npm run pack:desktop -- --node-archive /path/to/node-v24.22.2-darwin-arm64.tar.g
 
 测试候选必须位于 `.noindex` 目录，避免被 Spotlight 当作重复应用。正式安装仅保留 `/Applications/CoThink.app`；安装后注销测试副本的 Launch Services 登记，并核对系统搜索只出现正式版。旧候选可保留在隔离目录或压缩归档中。
 
-需要随包离线 PROJECT 执行资源时，构建前设置 `COTHINK_PACK_PLUGIN_RUNTIME` 指向已有核验的运行端目录，沿用原打包校验。构建后使用 `COTHINK_DESKTOP_APP=/absolute/CoThink.app npm run test:desktop-app` 验证真实桌面生命周期；缺少候选路径时明确失败，不跳过。输出 `CoThink-darwin-arm64/CoThink.app` 和 `desktop-build.json`；App 内 `distribution.json` 记录实际资源摘要。双击 App 使用随包 Node，无需全局 Node 或 cothink。数据仍取 `COTHINK_HOME`，未设置时为 `~/.cothink`；独立测试请先指定临时数据根。文件项目需 Git、本机 Docker 和固定镜像，提交及确认时检查。依赖提前准备，执行断网；失败保留草稿，不回退宿主，选目录不扩大权限。
+需要随包离线 PROJECT 执行资源时，构建前设置 `COTHINK_PACK_PLUGIN_RUNTIME` 指向已有核验的运行端目录，沿用原打包校验。构建后使用 `COTHINK_DESKTOP_APP=/absolute/CoThink.app npm run test:desktop-app` 验证真实桌面生命周期；缺少候选路径时明确失败，不跳过。输出 `CoThink-darwin-arm64/CoThink.app` 和 `desktop-build.json`；App 内 `distribution.json` 记录实际资源摘要。双击 App 使用随包 Node，并补充常见 Docker 命令路径。数据仍取 `COTHINK_HOME`，未设置时为 `~/.cothink`；独立测试请先指定临时数据根。文件项目需 Git、本机 Docker 和固定镜像，提交及确认时检查。依赖提前准备，执行断网；失败保留草稿，不回退宿主，选目录不扩大权限。
 
 macOS 关闭窗口会先保存全部已编辑会话的草稿，再隐藏；从 Dock 返回同一宿主。菜单“退出 CoThink”先冻结新操作、保存草稿并停止所属任务，只有停止与保存均确认后才退出。失败时保留窗口和只读查询，不强杀来冒充完成。页面或宿主崩溃只保证已经保存的内容，不自动重发任务；重新打开页面前会说明未保存输入的风险。
 

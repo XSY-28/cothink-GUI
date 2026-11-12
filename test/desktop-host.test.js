@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync, rmSync, existsSync, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {fork} from 'node:child_process';
+import {fork,spawnSync} from 'node:child_process';
 import {EventEmitter, once} from 'node:events';
 import {runInNewContext} from 'node:vm';
 import {createRequire} from 'node:module';
@@ -129,12 +129,12 @@ const nativeRequire = createRequire(import.meta.url);
 
 // Exercise the actual main-process event handlers with a controlled clock and
 // host replies. This also verifies filesystem preferences without starting App.
-async function desktopShell(profile, port = 32123) {
+async function desktopShell(profile, port = 32123, {env={},platform="darwin"}={}) {
  const state={host:[], renderer:[], dialogs:[], timers:new Set(), quit:0, handlers:new Map()};
  const origin='http://127.0.0.1:'+port;
  const app=new EventEmitter();
  app.setName=()=>{};
- app.getPath=key=>{assert.equal(key,'userData');return profile;};
+ app.getPath=key=>{assert.ok(['userData','home'].includes(key));return profile;};
  app.requestSingleInstanceLock=()=>true;
  app.whenReady=()=>Promise.resolve();
  app.quit=()=>{
@@ -172,7 +172,7 @@ async function desktopShell(profile, port = 32123) {
  runInNewContext(desktopMain,{
   require(name){
    if(name==='electron')return electron;
-   if(name==='node:child_process')return {spawn:()=>child};
+   if(name==='node:child_process')return {spawn:(executable,args,options)=>{state.spawn={executable,args,options};return child;}};
    if(name==='node:crypto')return {randomUUID:()=>{if(!firstUUID)return randomUUID();firstUUID=false;return nonce;}};
    if(name==='node:fs')return {...nativeRequire(name),readFileSync(path,...args){
     return String(path).endsWith('/build.json') ? JSON.stringify(buildFixture) : readFileSync(path,...args);
@@ -180,7 +180,7 @@ async function desktopShell(profile, port = 32123) {
    return nativeRequire(name);
   },
   __dirname:join(profile,'desktop-fixture'),
-  process:{env:{},platform:'darwin',resourcesPath:profile},URL,
+  process:{env,platform,resourcesPath:profile},URL,
   setTimeout(callback,delay){const timer={callback,delay};state.timers.add(timer);return timer;},
   clearTimeout(timer){state.timers.delete(timer);},
  });
@@ -253,4 +253,38 @@ test('desktop final quit timeout allows rechecking the same stop without unlocki
  f.child.emit('message',{type:'stopped',requestId:final.requestId,settled:true});
  assert.equal(f.state.timers.size,0);
  assert.equal(f.state.quit,1);
+});
+
+
+test('desktop backend appends standard macOS tool directories without changing inherited precedence or process env',async t=>{
+ const profile=home(t),env={PATH:'/custom/approved/bin:/usr/bin:/bin',KEEP_FIXTURE:'retained'};
+ const f=await desktopShell(profile,32123,{env});
+ assert.ok(f.state.spawn,'normal desktop startup must spawn the backend');
+ assert.deepEqual(f.state.spawn.options.env.PATH.split(':'),[
+  '/custom/approved/bin','/usr/bin','/bin',join(profile,'.docker/bin'),
+  '/usr/local/bin','/opt/homebrew/bin','/Applications/Docker.app/Contents/Resources/bin',
+ ]);
+ assert.equal(f.state.spawn.options.env.KEEP_FIXTURE,'retained');
+ assert.deepEqual(env,{PATH:'/custom/approved/bin:/usr/bin:/bin',KEEP_FIXTURE:'retained'});
+ for(const inherited of [{},{PATH:''}]){
+  const original={...inherited},clean=await desktopShell(profile,32125,{env:inherited});
+  const backendEnv=clean.state.spawn.options.env;
+  assert.ok(backendEnv.PATH.startsWith('/usr/bin:/bin:/usr/sbin:/sbin:'),'missing or empty PATH must preserve system tools');
+  const systemTool=spawnSync('true',[],{env:backendEnv});
+  assert.equal(systemTool.error,undefined);
+  assert.equal(systemTool.status,0,'a real system executable must remain discoverable');
+  assert.deepEqual(inherited,original);
+ }
+ const windows=await desktopShell(profile,32124,{env:{PATH:'C:\\fixture'},platform:'win32'});
+ assert.equal(windows.state.spawn.options.env.PATH,'C:\\fixture');
+});
+
+test('desktop preload refusal is preserved before any backend environment construction',async t=>{
+ for(const variable of ['NODE_OPTIONS','NODE_PATH','ELECTRON_RUN_AS_NODE']){
+  const env={PATH:'/usr/bin:/bin',[variable]:'fixture-preload'};
+  const f=await desktopShell(home(t),32123,{env});
+  assert.equal(f.state.spawn,undefined);
+  assert.match(f.state.dialogs[0]?.message,/预加载环境/);
+  assert.equal(env[variable],'fixture-preload');
+ }
 });
