@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { finalText } from "./presentation.js";
+import { readFileSync } from "node:fs";
+import { correctionPolicyText, finalText } from "./presentation.js";
 import {resolveDeliveryEvidence,resolveManagerFinal} from "./project-delivery.js";
 import {checkedVisualReview} from "./visual-preview.js";
-import { taskDisplayStatus } from "./task.js";
-import { diagnostic, publicModel } from "./gui-process-projection.js";
+import { readRequests, taskDisplayStatus } from "./task.js";
+import { commandProgress, diagnostic, publicModel, requestProgress } from "./gui-process-projection.js";
 export { projectGuiProcessCheck, publicModel } from "./gui-process-projection.js";
 
 const clone = (value) => (value === undefined ? null : structuredClone(value));
@@ -114,7 +115,7 @@ function actualParticipants(record, messages) {
   return participants;
 }
 
-export function projectGuiTask(record, requests = [], sessionEntries = [], {deliveryVersion = record.work?.version} = {}) {
+export function projectGuiTask(record, requests = [], sessionEntries = [], {deliveryVersion = record.work?.version, liveRequests = false} = {}) {
   const actualRoles = hasActualRoles(record);
   const stages = new Map(record.stages.map(stage => [stage.id,stage]));
   const messages = requests.map((call) => {
@@ -133,6 +134,7 @@ export function projectGuiTask(record, requests = [], sessionEntries = [], {deli
           stage?.modelRef,
       ),
       status: call.status,
+      progress: requestProgress(call, liveRequests && record.status === "running"),
       text: role === "process-check" ? "" : call.text ?? "",
       ...(actualRoles && {
         taskId: record.id,
@@ -256,6 +258,8 @@ export function projectGuiTask(record, requests = [], sessionEntries = [], {deli
     team: publicTeam(record.team),
     participants,
     messages,
+    commands: commandProgress(record,liveRequests),
+    correctionPolicy: actualRoles ? correctionPolicyText : null,
     usage: clone(record.usage),
     error: record.error ?? null,
     activities: w ? [] : activities,
@@ -264,6 +268,23 @@ export function projectGuiTask(record, requests = [], sessionEntries = [], {deli
     answerSkills: clone(record.answerSkills??[]),
     work,
   };
+}
+export function projectGuiExecutions(home, task, sources) {
+  return sources.map(({record:saved,relation}) => {
+    const current=relation === "owned" ? task.rootOwner?.snapshotFor(saved.id) : null;
+    const child=current?.record ?? saved;
+    const entries=[...new Set(child.stages.map(stage=>stage.sessionFile).filter(Boolean))].flatMap(path=>{
+      try {return readFileSync(path,"utf8").split("\n").filter(Boolean).map(line=>({...JSON.parse(line),processSessionFile:path}));}
+      catch {return [];}
+    });
+    const identity={relation,rootTaskId:child.rootTaskId,stepId:child.project.stepId};
+    try {
+      return {...projectGuiTask(child,current?.requests ?? readRequests(home,child),entries,
+        {deliveryVersion:task.record.deliveryRef?.version??null,liveRequests:!!current}),...identity};
+    } catch(error) {
+      return {...projectGuiTask(child,[],entries,{deliveryVersion:null}),...identity,error:"执行请求来源尚不能核验："+error.message};
+    }
+  });
 }
 // Hash only what can change the delivery the user reads.
 export function guiResultRevision(record, text) {

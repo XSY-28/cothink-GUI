@@ -64,7 +64,7 @@ import {
   rememberRecentTeam,
   conversationTaskIds,
 } from "./conversation.js";
-import { publicTeam, projectGuiTask, projectGuiProcessCheck, finalGuiText, guiResultRevision, guiDeliverySummary } from "./gui-projection.js";
+import { publicTeam, projectGuiTask, projectGuiExecutions, projectGuiProcessCheck, finalGuiText, guiResultRevision, guiDeliverySummary } from "./gui-projection.js";
 import {
   saveGuiTeam,
   removeGuiTeam,
@@ -78,7 +78,7 @@ import {
   inspectGuiDirectory,
   inspectWorkspaceProject, browseProjectFolders, makeProjectFolder,
   savedDirectoryAvailable, fileWorkStatus, requireFileWork, requireGuiFileTask, workspaceDirectoryFacts,
-  createConversationFolder, discardEmptyConversationFolder, inspectConversationFileWork, requireConversationFileWork, inspectTeamFolder,
+  createConversationFolder, discardEmptyConversationFolder, beforeGuiFileWork, requireGuiExecution, directoryIdentity, conversationDirectoryAvailable, inspectTeamFolder, requireTeamFolder, savedProjectAvailable,
   guiDiff,
   guiOutput,
   guiArtifact,
@@ -311,7 +311,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       throw workspaceError("WORKSPACE_UNAVAILABLE", membership.workspaceError);
     if (membership.workspaceArchived)
       throw workspaceError("WORKSPACE_ARCHIVED", "此 Team 已归档，请先恢复。");
-    if (forExecution && facts.project !== null && !await savedProjectAvailable(manager,facts.project,loadConfig(home)?.work))
+    if (forExecution && facts.project !== null && !await savedProjectAvailable(home,manager,facts.project,loadConfig(home)?.work))
       throw workspaceError("WORKSPACE_UNAVAILABLE", "此对话保存的项目目录已不可用或指向其他仓库，历史仍可阅读。");
     const latest = projectMembership(facts,readGuiWorkspaces(home));
     if (latest.workspaceError) throw workspaceError("WORKSPACE_UNAVAILABLE",latest.workspaceError);
@@ -323,20 +323,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if (!workspace) throw workspaceError("WORKSPACE_UNAVAILABLE","请在有效 Team 中新建对话。");
     if (workspace.archived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。",workspace);
     return workspace;
-  }
-  function requireTeamFolder(path) {
-    const directory=inspectTeamFolder(home,path);
-    if (!directory.directoryAvailable) throw workspaceError("WORKSPACE_UNAVAILABLE",directory.reason);
-    return directory.canonicalPath;
-  }
-  function conversationDirectoryAvailable(manager,path,directory) {
-    const expected=readManagedDirectory(manager);
-    return savedDirectoryAvailable(path,directory) &&
-      (!expected||JSON.stringify(directoryIdentity(path))===JSON.stringify(expected));
-  }
-  async function savedProjectAvailable(manager,path,work) {
-    const project = await inspectGuiProject(home,path,work,{includeChanges:false});
-    return project.executionReady && conversationDirectoryAvailable(manager,path,project);
   }
   async function summaries() {
     const files = readdirSync(directory).filter(n => n.endsWith(".jsonl"));
@@ -856,7 +842,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       }
       if(name==="home.reserve"){
         const workspace=requireActiveTeam(readGuiWorkspaces(home),workspaceId);
-        requireTeamFolder(workspace.project);
+        requireTeamFolder(home,workspace.project);
       }
       // A pre-Team reservation may point to a published old conversation. Its
       // source remains intact; release only the matching old reservation.
@@ -1033,6 +1019,20 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     })();
     return ready;
   }
+  async function inspectExecution(options) {
+    if(executionInspection)throw Error("当前任务或设置尚未结束，请先等待。");
+    executionInspection=Promise.resolve().then(()=>{
+      if(options.probe&&pendingProbeCleanup)throw workspaceError("PROBE_CLEANUP","上次执行探针的清理尚未核实，请关闭时重新核对。");
+      return executionInspector(home,{...options,onCleanupPending:retry=>{pendingProbeCleanup={retry};}});
+    }).then(result=>{
+      if(result?.probe?.code==="PROBE_CLEANUP")pendingProbeCleanup??={};
+      return result;
+    }).finally(()=>{
+      executionInspection=null;
+      emit();
+    });
+    return executionInspection;
+  }
   async function submit(args,confirmation,continuation,{receiptOnly=false}={}) {
     const upgrade=()=>sessionStateError("GUI_INPUT_UPGRADE","需要新版 CoThink 界面。请重新打开应用；已保存草稿和历史保留。");
     if(receiptOnly && args.protocolVersion!==unifiedProtocol)throw upgrade();
@@ -1160,7 +1160,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             throw workspaceError(snapshot.turnIntent.blockerCode??(snapshot.turnIntent.fileRequired&&constraints.readOnly&&snapshot.turnIntent.networkMode!=="whole-turn-offline"?"TURN_CONSTRAINTS":"NETWORK_POLICY"),snapshot.turnIntent.blocker);
           if (!confirmation && (continuation || snapshot.turnIntent.fileRequired)) await requireGuiFileTask(home,continuation
             ? {...snapshot.workspace,directoryIdentity:continuation.source.workspace.directoryIdentity??undefined}
-            : snapshot.workspace,snapshot.config.work);
+            : snapshot.workspace,snapshot.config.work,inspectExecution,state.abort.signal);
           if (!confirmation) snapshot.config = await resolveConversationThinking(home, snapshot.config, manager);
           const requestedRead=args.readAuthorization;
           snapshot.readAuthorization=confirmation?null:await freezeReadAuthorization({home,workspace:snapshot.workspace,sessionId,submissionId,editorEditId:args.editorEditId,input:requestedRead?.version?{paths:requestedRead.paths}:requestedRead});
@@ -1190,9 +1190,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           mainRuntime: rt,
           guiResourceOptions:snapshot.guiResourceOptions,
           projectDirectoryAvailable:snapshot.projectDirectoryAvailable,
-          beforeWork:(_task,{prepare=false}={})=>prepare
-            ?requireConversationFileWork(home,snapshot.workspace)
-            :inspectConversationFileWork(home,snapshot.workspace),
+          beforeWork:(task,options)=>beforeGuiFileWork(home,snapshot.workspace,snapshot.config.work,inspectExecution,{...options,signal:task.signal}),
           materials:snapshot.materials,
           ...(continuation?{continuationSource:{taskId:continuation.source.id}}:{}),
           taskId: state.taskId,
@@ -1244,27 +1242,32 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         checkedProposal(home,saved,proposalRef,{sessionId,workspaceId:membership.workspaceId});
         const found=await confirmationState({home,source:saved,reservation:saved.confirmationIntent,receiptOnly:true});
         if(found.task)return {found};
+        if(active?.taskId===saved.confirmationIntent.taskId&&active.sessionId===sessionId)return {joining:active.ready};
       }
-      assertSessionUnarchived(sessionId);
-      const holder=await owner(sessionId,{mutating:true});
-      const membership=await assertWorkspaceWritable(holder.sessionManager,{forExecution:true,requireTeam:true});
-      assertProposalBranch(holder.sessionManager);
-      const sourceTask=live.get(id),source=sourceTask?.record??readTask(home,id);
-      if (source.workspace?.directoryIdentity!==undefined)
-        await requireFileWork(home,source.workspace.project,source.workspace.directoryIdentity);
-      const save=()=>{holder.assertOwned();if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",id+".json"),source,holder.assertOwned);taskCache.delete(id);};
-      const reservation=await reserveConfirmation({home,source,proposalRef,sessionId,workspaceId:membership.workspaceId,submissionId,save});
-      const found=await confirmationState({home,source,reservation});
-      return {source,reservation,found};
+      if(active||management)throw Error("当前任务或设置尚未结束，请先等待。");
+      management=true;
+      try {
+        assertSessionUnarchived(sessionId);
+        const holder=await owner(sessionId,{mutating:true});
+        const membership=await assertWorkspaceWritable(holder.sessionManager,{forExecution:true,requireTeam:true});
+        assertProposalBranch(holder.sessionManager);
+        const sourceTask=live.get(id),source=sourceTask?.record??readTask(home,id);
+        if (source.workspace?.directoryIdentity!==undefined)
+          await requireFileWork(home,source.workspace.project,source.workspace.directoryIdentity);
+        const save=()=>{holder.assertOwned();if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",id+".json"),source,holder.assertOwned);taskCache.delete(id);};
+        checkedProposal(home,source,proposalRef,{sessionId,workspaceId:membership.workspaceId});
+        const blocker=workConfirmationBlocker(source);
+        if(blocker)throw workspaceError("PROPOSAL_BLOCKED",blocker);
+        if(!source.proposal.reuseCompletedDelivery)await requireGuiExecution(source.frozenConfig.work,inspectExecution);
+        if(shuttingDown)throw Error("宿主正在关闭，任务未发送。");
+        const reservation=await reserveConfirmation({home,source,proposalRef,sessionId,workspaceId:membership.workspaceId,submissionId,save});
+        const found=await confirmationState({home,source,reservation});
+        return {source,reservation,found};
+      } finally {management=false;emit();}
     });
+    if(prepared.joining)return prepared.joining;
     if(prepared.found.task)return {taskId:prepared.found.task.id,sessionId:args.sessionId};
-    const blocker=workConfirmationBlocker(prepared.source);
-    if(blocker)throw Error(blocker);
     return submit({sessionId:args.sessionId,input:prepared.source.input,submissionId:prepared.reservation.submissionId},prepared);
-  }
-  function directoryIdentity(path) {
-    try {const s=statSync(path,{bigint:true});return [String(s.dev),String(s.ino)];}
-    catch {return null;}
   }
   async function continuePrepared(args) {
     if (!args || Object.keys(args).length!==4 || !isWorkspaceId(args.sessionId) || !isWorkspaceId(args.sourceTaskId) ||
@@ -1308,7 +1311,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       let result;
       if (name === "workspace.create") {
         if (current) throw workspaceError("WORKSPACE_CONFLICT","该 Team 标识已存在；请打开已保存的 Team。",current);
-        const project = requireTeamFolder(args.project);
+        const project = requireTeamFolder(home,args.project);
         await validateWorkspaceRoster(args.defaultRosterId);
         result = createGuiWorkspace(home,{...args,project});
       } else {
@@ -1324,7 +1327,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
             throw workspaceError("WORKSPACE_CONFLICT","请通过 Team 的目录选择入口绑定目录。",current);
           if (!isWorkspaceId(args.operationId)) throw Error("Team 目录变更身份无效。");
           if (current.archived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。",current);
-          const path=requireTeamFolder(args.path);
+          const path=requireTeamFolder(home,args.path);
           const frozen=freezeWorkspaceHistory(directory,infos,table,current,path,{signature,projectMembership,inspectWorkspaceProject,assertIdle:related=>{
             if ([active?.sessionId,extensionCommand?.sessionId].some(id=>related.has(id)))
               throw workspaceError("WORKSPACE_CONFLICT","此 Team 正在运行任务或插件命令。",current);
@@ -1393,21 +1396,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     }
     if(name==="settings.inspectExecution"){
       if(active||management)throw Error("当前任务或设置尚未结束，请先等待。");
-      const probe=args.probe===true;
-      if(probe&&pendingProbeCleanup)throw Error("上次执行探针的清理尚未核实，请关闭时重新核对。");
       management=true;
-      executionInspection=Promise.resolve().then(()=>executionInspector(home,{
-        probe,onCleanupPending:retry=>{pendingProbeCleanup={retry};},
-      })).then(result=>{
-        if(result?.probe?.code==="PROBE_CLEANUP")pendingProbeCleanup??={};
-        return result;
-      }).finally(()=>{
-        executionInspection=null;
-        management=false;
-        emit();
-      });
-      emit();
-      return executionInspection;
+      return inspectExecution({probe:args.probe===true}).finally(()=>{management=false;emit();});
     }
     if(name==="extension.respond") {
       const prompt=extensionPrompts.get(args.promptId);
@@ -1628,7 +1618,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           if (readSessionWorkspace(manager) === undefined)
             appendConversationEntry(holder,"cothink-gui-workspace",{workspaceId:membership.workspaceId});
           const teamRoot=requireActiveTeam(readGuiWorkspaces(home),membership.workspaceId).project;
-          folder=createConversationFolder(home,requireTeamFolder(teamRoot),id);
+          folder=createConversationFolder(home,requireTeamFolder(home,teamRoot),id);
           appendConversationEntry(holder,"cothink-project",folder);
           appendConversationEntry(holder, "cothink-title", {title:`${readable.title} · 分支`});
           // Historical drafts are not messages, and belong to the source editor.
@@ -1669,7 +1659,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         try {
           assertNewGuiSessionId(directory,id);
           const workspace=requireActiveTeam(discoverWorkspaces(await summaries()),args.workspaceId);
-          const project=requireTeamFolder(workspace.project);
+          const project=requireTeamFolder(home,workspace.project);
           const checkHomeIdentity=()=>{
             const row=readHomeDraft(home);
             const reserved=row?.pendingCreateSessionId===id;
@@ -1967,7 +1957,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           return [];
         }
       });
-      const p = projectGuiTask(t.record, t.requests(), entries);
+      const p = projectGuiTask(t.record, t.requests(), entries, {liveRequests:!!t.rootOwner});
       p.finalText=finalGuiText(t.record,t.requests(),home);p.proposal=t.record.proposal;p.proposalRef=t.record.proposalRef;p.flow=t.record.flow;
       if(t.record.flow==='unified'){
         const delivery=guiDeliverySummary(home,t.record);
@@ -1984,11 +1974,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         const unavailable=error=>{p.executionError="执行来源尚不能核验："+error.message;};
         try {owned=resolveOwnedTasks(home,t.record,unavailable);} catch(error){unavailable(error);}
         const sources=new Map([...owned.map(record=>({record,relation:'owned'})),...delivery.sources].map(source=>[source.record.id,source]));
-        p.executionTasks=[...sources.values()].map(({record:child,relation})=>{
-          const childEntries=[...new Set(child.stages.map(s=>s.sessionFile).filter(Boolean))].flatMap(path=>{try{return readFileSync(path,'utf8').split('\n').filter(Boolean).map(line=>({...JSON.parse(line),processSessionFile:path}));}catch{return [];}});
-          try {return {...projectGuiTask(child,readRequests(home,child),childEntries,{deliveryVersion:t.record.deliveryRef?.version??null}),relation,rootTaskId:child.rootTaskId,stepId:child.project.stepId};}
-          catch(error){return {...projectGuiTask(child,[],childEntries,{deliveryVersion:null}),relation,rootTaskId:child.rootTaskId,stepId:child.project.stepId,error:"执行请求来源尚不能核验："+error.message};}
-        });
+        p.executionTasks=projectGuiExecutions(home,t,[...sources.values()]);
         if (t.record.processCheck) p.processCheck = projectGuiProcessCheck(t.record, [
           ...p.messages, ...p.executionTasks.filter(child => child.relation === "owned").flatMap(child => child.messages),
         ]);

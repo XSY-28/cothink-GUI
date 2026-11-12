@@ -4,7 +4,7 @@ import {randomUUID} from "node:crypto";
 import {existsSync,mkdirSync,mkdtempSync,readFileSync,realpathSync,renameSync,rmSync,writeFileSync} from "node:fs";
 import {dirname,join} from "node:path";
 import {tmpdir} from "node:os";
-import {controller,finished,prepareSubmit,teamId} from "./helpers/gui-controller-fixture.js";
+import {controller,controllerModule,finished,prepareSubmit,teamId} from "./helpers/gui-controller-fixture.js";
 import {execution} from "./helpers/agent-sync-fixture.js";
 import {fixture} from "./helpers/pi-fixture.js";
 import {createConversationFolder,placeConversationDelivery,requireConversationFileWork} from "../src/gui-work.js";
@@ -27,7 +27,7 @@ test("a Team owns one folder per conversation and accepted work lands in its own
     tool("write",{path:"index.html",content:"<h1>本地成果</h1>\n"}),
     tool("accept_change"),tool("accept_change"),{text:"文件已完成"},
   ][n-1]??{text:"文件已完成"});
-  const c=await controller(t,f,{work:{execution}});
+  let c=await controller(t,f,{work:{execution}});
   const workspaceId=randomUUID();
   await c.action("workspace.create",{workspaceId,name:"会话目录",project:folder,defaultRosterId:teamId});
   const a=await c.action("session.create",{workspaceId,sessionId:randomUUID()});
@@ -37,7 +37,8 @@ test("a Team owns one folder per conversation and accepted work lands in its own
   assert.notEqual(a.project,b.project);
   assert.ok(existsSync(a.project)&&existsSync(b.project));
   assert.equal(f.calls.length,0);
-  const started=await c.action("task.submit",await prepareSubmit(c,{sessionId:a.id,input:"请生成 index.html，不允许联网。",protocolVersion:1,submissionId:"folder-proposal"}));
+  const proposalArgs=await prepareSubmit(c,{sessionId:a.id,input:"请生成 index.html，不允许联网。",protocolVersion:1,submissionId:"folder-proposal"});
+  const started=await c.action("task.submit",proposalArgs);
   const proposal=await finished(c,started.taskId);
   assert.ok(proposal.proposalRef,proposal.error);
   const confirmArgs={sessionId:a.id,protocolVersion:1,submissionId:"folder-confirm",proposalRef:proposal.proposalRef};
@@ -75,6 +76,13 @@ test("a Team owns one folder per conversation and accepted work lands in its own
   await c.action("session.archive",{sessionId:a.id,expectedRevision:currentA.navigation.revision,archived:true});
   const consumedSource=join(f.home,"tasks",started.taskId+".json");
   const savedReceipt=readFileSync(consumedSource);
+  await c.close();
+  c=await controllerModule.createGuiController({home:f.home,cwd:f.cwd,executionInspector:async()=>{
+    throw Error("recovered receipts must not require Docker");
+  }});
+  t.after(()=>c.close());
+  assert.deepEqual(await c.action("task.submit",proposalArgs),started,"saved file submission receipts survive unavailable Docker");
+  await assert.rejects(c.action("task.submit",{...proposalArgs,submissionId:randomUUID(),editorEditId:randomUUID()},{receiptOnly:true}),{code:"GUI_INPUT_UPGRADE"});
   assert.deepEqual(await c.action("task.confirmWork",confirmArgs),confirmed,"the consumed receipt is readable after archive and folder loss");
   await assert.rejects(c.action("task.confirmWork",{...confirmArgs,sessionId:b.id}),/提议不属于/);
   await assert.rejects(c.action("task.confirmWork",{...confirmArgs,proposalRef:{...confirmArgs.proposalRef,planDigest:"0".repeat(64)}}),{code:"PROPOSAL_SOURCE"});

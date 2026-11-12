@@ -57,17 +57,24 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
   }
   function ingest(observation, facts, text) {
     let result;
-    try { result = JSON.parse(text); } catch { throw problem("PROCESS_REPORT", "Checker did not return the required JSON report"); }
+    try {
+      const value = text.trim();
+      const fence = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/.exec(value);
+      result = JSON.parse(fence ? fence[1] : value);
+    } catch { throw problem("PROCESS_REPORT", "Checker did not return the required JSON report"); }
     if (!Array.isArray(result?.issues) || result.issues.length > facts.length * 3)
       throw problem("PROCESS_REPORT", "Checker report has no valid bounded issues list");
     const byMember = new Map(facts.map(fact => [fact.memberId, fact]));
-    const reports = result.issues.map(issue => {
+    const reports = result.issues.map((issue, index) => {
       const fact = byMember.get(issue?.memberId);
-      if (!fact || !["direction", "progress", "blocker"].includes(issue.kind) ||
-          typeof issue.reason !== "string" || !issue.reason.trim() || issue.reason.length > 2000 ||
-          !Array.isArray(issue.evidenceIds) || !issue.evidenceIds.length ||
-          !issue.evidenceIds.every(id => fact.evidenceIds.includes(id) || fact.blockerIds?.includes(id)))
-        throw problem("PROCESS_REPORT", "Checker issue refers to facts outside this observation");
+      const invalid = !fact ? "memberId must identify an employee in this snapshot"
+        : !["direction", "progress", "blocker"].includes(issue.kind) ? "kind must be direction, progress, or blocker"
+        : typeof issue.reason !== "string" || !issue.reason.trim() || issue.reason.length > 2000
+          ? "reason must contain 1 to 2000 characters"
+        : !Array.isArray(issue.evidenceIds) || !issue.evidenceIds.length ||
+          !issue.evidenceIds.every(id => fact.evidenceIds.includes(id) || fact.blockerIds?.includes(id))
+          ? "evidenceIds must be nonempty and drawn only from that employee's evidenceIds or blockerIds" : null;
+      if (invalid) throw problem("PROCESS_REPORT", `Checker issue ${index} refers to facts outside this observation: ${invalid}`);
       const evidenceIds = [...new Set(issue.evidenceIds)].sort();
       return {
         id: observationDigest([coverageKey(fact), issue.kind, evidenceIds]),
@@ -111,33 +118,52 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
       const commandId = task.record.project?.commandId ?? null;
       const revision = task.record.project?.revision ?? null;
       const snapshot = { kind: "cothink-process-observation", observedAt: timestamp(observedAt), members: facts };
-      const snapshotDigest = observationDigest(snapshot);
-      stage = task.beginPhase(phase, phase, model, { roleOnly: true });
-      runtime.bindTask(task, stage, { materials: [] });
-      const sequence = record().observations.length + 1;
-      const id = observationDigest([root.record.id, commandId, revision, stage.sessionId, model, sequence, snapshotDigest]);
-      observation = {
-        id, taskId: task.record.id, commandId, revision, sessionId: stage.sessionId, stageId: stage.id,
-        model, sequence, kind, dueAt: timestamp(due), observedAt: snapshot.observedAt,
-        delayMs: Math.max(0, observedAt - due), missedIntervals: kind === "periodic" ? Math.max(0, Math.floor((observedAt - due) / interval)) : 0,
-        snapshotDigest, members: facts, status: "preparing", requestId: null,
-      };
-      observationsByStage.set(stage, observation);
-      record().observations.push(observation);
-      save();
-      const body = JSON.stringify(snapshot);
-      if (task.projectPolicy) task.projectPolicy.bindProcessObservation(task, stage, observation, body);
-      else source.bindObservation?.({task, stage, observation, body});
-      const result = await runtime.prompt(body);
-      guard();
-      observation.requestId = result.call.id;
-      if (result.message?.stopReason !== "stop" || !result.call.sent) throw problem("PROCESS_REPORT", "No complete process check response");
-      ingest(observation, facts, result.text);
-      observation.status = "completed";
-      observation.usage = result.call.usage ?? null;
-      stage.status = "completed";
-      task.save();
-      save();
+      let correction;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        guard();
+        task.signal.throwIfAborted();
+        const body = JSON.stringify(correction ? { ...snapshot, correction } : snapshot);
+        const snapshotDigest = createHash("sha256").update(body).digest("hex");
+        stage = task.beginPhase(phase, phase, model, { roleOnly: true });
+        runtime.bindTask(task, stage, { materials: [] });
+        const sequence = record().observations.length + 1;
+        const id = observationDigest([root.record.id, commandId, revision, stage.sessionId, model, sequence, snapshotDigest]);
+        observation = {
+          id, taskId: task.record.id, commandId, revision, sessionId: stage.sessionId, stageId: stage.id,
+          model, sequence, kind, dueAt: timestamp(due), observedAt: snapshot.observedAt,
+          delayMs: Math.max(0, observedAt - due), missedIntervals: kind === "periodic" ? Math.max(0, Math.floor((observedAt - due) / interval)) : 0,
+          snapshotDigest, members: facts, status: "preparing", requestId: null,
+          ...(correction ? { correctionOf: correction.observationId } : {}),
+        };
+        observationsByStage.set(stage, observation);
+        record().observations.push(observation);
+        save();
+        if (task.projectPolicy) task.projectPolicy.bindProcessObservation(task, stage, observation, body);
+        else source.bindObservation?.({task, stage, observation, body});
+        const result = await runtime.prompt(body);
+        guard();
+        task.signal.throwIfAborted();
+        observation.requestId = result.call.id;
+        observation.usage = result.call.usage ?? null;
+        if (result.message?.stopReason !== "stop" || !result.call.sent) throw problem("PROCESS_REPORT", "No complete process check response");
+        try {
+          ingest(observation, facts, result.text);
+        } catch (error) {
+          // Correct only known completed invalid output, never a transport or persistence failure.
+          if (attempt || error.code !== "PROCESS_REPORT" || result.call.status !== "completed") throw error;
+          observation.status = stage.status = "failed";
+          observation.error = stage.error = error.message;
+          task.save();
+          save();
+          correction = { observationId: observation.id, requestId: result.call.id, error: error.message,
+            instruction: "Return a corrected report for exactly these unchanged source facts. This is the only correction attempt." };
+          continue;
+        }
+        observation.status = stage.status = "completed";
+        task.save();
+        save();
+        break;
+      }
       for (const item of sources) item.notify();
     } catch (error) {
       const call = stage && source.task.requests().findLast(request => request.stageId === stage.id);
@@ -146,7 +172,7 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
         observation.usage = call?.usage ?? null;
         observation.status = call?.status === "outcome_unknown" || (call?.sent && call.status === "in_flight")
           ? "outcome_unknown" : stopped || source?.task.signal.aborted ? "stopped" : "failed";
-        observation.error = error.message;
+        observation.error ??= error.message;
       }
       if (stage) {
         stage.status = observation?.status ?? "failed";

@@ -3,7 +3,7 @@ import { materialImage } from "./context.js";
 import { randomUUID } from 'node:crypto';
 import { problem } from './task.js';
 import { validProjectPath, inScope } from './versioning.js';
-import { digest } from "./project-collaboration-evidence.js";
+import { completionFeedback, digest, userCollaboration } from "./project-collaboration-evidence.js";
 import { adoptedReadOnlySource, collectReadOnlyEvidence, readOnlyReport, reportReceived, reviewSource } from "./project-readonly-reports.js";
 
 // Read-only assignments live in root stages. The live map contains only
@@ -104,6 +104,18 @@ export function bindReadonlyRoles(task,{admission,cwd}) {
   return task.readonlyLifecycle={
     bind(runtime){main=runtime;},
     available(){return Boolean(!closed&&monitor()&&task.record.constraints.allowedSubtasks.includes("work"));},
+    async complete(result,allowWork){
+      if(closed||task.record.routeIntent||task.record.workPlanError||task.record.projectPreparationBlocked)return result;
+      const requirements=userCollaboration(task.record);
+      const fileRequired=!!(allowWork&&!task.record.constraints.readOnly&&task.record.turnIntent?.fileRequired);
+      if(!requirements.length&&!fileRequired)return result;
+      const stages=[...roles.values()].map(handle=>handle.stage);
+      if(stages.some(stage=>stage.assignment.status==="outcome_unknown"))return result;
+      if(stages.length)await monitor().cover(source);
+      const evidence=collectReadOnlyEvidence({task,roles,stages,requests:task.requests(),finalCall:result.call,gaps:new Set()});
+      if(evidence.unknown)return result;
+      return await completionFeedback(task,main,result,{requirements,candidates:evidence.candidates,fileRequired})??result;
+    },
     async beforeFileRoute(call){
       if(!roles.size)return;
       if([...roles.values()].some(({stage:{assignment}})=>!assignment.settledAt||!assignment.collected))

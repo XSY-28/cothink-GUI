@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { problem, readRequest, readRequests, readTask } from './task.js';
 import { workModelIdentity } from "./model-roster.js";
+import { projectRoutingBudget } from "./pi-model-runtime.js";
 
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function userCollaboration(record) {
@@ -60,6 +61,105 @@ function collaborationEvidence(requirement,candidates) {
   return {items:scoped,missing:["parallel_overlap"]};
 }
 
+// Feedback is an ordinary new request in the same manager session. It never
+// grants authority, changes assignment state or substitutes for final evidence.
+export async function completionFeedback(task,runtime,result,{requirements=[],candidates=[],fileRequired=false,formal=false,pendingStepIds=[]}={}) {
+  const root=task.rootOwner?.rootTask;
+  if(!root||task.record.completionFeedback||task.signal.aborted||task.ioError||
+      task.record.status!=="running"||root.signal.aborted||root.record.status!=="running"||
+      root.record.cancelRequestedAt||task.record.cancelRequestedAt||root.record.processCheck?.gap||
+      !result?.call?.sent||result.call.status!=="completed"||result.call.response?.stopReason!=="stop"||!result.text?.trim()||
+      root.record.rootRequests?.some(call=>!call.notSent&&["failed","partial","cancelled","outcome_unknown"].includes(call.status)))return null;
+  const gaps=requirements.flatMap(requirement=>{
+    const {items,missing}=collaborationEvidence(requirement,candidates);
+    const pending=requirement.stepIds?.filter(id=>pendingStepIds.includes(id))??[];
+    const dueStepIds=requirement.stepIds?.filter(id=>!pending.includes(id));
+    const due=missing.filter(gap=>!pending.length||gap==="step_coverage"&&
+      dueStepIds.some(id=>!items.some(item=>item.stepId===id)));
+    return due.length?[{requirement,missing:due,workers:items.length,
+      ...(dueStepIds?{dueStepIds,pendingStepIds:pending}:{})}]:[];
+  });
+  if(!fileRequired&&!gaps.length)return null;
+  if(gaps.length&&!root.record.constraints.allowedSubtasks.includes("work"))return null;
+  if(formal)task.projectPolicy.admit("delegate",{actor:"main"});
+  const budget=projectRoutingBudget(task);
+  // Leave room for actual employee work, its mandatory check and consumption.
+  // This is a lower bound; all later requests still use normal admission.
+  const calls=task.requests();
+  const collectable=formal?(task.record.members??[]).filter(member=>!member.collected&&!member.reviewOf&&
+    ["running","completed"].includes(member.status)).flatMap(member=>{
+      const call=calls.find(call=>call.role==="member:"+member.memberId&&call.sent&&["worker","worker-feedback"].includes(call.phase));
+      return call?[{workId:member.workId,sessionId:call.projectSend.sessionId,stepId:task.record.project.stepId}]:[];
+    }):task.record.stages.filter(({assignment:a})=>a&&!a.collected&&!a.review&&!a.supersededBy&&!a.closedAt&&!a.pause&&
+      ["running","completed"].includes(a.status)).filter(stage=>calls.some(call=>call.stageId===stage.id&&call.sent))
+      .map(stage=>({workId:stage.assignment.workId,sessionId:stage.sessionId}));
+  const missingWorkers=Math.max(0,...gaps.map(({requirement,missing,dueStepIds})=>{
+    const usable=collectable.filter(item=>!dueStepIds||dueStepIds.includes(item.stepId));
+    const items=[...collaborationEvidence(requirement,candidates).items,...usable];
+    const workers=Math.min(new Set(items.map(item=>item.workId)).size,new Set(items.map(item=>item.sessionId)).size);
+    return missing.includes("required_workers")?Math.max(0,requirement.workers-workers):usable.length?0:1;
+  }));
+  const needed=gaps.length?2+missingWorkers*(formal?2:1):1;
+  const minimum=needed+Math.max(budget.reservedForChecks,missingWorkers?1:0);
+  const shortage=[["ROOT_BUDGET",budget.rootRemainingCalls],["PROJECT_BUDGET",budget.projectRemainingCalls]]
+    .find(([,remaining])=>remaining!==null&&remaining<minimum);
+  if(budget.hardCostCap!==null||shortage){
+    task.record.completionFeedback={sourceRequestId:result.call.id,status:"not_sent",gaps,fileRequired,
+      reason:budget.hardCostCap!==null?"ROOT_BUDGET: A hard cost cap prevents completion feedback.":
+        `${shortage[0]}: Completion feedback and missing work need at least ${minimum} requests; ${shortage[1]} remain.`};
+    task.save();return null;
+  }
+  const feedback=task.record.completionFeedback={sourceRequestId:result.call.id,status:"preparing",gaps,fileRequired};
+  const prior=new Set(task.record.requestIds);
+  const requests=()=>task.requests().filter(call=>!prior.has(call.id)&&call.stageId===result.call.stageId);
+  task.save();
+  try {
+    const corrected=await runtime.prompt(JSON.stringify({source:"cothink-completion-feedback",
+      sourceRequestId:result.call.id,gaps,fileRequired,
+      instruction:"The saved final response leaves the listed explicit commitments unfulfilled. Complete only the missing work within the current authority and remaining budget. Scoped gaps apply to dueStepIds; pendingStepIds remain their own executors' responsibility. Use actual delegate and collect operations and consume the reports; text or repeated collection is not staffing. Reuse valid work already done. Do not reopen closed or unknown assignments. If fileRequired is true, propose the requested files using start_work; the original confirmation path still applies. If required details are missing, preserve your clarification question and explain the gap instead of inventing a project. If you cannot proceed, explain the exact blocker. This is the only completion feedback opportunity; final acceptance still requires verified evidence.",
+    }),{custom:"cothink-completion-feedback"});
+    Object.assign(feedback,{status:"completed",resultRequestId:corrected.call.id,requestIds:requests().map(call=>call.id)});
+    task.save();return corrected;
+  }catch(error){
+    const calls=requests();
+    feedback.status=calls.some(call=>["outcome_unknown","in_flight"].includes(call.status))?"outcome_unknown":"failed";
+    feedback.requestIds=calls.map(call=>call.id);
+    feedback.error={code:error.code??"COMPLETION_FEEDBACK",message:error.message};
+    task.save();throw error;
+  }
+}
+
+// This runs while the executor and its authority are still live. Collect and
+// accept already dispose real assignments; the strict extractor needs no
+// invented completed step or relaxed assignment status for these facts.
+export async function formalCompletionFeedback(task,leader,result,checker,source) {
+  await checker?.cover(source);
+  const reports=checker?.reports(source,"main")??[];
+  if(reports.length)return leader.prompt(JSON.stringify({
+    source:"Host-bound process reports for your direct reports",processReports:reports,
+    instruction:"Decide whether each current report requires correction, staffing, or no action. Preserve the reasons in your final response.",
+  }));
+  const root=task.rootOwner?.rootTask,requirements=root?.record.proposal?.collaboration??[];
+  if(!requirements.length||task.record.completionFeedback)return null;
+  const {projectChatState}=await import("./project.js");
+  const {state}=await projectChatState(task.home,root.record.proposal.canonicalRepo);
+  const current=state?.steps.find(step=>step.id===task.record.project.stepId);
+  if(current?.attempts.at(-1)?.taskId!==task.record.id)return null;
+  const sources=state.steps.flatMap(step=>{
+    if(step===current)return [{record:task.record,stepId:step.id,relation:"owned"}];
+    if(step.status!=="completed")return [];
+    const attempt=step.attempts.at(-1);
+    return [{record:readTask(task.home,attempt.taskId),stepId:step.id,
+      relation:attempt.rootTaskId===root.record.id?"owned":"inherited"}];
+  });
+  // Future scoped steps remain their own managers' responsibility. Global
+  // commitments count earlier steps instead of re-staffing every step.
+  const due=requirements.filter(requirement=>!requirement.stepIds||requirement.stepIds.includes(current.id));
+  return completionFeedback(task,leader,result,{requirements:due,
+    candidates:formalCollaborationCandidates(root,state,sources),formal:true,
+    pendingStepIds:state.steps.filter(step=>step!==current&&step.status!=="completed").map(step=>step.id)});
+}
+
 // Called at the answer and formal delivery boundaries. Runtime-specific
 // adapters supply only verified, processed and covered worker results.
 export function recordCollaborationResult(task,{requirements=userCollaboration(task.record),candidates=[]}={}) {
@@ -74,7 +174,8 @@ export function recordCollaborationResult(task,{requirements=userCollaboration(t
   const labels={required_workers:"经经理处理和过程检查的员工结果数量不足",distinct_models:"实际参与的不同型号数量不足",
     step_coverage:"部分指定步骤缺少协作证据",parallel_overlap:"缺少实际请求重叠证据"};
   const missing=[...new Set(results.flatMap(result=>result.missing))];
-  return missing.length?"协作承诺尚未履行。"+missing.map(gap=>labels[gap]).join("；")+"。":null;
+  return missing.length?"协作承诺尚未履行。"+missing.map(gap=>labels[gap]).join("；")+"。"+
+    (task.record.completionFeedback?.reason??""):null;
 }
 
 export function ownedPhysicalRequest(record,child,call) {

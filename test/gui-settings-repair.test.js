@@ -233,3 +233,13 @@ test("a missing project directory preserves builtin settings and permits a simpl
   assert.equal((await finished(c,result.taskId)).status,"completed");
   assert.equal(f.calls.length,1);
 });
+
+
+test("a frozen execution inspection uses its original image after live settings change",async t=>{
+  const home=temporaryHome(t),fixture=docker();
+  saveConfig(home,{...modelConfig,work:{...work,execution:{...work.execution,image:"sha256:"+"e".repeat(64)}}});
+  const result=await settings.inspectGuiExecution(home,{work,probe:true,runDocker:fixture.run});
+  assert.equal(result.probe.status,"passed");
+  assert.equal(result.configDigest,settings.guiExecutionConfigDigest(work));
+  assert.equal(fixture.calls.find(args=>args[2]==="image").at(-1),image);
+});

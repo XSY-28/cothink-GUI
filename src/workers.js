@@ -1,4 +1,5 @@
 import { formalProcessSource } from "./process-check.js";
+import { formalCompletionFeedback } from "./project-collaboration-evidence.js";
 import { createWorkChanges } from "./work-changes.js";
 import { createMemberControls } from "./work-member-controls.js";
 import { createPreviewTool, runVisualReview } from "./visual-preview.js";
@@ -1831,14 +1832,9 @@ export async function runWork({
         "UNFINISHED_MEMBERS",
         "成员未收尾；请collect、接纳、反馈或明确放弃。",
       );
-    await processCheck?.cover(processSource);
-    const closingReports = processCheck?.reports(processSource, "main") ?? [];
-    if (closingReports.length) {
-      result = await leader.prompt(JSON.stringify({
-        source: "Host-bound process reports for your direct reports",
-        processReports: closingReports,
-        instruction: "Decide whether each current report requires correction, staffing, or no action. Preserve the reasons in your final response.",
-      }));
+    const feedback=await formalCompletionFeedback(task,leader,result,processCheck,processSource);
+    if (feedback) {
+      result=feedback;
       continue;
     }
     for (const c of work.changes.filter(

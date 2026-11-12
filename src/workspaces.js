@@ -109,8 +109,7 @@ export function workspaceTools({
       if(!isAbsolute(path))break;
     }
     const nativeRel = relative(c.workspace, resolve(c.workspace, path));
-    // The kernel uses portable repository paths; native Windows absolute paths
-    // are accepted at the tool boundary, then normalized before scope checks.
+    // Normalize native Windows paths before portable kernel scope checks.
     const rel = nativeRel.replaceAll("\\", "/");
     if (
       isAbsolute(nativeRel) ||
@@ -186,6 +185,7 @@ export function workspaceTools({
     const trace = prior ?? {
       toolCallId: id,
       name: def.name,
+      ...(def.name==="bash"?{registeredAt:new Date().toISOString()}:{}),
       stageId: s.id,
       requestId: randomUUID(),
       status: "preparing",

@@ -19,6 +19,28 @@ export function publicModel(ref) {
 export const diagnostic = error => typeof error === "string" ? error :
   typeof error?.message === "string" ? error.message : null;
 
+export function requestProgress(call, live) {
+  const time = value => typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+  return {
+    live: !!live && ["preparing","in_flight"].includes(call.status),
+    startedAt: time(call.transport?.dispatchedAt ?? call.createdAt),
+    headersAt: time(call.transport?.headersAt),
+    lastDataAt: time(call.transport?.lastBodyAt),
+    endedAt: time(call.endedAt),
+  };
+}
+export function commandProgress(record,live) {
+  return (record.tools ?? []).filter(tool => tool.name === "bash" &&
+    record.stages.some(stage => stage.id === tool.stageId)).map(tool => ({
+    id: tool.toolCallId,
+    role: record.stages.find(stage => stage.id === tool.stageId).role,
+    status: tool.status,
+    submitted: !!tool.kernelInput,
+    registeredAt: typeof tool.registeredAt === "string" && Number.isFinite(Date.parse(tool.registeredAt)) ? tool.registeredAt : null,
+    live: !!live && record.status === "running" && ["running","preparing"].includes(tool.status),
+  }));
+}
+
 export function projectGuiProcessCheck(record, messages) {
   const saved = record.processCheck;
   if (!saved) return null;
@@ -44,6 +66,7 @@ export function projectGuiProcessCheck(record, messages) {
     return {
       id: observation.id,
       sequence: observation.sequence,
+      correctionOf: observation.correctionOf ?? null,
       kind: observation.kind,
       dueAt: observation.dueAt,
       observedAt: observation.observedAt,
@@ -55,6 +78,7 @@ export function projectGuiProcessCheck(record, messages) {
       requestStatus: call?.status ?? null,
       actualModel: call?.sent ? call.actualModel : null,
       usage: call?.usage ?? null,
+      progress: call?.progress ?? null,
       members,
       reports: verified ? (reports.get(observation.id) ?? []).filter(report =>
         observation.members?.some(member => member.taskId === report.taskId && member.memberId === report.memberId &&

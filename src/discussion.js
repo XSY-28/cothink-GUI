@@ -269,6 +269,7 @@ export async function runTurn({
       }
       const draftStage=task.beginPhase("draft","main",frozen.main);rt.bindTask(task,draftStage);draft=await rt.prompt(input,{inputMaterials:currentMaterials});
     }
+    if(draft&&unified)draft=await task.readonlyLifecycle.complete(draft,allowWork);
     const readonlyResult=await task.readonlyLifecycle?.close({finalCall:draft?.call});
     if(unified&&task.record.projectPreparationBlocked){
       task.finish("blocked","目录尚未准备为文件工作。请先完成本地准备，再明确继续原任务。");
@@ -300,9 +301,12 @@ export async function runTurn({
       task.record.finalCallId = draft.call.id;
       const collaborationGap=unified&&recordCollaborationResult(task,{candidates:readonlyResult?.candidates});
       if(readonlyResult?.unknown)task.finish("outcome_unknown",readonlyResult.gap);
+      else if(unified&&["DOCKER_MISSING","DOCKER_CONTEXT","REMOTE_ENDPOINT","DAEMON_UNAVAILABLE","IMAGE_UNAVAILABLE",
+        "EXECUTION_NOT_CONFIGURED","EXECUTION_CONFIG","EXECUTION_UNAVAILABLE","CONFIG_CHANGED","PROBE_FAILED","PROBE_CLEANUP"].includes(task.record.workPlanError?.code))
+        task.finish("blocked",task.record.workPlanError.message);
       else if(unified&&(task.record.turnIntent?.fileRequired||collaborationGap||readonlyResult?.gap))
         task.finish(task.requests().some(call=>call.text?.trim())?"partial":"failed",
-          [task.record.turnIntent?.fileRequired&&"未交付可核验的文件。",collaborationGap,readonlyResult?.gap,task.record.workPlanError?.message].filter(Boolean).join(" "));
+          [task.record.turnIntent?.fileRequired&&"未交付可核验的文件。",collaborationGap,readonlyResult?.gap,task.record.workPlanError?.message,!collaborationGap&&task.record.completionFeedback?.reason].filter(Boolean).join(" "));
       else if(unified&&task.record.workPlanError&&!draft.text?.trim())
         task.finish("failed",task.record.workPlanError.message);
       else task.finish("completed");

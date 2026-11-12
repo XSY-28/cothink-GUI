@@ -48,6 +48,12 @@ export function createRootOwner(task, { processCheckClock } = {}) {
   const ordinarySeat=requestSeats(task.record.frozenConfig?.work?.maxConcurrentRequests??2),checkSeat=requestSeats(1);
   const observations=new WeakMap();
   const owner={rootTask:task,processCheck,usage:()=>rootUsage(task.home,task.record),
+    snapshotFor(taskId){
+      const child=children.get(taskId);
+      if(task.record.status!=='running'||!child||child.rootOwner!==owner||child.record.status!=='running')return null;
+      if(child!==task&&(child.record.rootTaskId!==task.record.id||child.record.project?.commandId!==task.record.projectOperation?.commandId||!task.record.projectOperation?.childTaskIds.includes(taskId)))return null;
+      return {record:structuredClone(child.record),requests:child.requests()};
+    },
     executorCapabilities(){
       // Only live objects admitted by this owner count. Persisted/inherited IDs do not grant tools.
       const values=[];

@@ -279,3 +279,37 @@ test('a four-level read-only chain rejects a fifth level and returns through dir
  assert.equal(task.requests().find(call=>call.id===task.record.finalCallId).text,'The fourth-level evidence was verified.');
  assert.equal(f.calls.filter(call=>call.body.model==='r3').length,1);
 });
+
+for(const maxCalls of [12,3]) test(`readonly checker correction shares root budget ${maxCalls} and preserves original output`,async t=>{
+ let checks=0;
+ const f=await fixture(t,({body})=>{
+   if(JSON.stringify(body.messages).includes('cothink-process-observation'))
+     return {text:++checks===1?'{"issues":false}':'{"issues":[]}'};
+   if(body.model==='r2')return {text:'Independent evidence verified'};
+   const tools=body.messages.filter(message=>message.role==='tool');
+   if(!tools.length)return {toolCalls:[{name:'delegate',args:{workId:'checked',model:'fixture/r2',assignment:'Investigate',reason:'Separate evidence'}}]};
+   if(tools.length===1)return {toolCalls:[{name:'collect',args:{assignmentId:JSON.parse(tools[0].content).assignmentId}}]};
+   return {text:'Combined evidence verified'};
+ });
+ const task=await runProjectTurn({...opts(f),input:'Investigate together.',budget:{maxCalls}});
+ const [original,correction]=task.record.processCheck.observations;
+ assert.equal(original.status,'failed');
+ assert.equal(correction.correctionOf,original.id);
+ assert.equal(task.requests().find(row=>row.id===original.requestId).status,'completed');
+ assert.equal(task.record.rootRequests.filter(row=>!row.notSent).length,f.calls.length);
+ assert.equal(task.record.usage.calls,f.calls.length);
+ assert.ok(f.calls.length<=maxCalls);
+ if(maxCalls===3){
+   assert.notEqual(task.record.status,'completed');
+   assert.equal(checks,1);
+   assert.equal(task.record.processCheck.gap.code,'ROOT_BUDGET');
+ }else{
+   assert.equal(task.record.status,'completed',task.record.error);
+   assert.equal(correction.status,'completed');
+   const {projectGuiProcessCheck}=await import('../src/gui-process-projection.js');
+   const messages=task.requests().map(row=>({...row,taskId:task.record.id,sessionId:task.record.stages.find(stage=>stage.id===row.stageId)?.sessionId}));
+   const view=projectGuiProcessCheck(task.record,messages);
+   assert.equal(view.observations.find(row=>row.id===correction.id).correctionOf,original.id);
+   assert.ok(view.observations.some(row=>row.members.some(member=>member.covered)));
+ }
+});

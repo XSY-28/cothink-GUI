@@ -176,6 +176,8 @@ export async function executeConfirmed(task,source,reservation) {
       }
     }
     const collaborationGap=recordCollaborationResult(task,{requirements:p.collaboration??[],candidates:collaborationCandidates});
+    const completionBlockers=collaborationGap?[...new Set((delivery?.sources??[])
+      .map(({record})=>record.completionFeedback?.reason).filter(Boolean))]:[];
     task.save();
     if(task.signal.aborted){return task;}
     if(delivery&&result.state.status==='completed'&&!collaborationGap){
@@ -188,6 +190,6 @@ export async function executeConfirmed(task,source,reservation) {
         return task;
       }
     }
-    task.finish(result.state.status==='completed'&&!collaborationGap?'completed':result.state.steps.some(step=>step.status==='unknown')?'outcome_unknown':result.state.status==='paused'?'blocked':'partial',[result.state.error,collaborationGap].filter(Boolean).join(" ")||null);return task;
+    task.finish(result.state.status==='completed'&&!collaborationGap?'completed':result.state.steps.some(step=>step.status==='unknown')?'outcome_unknown':result.state.status==='paused'?'blocked':'partial',[result.state.error,collaborationGap,...completionBlockers].filter(Boolean).join(" ")||null);return task;
   }finally{try { await task.rootOwner.processCheck.close(); } finally { resolveSettled(); }}
 }

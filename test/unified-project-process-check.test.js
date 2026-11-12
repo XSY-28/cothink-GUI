@@ -216,3 +216,144 @@ test('a known observer service failure is reported and cannot satisfy process co
   assert.equal(observation.status,'failed');
   assert.equal(observation.covered,undefined);
 });
+
+for (const fenced of [false,true]) test(`checker accepts ${fenced?'one outer JSON fence':'plain JSON'} without a correction request`,async t=>{
+  const {base,source,observations}=await processGroup(t,{inspect:()=>({text:fenced?'```json\n{"issues":[]}\n```':'{"issues":[]}'})});
+  const root=await confirmProject(base,source);
+  assert.equal(root.record.status,'completed',root.record.error);
+  assert.equal(root.record.processCheck.observations.length,observations.length);
+  assert.ok(root.record.processCheck.observations.every(row=>row.status==='completed'&&!row.correctionOf));
+});
+
+test('a completed invalid checker response gets one bound correction with unchanged source facts and honest accounting',async t=>{
+  let invalid=false;
+  const {f,base,source}=await processGroup(t,{thinking:'high',inspect(snapshot){
+    if(!invalid&&snapshot.members.some(member=>member.evidenceIds.length)){
+      invalid=true;
+      return {text:JSON.stringify({issues:[{memberId:snapshot.members[0].memberId,kind:'blocker',
+        evidenceIds:['invented-evidence'],reason:'Unsupported claim'}]})};
+    }
+    return {text:'{"issues":[]}'};
+  }});
+  const root=await confirmProject(base,source);
+  assert.equal(root.record.status,'completed',root.record.error);
+  const observations=root.record.processCheck.observations;
+  const original=observations.find(row=>row.status==='failed');
+  const correction=observations.find(row=>row.correctionOf===original?.id);
+  assert.ok(original,'invalid semantic output remains a failed observation');
+  assert.ok(correction,'a separate correction observation is recorded');
+  assert.equal(correction.status,'completed');
+  assert.notEqual(correction.stageId,original.stageId);
+  assert.notEqual(correction.requestId,original.requestId);
+  assert.deepEqual(correction.members,original.members);
+  assert.deepEqual(correction.model,original.model);
+  assert.equal(correction.observedAt,original.observedAt);
+  assert.match(original.error,/outside this observation/);
+  const {readRequest,readTask,readRequests}=await import('../src/task.js');
+  const failedCall=readRequest(f.home,original.taskId,original.requestId);
+  const correctedCall=readRequest(f.home,correction.taskId,correction.requestId);
+  assert.equal(failedCall.status,'completed','transport completion is preserved');
+  assert.match(failedCall.text,/invented-evidence/);
+  assert.equal(correctedCall.status,'completed');
+  assert.deepEqual(correctedCall.actualModel,failedCall.actualModel);
+  const body=JSON.parse(correctedCall.context.messages.at(-1).content[0].text);
+  assert.equal(body.correction.requestId,failedCall.id);
+  assert.equal(body.correction.error,original.error);
+  assert.equal(correctedCall.projectSend.cause,'observe:'+correction.id);
+  const child=readTask(f.home,root.record.projectOperation.childTaskIds[0]);
+  const {coveringProcessCheck}=await import('../src/project-collaboration-evidence.js');
+  const workerCalls=readRequests(f.home,child).filter(call=>call.role==='member:'+child.members[0].memberId);
+  assert.equal(coveringProcessCheck(f.home,root.record,child,child.members[0],0,workerCalls),correction.requestId);
+  const physical=[...root.requests(),...readRequests(f.home,child)].filter(call=>call.sent);
+  assert.equal(physical.length,f.calls.length-1,'proposal is outside confirmed root');
+  assert.equal(root.record.rootRequests.filter(row=>!row.notSent).length,physical.length);
+  assert.equal(root.record.usage.calls,physical.length);
+  assert.equal(observations.filter(row=>row.correctionOf===original.id).length,1);
+  assert.equal(root.record.processCheck.reports.length,0,'spoofed issue cannot be forwarded');
+  assert.ok(f.calls.every(call=>call.body.reasoning_effort==='high'));
+  mkdirSync('work/long-task-reliability',{recursive:true});
+  writeFileSync('work/long-task-reliability/task-2-accounting.json',JSON.stringify({
+    observations,rootRequests:root.record.rootRequests,
+    requests:physical.map(({id,stageId,sessionId,status,usage,projectSend,payload})=>({id,stageId,sessionId,status,usage,projectSend,effort:payload.reasoning_effort})),
+    wire:f.calls.map(({body})=>({model:body.model,effort:body.reasoning_effort})),
+  },null,2));
+});
+
+for (const text of ['{"issues":[{"memberId":"spoofed","kind":"blocker","evidenceIds":["fake"],"reason":"bad"}]}',
+  'prose {"issues":[]}', '```json\n{"issues":[]}\n```\n{"issues":[]}'])
+test(`checker refuses a second invalid result without looping: ${text.slice(0,24)}`,async t=>{
+  const {base,source,observations}=await processGroup(t,{inspect:()=>({text})});
+  const root=await confirmProject(base,source);
+  assert.notEqual(root.record.status,'completed');
+  assert.equal(observations.length,2);
+  const [original,correction]=root.record.processCheck.observations;
+  assert.equal(correction.correctionOf,original.id);
+  assert.equal(original.status,'failed');assert.equal(correction.status,'failed');
+  assert.ok(original.error);assert.ok(correction.error);
+  assert.equal(root.record.processCheck.reports.length,0);
+  assert.equal(root.record.processCheck.gap.observationId,correction.id);
+});
+
+for(const limits of [{rootBudget:{maxCalls:6},code:'ROOT_BUDGET'},{projectBudget:5,code:'PROJECT_BUDGET'}])
+test(`checker correction respects ${limits.code} while retaining the completed invalid original`,async t=>{
+  const {f,base,source,observations}=await processGroup(t,{...limits,inspect:()=>({text:'{"issues":false}'})});
+  const root=await confirmProject(base,source);
+  assert.notEqual(root.record.status,'completed');
+  assert.equal(observations.length,1,'budget refusal sends no correction');
+  const [original,correction]=root.record.processCheck.observations;
+  assert.equal(original.status,'failed');assert.match(original.error,/issues list/);
+  assert.equal(correction.correctionOf,original.id);
+  assert.match(root.record.processCheck.gap.message,/call budget exhausted/i);
+  const {readRequest}=await import('../src/task.js');
+  assert.equal(readRequest(f.home,original.taskId,original.requestId).status,'completed');
+  assert.equal(readRequest(f.home,correction.taskId,correction.requestId).sent,false);
+});
+
+test('cancelling an in-flight correction keeps the original and unknown correction without another send',async t=>{
+  const arrived=Promise.withResolvers(),controller=new AbortController();
+  const {f,base,source,observations}=await processGroup(t,{inspect(snapshot,n){
+    if(n===1)return {text:'{"issues":false}'};
+    arrived.resolve();return null;
+  }});
+  const pending=confirmProject(base,source,{signal:controller.signal});
+  await Promise.race([arrived.promise,pending]);
+  controller.abort();
+  const root=await pending;
+  assert.equal(root.record.status,'cancelled');
+  assert.equal(observations.length,2);
+  const [original,correction]=root.record.processCheck.observations;
+  assert.equal(original.status,'failed');assert.equal(correction.status,'outcome_unknown');
+  assert.equal(correction.correctionOf,original.id);
+  const {readTask,readRequest}=await import('../src/task.js');
+  assert.equal(readTask(f.home,root.record.id).processCheck.observations.length,2);
+  assert.equal(readRequest(f.home,original.taskId,original.requestId).status,'completed');
+  assert.equal(readRequest(f.home,correction.taskId,correction.requestId).usage,null);
+});
+
+test('an output-limited checker response stays partial without a semantic correction',async t=>{
+  const {base,source,observations}=await processGroup(t,{inspect:()=>({text:'{"issues":',finish:'length'})});
+  const root=await confirmProject(base,source);
+  assert.notEqual(root.record.status,'completed');
+  assert.equal(observations.length,1);
+  assert.equal(root.record.processCheck.observations.length,1);
+  assert.equal(root.record.processCheck.observations[0].correctionOf,undefined);
+  assert.match(root.record.processCheck.gap.message,/partial/);
+});
+
+test('failed observation persistence never starts a correction',async t=>{
+  const {base,source,observations}=await processGroup(t,{inspect:()=>({text:'{"issues":false}'})});
+  let failed=false;
+  const root=await confirmProject(base,source,{onTaskCreated(task){
+    const save=task.save;
+    task.save=()=>{
+      if(!failed&&task.record.processCheck?.observations.some(row=>row.error)){
+        failed=true;throw new Error('Observation persistence unavailable');
+      }
+      return save();
+    };
+  }});
+  assert.equal(failed,true);
+  assert.notEqual(root.record.status,'completed');
+  assert.equal(observations.length,1);
+  assert.equal(root.record.processCheck.observations.length,1);
+});

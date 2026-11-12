@@ -33,7 +33,7 @@ test("HTTP completion respects direct collaboration requirements and leaves quot
     }
     assert.equal((await f.action("task.submit", args)).taskId, reply.taskId);
   }
-  assert.equal(f.calls.length, 8);
+  assert.equal(f.calls.length, 10, "each explicit unmet commitment receives one completion feedback");
   const conflict = "请组队完成这项分析。";
   const args = await prepareSubmit(f, { sessionId: session.id, input: conflict,
     submissionId: "collaboration-denied", constraints: { allowedSubtasks: [] } });
@@ -45,7 +45,7 @@ test("HTTP completion respects direct collaboration requirements and leaves quot
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /要求协作.*禁止派工/);
   assert.equal((await f.get(`/api/session?id=${session.id}`)).draft, conflict);
-  assert.equal(f.calls.length, 8);
+  assert.equal(f.calls.length, 10);
 });
 
 test("HTTP plan cannot promise concurrent execution of dependent steps", async t => {
@@ -88,7 +88,7 @@ test("HTTP confirmation keeps an unfulfilled sealed collaboration promise and it
     tool("write", { path: "a.txt", content: "ready\n" }),
     tool("accept_change"),
     { text: "The manager completed the file directly." },
-  ][n - 1]);
+  ][n - 1] ?? { text: "The file is saved, but I did not perform the promised collaboration." });
   await f.action("settings.work", { work: { execution } });
   const session = seedFixtureConversationRepository(repo.project,await fixtureConversation(t,f));
   const pending = await f.action("task.submit", await prepareSubmit(f, { sessionId: session.id, input: "Change a.txt", submissionId: "sealed-promise" }));
@@ -102,7 +102,7 @@ test("HTTP confirmation keeps an unfulfilled sealed collaboration promise and it
   assert.equal(files.items.length, 1);
   const file = await fetch(f.origin + "/api/file?" + new URLSearchParams({ ...files.items[0].ref, purpose: "download" }), { headers: f.headers });
   assert.equal(await file.text(), "ready\n");
-  assert.equal(f.calls.length, 6);
+  assert.equal(f.calls.length, 7);
   const child = readTask(f.home, readTask(f.home, root.taskId).projectOperation.childTaskIds[0]);
   assert.deepEqual(child.members, []);
   assert.ok(f.calls.every(call => call.body.model === "main"));

@@ -36,6 +36,7 @@ export function workCheckText(check) {
   if (check.verification !== "passed") return "未验证（空检查策略）";
   return check.reusedFrom ? "通过（复用既有检查）" : "通过";
 }
+export const correctionPolicyText = "每份已完整返回但不合规的检查报告，最多追加 1 次带反馈的模型请求；经理每次尝试最多收到 1 次补做提示，补做中的派工和工具续答按实际请求计入本轮及项目预算。未知、中断、取消或服务错误不自动重发。";
 export function finalText(record, requests, {localArtifacts=true, hostFooter=true,home}={}) {
   if(record.flow==="unified"&&record.proposal&&!record.projectOperation) {
     const proposal=record.proposal;
@@ -45,7 +46,9 @@ export function finalText(record, requests, {localArtifacts=true, hostFooter=tru
       `仓库根目录：${proposal.canonicalRepo}`,
       `固定版本：${proposal.version}`,
       ...(proposal.reuseCompletedDelivery?["沿用已完成交付，不发出新模型请求。"]:[]),
-      `确认后剩余请求数：${proposal.budgetAtProposal?.remainingCalls??"不设上限"}`,
+      `确认后本轮剩余请求数：${proposal.budgetAtProposal?.remainingCalls??"不设上限"}`,
+      `项目累计请求上限：${proposal.plan?.budget?.maxCalls??"不设上限"}（已用量按项目原记录核对，两项预算同时适用）`,
+      correctionPolicyText,
       `本轮约束：${JSON.stringify(proposal.constraints)}`,
       `冻结阵容：${JSON.stringify(record.models)}`,
       "",

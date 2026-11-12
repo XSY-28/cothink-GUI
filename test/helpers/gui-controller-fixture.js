@@ -63,7 +63,7 @@ export function seedFixtureConversationRepository(project,room) {
 export const controllerModule = await load("src/gui-controller.js").catch(
   () => ({}),
 );
-export async function controller(t, f, extra = {}) {
+export async function controller(t, f, extra = {}, options = {}) {
   assert.equal(
     typeof controllerModule.createGuiController,
     "function",
@@ -76,6 +76,7 @@ export async function controller(t, f, extra = {}) {
   const c = await controllerModule.createGuiController({
     home: f.home,
     cwd: f.cwd,
+    ...options,
   });
   t.after(() => c.close());
   return c;

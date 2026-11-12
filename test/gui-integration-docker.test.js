@@ -205,11 +205,13 @@ test("missing Docker isolated child refuses host Shell fallback", async (t) => {
 
   const a = await submitDraft(h, {
     sessionId: s.id,
-    input: "missing engine",
+    input: "missing engine", budget:{maxCalls:1},
     protocolVersion:1, submissionId: "missing",
   });
-  const proposal=await done(h,a.taskId),confirmed=await h.action("task.confirmWork",{sessionId:s.id,protocolVersion:1,submissionId:"missing-confirm",proposalRef:proposal.proposalRef});
-  const task=await done(h,confirmed.taskId);
+  const task=await done(h,a.taskId);
+  assert.equal(task.workPlanError.code,"DOCKER_MISSING");
+  assert.equal(task.proposalRef,undefined);
+  assert.equal(f.calls.length,1);
   assert.equal(existsSync(join(f.home, "HOST_FALLBACK_CANARY")), false);
   assert.notEqual(task.work?.finalCheck?.verification, "passed");
   assert.notEqual(task.status, "completed");

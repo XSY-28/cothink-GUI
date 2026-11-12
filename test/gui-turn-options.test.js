@@ -1,17 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixture } from "./helpers/pi-fixture.js";
-import { controller, fixtureConversation, fixtureWorkspace, finished, load, prepareSubmit, seedFixtureConversationRepository, submitDraft, teamId } from "./helpers/gui-controller-fixture.js";
+import { controller, controllerModule, fixtureConversation, fixtureWorkspace, finished, load, prepareSubmit, seedFixtureConversationRepository, submitDraft, teamId } from "./helpers/gui-controller-fixture.js";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { repository } from "./helpers/git-fixture.js";
 import { execution } from "./helpers/agent-sync-fixture.js";
 
 const { readTask } = await load("src/task.js");
 const { loadConfig } = await load("src/config.js");
+const { inspectGuiExecution } = await load("src/gui-settings.js");
 
 test('retired ordinary review drafts require explicit adoption and preserve no-delegation', async t => {
   const {editorTurnInput}=await load('src/gui-turn-options.js');
@@ -156,4 +157,154 @@ test("continuing a saved directory blocker checks execution and old network requ
   await assert.rejects(resume(),{code:"NETWORK_POLICY"});
   assert.equal((await c.session(session.id)).turns.length,1);
   assert.equal(f.calls.length,1);
+});
+
+// Keep inspection/config/probe policy real; control only the external Docker boundary.
+function admissionDocker({fail, onCommand = () => {}} = {}) {
+  return async args => {
+    await onCommand(args);
+    if(args[0]==="context")return JSON.stringify("unix:///fixture/docker.sock");
+    if(args[2]===fail)throw Error("controlled Docker boundary unavailable");
+    if(args[2]==="version")return "29.0.0";
+    if(args[2]==="image")return args.at(-1).split("@").at(-1);
+    if(args[2]==="container")return "exited 0";
+    return "";
+  };
+}
+
+for(const [fail,code] of [["version","DAEMON_UNAVAILABLE"],["image","IMAGE_UNAVAILABLE"]])
+  test(`unavailable ${fail} refuses explicit file submission and preserves its draft`,async t=>{
+    const f=await fixture(t);let unavailable=false;
+    const runDocker=admissionDocker({onCommand:args=>{
+      if(unavailable&&args[2]===fail)throw Error("Docker became unavailable after settings check");
+    }});
+    const c=await controller(t,f,{work:{execution}},{executionInspector:(home,options)=>inspectGuiExecution(home,{...options,runDocker})});
+    assert.equal((await c.action("settings.inspectExecution",{probe:true})).probe.status,"passed");
+    unavailable=true;
+    const session=await fixtureConversation(t,c),input="请创建 output.txt 文件。";
+    const args=await prepareSubmit(c,{sessionId:session.id,input});
+    await assert.rejects(c.action("task.submit",args),{code});
+    const saved=await c.session(session.id);
+    assert.equal(saved.editor.text,input);
+    assert.equal(saved.editor.editId,args.editorEditId);
+    assert.equal(saved.turns.length,0);
+    assert.equal(f.calls.length,0);
+    const chat=await submitDraft(c,{sessionId:session.id,input:"解释一下文件格式。"});
+    assert.equal((await finished(c,chat.taskId)).status,"completed");
+    assert.equal(f.calls.length,1);
+    const query={...args,submissionId:randomUUID(),editorEditId:randomUUID()};
+    await assert.rejects(c.action("task.submit",query,{receiptOnly:true}),{code:"GUI_INPUT_UPGRADE"});
+    assert.equal(f.calls.length,1);
+  });
+
+test("inferred file routes reject unavailable execution before preparing their conversation folder",async t=>{
+  const plan={goal:"Write result",scope:["result.txt"],deliverables:["result.txt"],checks:[{command:"node",args:["-e","process.exit(0)"]}]};
+  const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:"start_work",args:{action:"start",reason:"file delivery",plan}}]}:{text:"执行环境不可用，文件尚未生成。"});
+  const c=await controller(t,f,{work:{execution}},{executionInspector:(home,options)=>inspectGuiExecution(home,{...options,runDocker:admissionDocker({fail:"version"})})});
+  const session=await fixtureConversation(t,c),submitted=await submitDraft(c,{sessionId:session.id,input:"按讨论的方案做。"});
+  const result=await finished(c,submitted.taskId);
+  assert.equal(result.status,"blocked");
+  assert.match(result.error,/本机 Docker 未响应/);
+  assert.equal(existsSync(join(session.project,".git")),false);
+  assert.equal(readTask(f.home,result.id).workPlanError?.code,"DAEMON_UNAVAILABLE");
+  assert.ok(!result.proposalRef);
+  assert.equal(f.calls.length,2);
+});
+
+test("confirmation checks the frozen image and leaves an unavailable proposal unreserved",async t=>{
+  const plan={goal:"Write result",scope:["result.txt"],deliverables:["result.txt"],checks:[{command:"node",args:["-e","process.exit(0)"]}]};
+  const f=await fixture(t,()=>({toolCalls:[{name:"start_work",args:{action:"start",reason:"file delivery",plan}}]}));
+  let frozenImageMissing=false;
+  const runDocker=admissionDocker({onCommand:args=>{
+    if(frozenImageMissing&&args[2]==="image"&&args.at(-1)===execution.image)throw Error("frozen image removed");
+  }});
+  const c=await controller(t,f,{work:{execution}},{executionInspector:(home,options)=>inspectGuiExecution(home,{...options,runDocker})});
+  const session=await fixtureConversation(t,c),submitted=await submitDraft(c,{sessionId:session.id,input:"按讨论的方案做。"});
+  const proposed=await finished(c,submitted.taskId);
+  assert.ok(proposed.proposalRef,proposed.error);
+  const other={...execution,image:"sha256:"+"e".repeat(64)};
+  await c.action("settings.work",{work:{execution:other}});
+  await c.action("settings.inspectExecution",{probe:true});
+  frozenImageMissing=true;
+  await assert.rejects(c.action("task.confirmWork",{sessionId:session.id,submissionId:randomUUID(),proposalRef:proposed.proposalRef,protocolVersion:1}),{code:"IMAGE_UNAVAILABLE"});
+  assert.equal(readTask(f.home,submitted.taskId).confirmationIntent,undefined);
+  assert.equal(f.calls.length,1);
+});
+
+test("cancelled file admission keeps its saved editor and sends no model request",async t=>{
+  const f=await fixture(t);let entered,release;
+  const entering=new Promise(resolve=>{entered=resolve;}),finish=new Promise(resolve=>{release=resolve;});
+  const c=await controller(t,f,{work:{execution}},{executionInspector:(home,options)=>inspectGuiExecution(home,{...options,runDocker:admissionDocker({onCommand:async args=>{
+    if(args[2]==="version"){entered();await finish;}
+  }})})});
+  const session=await fixtureConversation(t,c),args=await prepareSubmit(c,{sessionId:session.id,input:"请创建 output.txt 文件。"});
+  const submitting=c.action("task.submit",args);
+  const cancelled=assert.rejects(submitting);
+  await entering;
+  const closing=c.close();release();
+  await Promise.all([closing,cancelled]);
+  const restored=await controllerModule.createGuiController({home:f.home,cwd:f.cwd});
+  t.after(()=>restored.close());
+  assert.equal((await restored.session(session.id)).editor.text,args.input);
+  assert.equal((await restored.session(session.id)).turns.length,0);
+  assert.equal(f.calls.length,0);
+});
+
+for(const first of ["settings","confirmation"])
+  test(`${first} inspection owns deferred cleanup while competing admission and shutdown wait`,async t=>{
+    const plan={goal:"Write result",scope:["result.txt"],deliverables:["result.txt"],checks:[{command:"node",args:["-e","process.exit(0)"]}]};
+    const f=await fixture(t,()=>({toolCalls:[{name:"start_work",args:{action:"start",reason:"file delivery",plan}}]}));
+    const entered=Promise.withResolvers(),release=Promise.withResolvers();
+    let armed=false,holding=false;
+    const c=await controller(t,f,{work:{execution}},{executionInspector:(home,options)=>inspectGuiExecution(home,{...options,runDocker:admissionDocker({fail:holding?"version":undefined,onCommand:async args=>{
+      if(armed&&args[2]==="rm"){
+        holding=true;entered.resolve();await release.promise;
+        throw Error("controlled cleanup interruption");
+      }
+    }})})});
+    const session=await fixtureConversation(t,c),submitArgs=await prepareSubmit(c,{sessionId:session.id,input:"按讨论的方案做。"});
+    const submitted=await c.action("task.submit",submitArgs);
+    const proposal=await finished(c,submitted.taskId),confirm=()=>c.action("task.confirmWork",{sessionId:session.id,submissionId:randomUUID(),proposalRef:proposal.proposalRef,protocolVersion:1});
+    assert.ok(proposal.proposalRef);
+    armed=true;
+    const inspection=first==="settings"?c.action("settings.inspectExecution",{probe:true}):confirm();
+    const inspected=inspection.catch(error=>error);
+    await entered.promise;
+    let closing,closed=false;
+    try {
+      assert.deepEqual(await c.action("task.submit",submitArgs),submitted,"saved receipts remain readable during inspection");
+      await assert.rejects(first==="settings"?confirm():c.action("settings.inspectExecution",{probe:true}),/当前任务或设置/);
+      closing=c.close().then(()=>{closed=true;});
+      await new Promise(resolve=>setImmediate(resolve));
+      assert.equal(closed,false,"owned probe cleanup must remain visible to shutdown");
+      assert.equal(c.shutdownState().settled,false);
+    } finally {
+      armed=false;release.resolve();
+      await inspected;
+      await (closing??c.close());
+    }
+    assert.equal(f.calls.length,1);
+    assert.equal(readTask(f.home,submitted.taskId).confirmationIntent,undefined);
+  });
+
+test("pending probe cleanup stays a typed blocked inferred route instead of completed prose",async t=>{
+  const plan={goal:"Write result",scope:["result.txt"],deliverables:["result.txt"],checks:[{command:"node",args:["-e","process.exit(0)"]}]};
+  const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:"start_work",args:{action:"start",reason:"file delivery",plan}}]}:{text:"清理尚未确认，文件没有执行。"});
+  let recovering=false,creates=0;
+  const c=await controller(t,f,{work:{execution}},{executionInspector:(home,options)=>inspectGuiExecution(home,{...options,runDocker:admissionDocker({onCommand:args=>{
+    if(args[2]==="create")creates++;
+    if(args[2]==="rm"&&!recovering)throw Error("controlled cleanup unavailable");
+  }})})});
+  const session=await fixtureConversation(t,c);
+  assert.equal((await c.action("settings.inspectExecution",{probe:true})).probe.code,"PROBE_CLEANUP");
+  try {
+    const submitted=await submitDraft(c,{sessionId:session.id,input:"按讨论的方案做。"});
+    const result=await finished(c,submitted.taskId);
+    assert.equal(result.status,"blocked");
+    assert.equal(result.workPlanError.code,"PROBE_CLEANUP");
+    assert.match(result.error,/清理尚未核实/);
+    assert.equal(result.proposalRef,undefined);
+    assert.equal(creates,1,"later admission must not create another probe before cleanup settles");
+    assert.equal(f.calls.length,2);
+  } finally { recovering=true;await c.close(); }
 });

@@ -40,7 +40,19 @@ const scopeText = paths => paths.length ? paths.join("、") : "无";
 const tokenText = usage => usage ? `输入 ${usage.input ?? "未知"} · 输出 ${usage.output ?? "未知"} tokens` : "用量未知";
 const positionId = person => person.staffId ?? person.workId;
 
-export function ActualExecution({task,checkShown = false}) {
+function RequestWait({call,now}) {
+  const progress=call.progress;
+  if (!progress) return null;
+  const elapsed=at=>at && now != null ? `${Math.max(0,Math.floor((now-Date.parse(at))/1000))} 秒` : null;
+  const timestamp=at=>new Date(at).toLocaleString();
+  const waiting=["in_flight","preparing"].includes(call.status);
+  return <p className="field-note">
+    {progress.live && waiting ? <>{call.sent ? "等待模型返回" : "等待发送"}{elapsed(progress.startedAt) && ` · 已等待 ${elapsed(progress.startedAt)}`}
+      {progress.lastDataAt ? ` · 最近收到数据 ${elapsed(progress.lastDataAt)} 前` : progress.headersAt ? " · 已收到响应头，尚未收到正文数据" : " · 尚未收到响应头或正文数据"}</> :
+      <>{waiting ? "保存快照，当前请求状态未确认" : processStatus(call.status)}{progress.lastDataAt ? ` · 最近收到数据 ${timestamp(progress.lastDataAt)}` : " · 未记录收到正文数据"}</>}
+  </p>;
+}
+export function ActualExecution({task,checkShown = false,now}) {
   const participants = task.participants.filter(participant => !checkShown || participant.position !== "process-check");
   const callsByRole = Map.groupBy(task.messages, message => message.role);
   const staffById = new Map(participants.map(person => [person.id,positionId(person) ?? person.id]));
@@ -75,6 +87,7 @@ export function ActualExecution({task,checkShown = false}) {
           {!calls.length && <p>尚无该岗位的请求记录。</p>}
           {calls.map(call => <details key={call.id}>
             <summary>{requestPhase(call.phase)} · {processStatus(call.status)} · {call.actualModel ? modelName(call.actualModel) : call.sent ? "实际模型未记录" : "尚未发送"}</summary>
+            <RequestWait call={call} now={now}/>
             <p className="source-ref">请求 {call.id}{call.sessionId && ` · 会话 ${call.sessionId}`}</p>
             <p>{tokenText(call.usage)}{call.maxOutputTokens != null && ` · 输出上限 ${call.maxOutputTokens} tokens`}</p>
             {call.error && <p className="error-text">{call.error}</p>}
@@ -83,6 +96,12 @@ export function ActualExecution({task,checkShown = false}) {
         </details>;
       })}
     </section>}
+    {!!task.commands?.length && <details><summary>命令回执 · {task.commands.length} 条</summary>
+      {task.commands.map(command=><p key={command.id}>{command.role} · 命令 {command.id} · {["running","preparing"].includes(command.status) ? command.live ? "等待命令回执" : "保存快照，当前状态未确认，核对原回执，不自动重发" : processStatus(command.status)}
+        {command.live && ["running","preparing"].includes(command.status) && (command.submitted ? " · 执行请求已登记，命令尚未返回；启动及进度未确认" : " · 等待执行准入，尚未提交命令")}
+        {command.live && command.registeredAt && now != null ? ` · 距宿主登记 ${Math.max(0,Math.floor((now-Date.parse(command.registeredAt))/1000))} 秒` : command.registeredAt ? ` · 宿主登记 ${new Date(command.registeredAt).toLocaleString()}` : " · 宿主登记时间未记录"}
+        {["unknown","outcome_unknown"].includes(command.status) && " · 结果未知，核对原回执，不自动重发"}</p>)}
+    </details>}
     {!!task.skillReads?.length && <details>
       <summary>已读取技能 · {task.skillReads.length} 条</summary>
       {task.skillReads.map((skill, i) => <p key={`${skill.stageId}:${i}`}>
@@ -94,7 +113,7 @@ export function ActualExecution({task,checkShown = false}) {
   </>;
 }
 
-export function ProcessChecks({task}) {
+export function ProcessChecks({task,now}) {
   const check = task.processCheck;
   if (!check) return null;
   const participants = new Map([task,...(task.executionTasks ?? [])].flatMap(source =>
@@ -111,6 +130,7 @@ export function ProcessChecks({task}) {
         {observation.delayMs != null && `延迟 ${observation.delayMs / 1000} 秒 · `}
         {!!observation.missedIntervals && `跳过 ${observation.missedIntervals} 个间隔 · `}{tokenText(observation.usage)}</p>
       {observation.requestId && <p className="source-ref">请求 {observation.requestId} · {modelName(observation.actualModel)}</p>}
+      {observation.progress && <RequestWait call={{progress:observation.progress,status:observation.requestStatus,sent:!!observation.actualModel}} now={now}/>}
       {observation.error && <p className="error-text">{observation.error}</p>}
       {observation.members.map(member => <p key={`${member.taskId}:${member.memberId}:${member.attempt}`}>
         {name(member.taskId,member.memberId)} · {statusLabel(member.status)} · {member.covered ? "已覆盖" : "未覆盖"}

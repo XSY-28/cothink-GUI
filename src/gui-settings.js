@@ -353,8 +353,8 @@ export function guiExecutionConfigDigest(work) {
 }
 
 /** Read-only diagnostics unless the caller explicitly requests the fixed local container. */
-export async function inspectGuiExecution(home, {probe = false, runDocker = runLocalDocker, onCleanupPending} = {}) {
-  const work = loadConfig(home)?.work, execution = work?.execution;
+export async function inspectGuiExecution(home, {probe = false, runDocker = runLocalDocker, onCleanupPending, work: frozenWork} = {}) {
+  const work = frozenWork ?? loadConfig(home)?.work, execution = work?.execution;
   const configDigest = guiExecutionConfigDigest(work);
   const result = {checkedAt:new Date().toISOString(),configDigest,
     diagnostic:null,probe:{status:"not_run"}};
@@ -399,7 +399,7 @@ export async function inspectGuiExecution(home, {probe = false, runDocker = runL
   }
   diagnostic("passed","LOCAL_IMAGE_FOUND","本机 Docker 已响应，固定镜像已存在。",facts);
   if (!probe) return result;
-  if (guiExecutionConfigDigest(loadConfig(home)?.work) !== configDigest) {
+  if (!frozenWork && guiExecutionConfigDigest(loadConfig(home)?.work) !== configDigest) {
     result.probe = {status:"not_run",code:"CONFIG_CHANGED",message:"执行配置已改变，请重新检查。"};
     return result;
   }

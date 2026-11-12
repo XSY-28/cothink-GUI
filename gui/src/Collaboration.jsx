@@ -86,15 +86,17 @@ export function Collaboration({
             · {elapsedLabel(task, now)}
           </div>
           {task.actualRoles && task.budget && <p className="field-note">{task.projectOperation ? "执行" : "本轮"}请求上限 {task.budget.maxCalls ?? "不限"}{task.budget.maxCost != null && ` · 费用上限 ${task.budget.maxCost}`}</p>}
+          {task.projectOperation && task.proposal?.plan?.budget?.maxCalls != null && <p className="field-note">项目累计请求上限 {task.proposal.plan.budget.maxCalls} · 按项目原记录累计，本轮上限同时适用。</p>}
+          {task.correctionPolicy && <details><summary>请求与纠错政策</summary><p>{task.correctionPolicy}</p></details>}
           {task.executionError&&<p role="alert" className="error-text">{task.executionError}</p>}
           {!!task.activities?.length&&<details><summary>本轮工具与拒绝记录</summary>{task.activities.map(activity=><section key={activity.toolCallId}><strong>{activity.action} · {statusLabel(activity.status)}</strong><Markdown text={activity.text??''}/></section>)}</details>}
           {task.workPlanError&&!task.activities?.some(activity=>activity.toolCallId===task.workPlanError.toolCallId)&&<p className="error-text">文件计划未获准：{task.workPlanError.message}</p>}
-          <ProcessChecks task={task}/>
-          {task.actualRoles && <ActualExecution task={task} checkShown={!!task.processCheck}/>}
+          <ProcessChecks task={task} now={now}/>
+          {task.actualRoles && <ActualExecution task={task} now={now} checkShown={!!task.processCheck}/>}
           {task.executionTasks?.map(source=><details key={source.id}><summary>{source.stepId} · {source.relation==='inherited'?'沿用已有交付':'本轮实际执行'} · {statusLabel(source.status)}</summary>
             <p>来源任务 {source.id} · 已发 {source.usage?.calls??'未知'} 次请求</p>
             {source.error&&<p className="error-text">{source.error}</p>}
-            {source.actualRoles ? <ActualExecution task={source} checkShown={!!task.processCheck}/> :
+            {source.actualRoles ? <ActualExecution task={source} now={now} checkShown={!!task.processCheck}/> :
               source.messages.map(message=><div key={message.id}><p>{message.role} · {modelName(message.model)}</p><Markdown text={message.text??''}/></div>)}
             {source.work&&<Checks work={source.work} taskId={source.id} commands={commands}/>}</details>)}
           {task.workRequest && <details className="field-note"><summary>制作HTML/SVG · 本条冻结技能</summary>{task.answerSkills?.map(s=><p key={s.hash}>{s.name}<br/><code>{s.hash}</code></p>)}</details>}

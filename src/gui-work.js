@@ -8,7 +8,8 @@ import { createVersioning } from "./versioning.js";
 import { taskOutputRefs } from "./gui-projection.js";
 import { inspectGuiPreparation, inspectGuiGitChanges, protectedGuiProjectPath } from "./gui-project-preparation.js";
 import { workspaceError, workspaceForProject } from "./gui-workspace-state.js";
-import { conversationFolderName } from "./conversation.js";
+import { guiExecutionConfigDigest } from "./gui-settings.js";
+import { conversationFolderName, readManagedDirectory } from "./conversation.js";
 import { git } from "../packages/agent-sync/src/git.js";
 const exec = promisify(execFile);
 export function inspectGuiDirectory(path) {
@@ -202,7 +203,7 @@ export async function requireFileWork(home, path, expectedIdentity) {
   return inspected;
 }
 
-export async function requireGuiFileTask(home, workspace, work) {
+export async function requireGuiFileTask(home, workspace, work, inspect, signal) {
   const {project}=workspace;
   if (!project) throw workspaceError("PROJECT_NOT_PREPARED", "此对话尚未关联项目目录，文件任务未发送。");
   try {
@@ -212,6 +213,7 @@ export async function requireGuiFileTask(home, workspace, work) {
     throw workspaceError(error.code, `此旧对话的文件夹不能用于文件工作。请在 Team 中新建对话。未发送模型请求。`);
   }
   if(!work?.execution)throw workspaceError("PROJECT_EXECUTION_REQUIRED","请在设置中配置项目执行环境后再发送文件任务。");
+  await requireGuiExecution(work,inspect,signal);
 }
 
 export async function inspectGuiProject(home, path, work = {}, { includeChanges = true } = {}) {
@@ -366,3 +368,44 @@ export async function revealGuiTask(home, record) {
 }
 
 export { readVisualFrame as guiArtifact } from "./visual-project-delivery.js";
+
+export function directoryIdentity(path) {
+  try {const s=statSync(path,{bigint:true});return [String(s.dev),String(s.ino)];}
+  catch {return null;}
+}
+
+export function conversationDirectoryAvailable(manager,path,directory) {
+  const expected=readManagedDirectory(manager);
+  return savedDirectoryAvailable(path,directory) &&
+    (!expected||JSON.stringify(directoryIdentity(path))===JSON.stringify(expected));
+}
+
+export async function requireGuiExecution(work,inspect,signal) {
+  signal?.throwIfAborted();
+  const result=await inspect({probe:true,work});
+  signal?.throwIfAborted();
+  if(result.configDigest!==guiExecutionConfigDigest(work))
+    throw workspaceError("CONFIG_CHANGED","执行配置与检查结果不一致，请重新检查后再发送。");
+  const failure=result.diagnostic?.status!=="passed"?result.diagnostic:result.probe?.status!=="passed"?result.probe:null;
+  if(failure||!result.diagnostic||!result.probe)
+    throw workspaceError(failure?.code??"EXECUTION_UNAVAILABLE",failure?.message??"执行环境尚未通过检查，文件任务未发送。");
+  return result;
+}
+
+export async function beforeGuiFileWork(home,workspace,work,inspect,{prepare=false,signal}={}) {
+  const status=await inspectConversationFileWork(home,workspace);
+  if(work?.execution)await requireGuiExecution(work,inspect,signal);
+  signal?.throwIfAborted();
+  return prepare?requireConversationFileWork(home,workspace):status;
+}
+
+export function requireTeamFolder(home,path) {
+  const directory=inspectTeamFolder(home,path);
+  if (!directory.directoryAvailable) throw workspaceError("WORKSPACE_UNAVAILABLE",directory.reason);
+  return directory.canonicalPath;
+}
+
+export async function savedProjectAvailable(home,manager,path,work) {
+  const project = await inspectGuiProject(home,path,work,{includeChanges:false});
+  return project.executionReady && conversationDirectoryAvailable(manager,path,project);
+}
