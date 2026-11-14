@@ -1,3 +1,4 @@
+import {continuationObservations,continuationToolHistory} from './project-completed-continuation.js';
 import {required,allReviewTargets,preserveReviewRequest,workDefinitions,stepPaths,projectSelections,compileProjectPlan} from './project-plan.js';
 export {preserveReviewRequest,projectReviewPlan} from './project-plan.js';
 import {recheckFileContinuation} from "./project-file-confirmation.js";
@@ -418,7 +419,7 @@ function nextConfig(home, step, frozen) {
   cfg.work = { ...cfg.work, checks: step.checks };
   return validateConfig(cfg);
 }
-function snapshot(s, step, attempt, home) {
+async function snapshot(s, step, attempt, home, versioning) {
   const source=attempt.continuation?.draft?.taskId&&step.id===attempt.continuation.stepId?
     readTask(home,attempt.continuation.draft.taskId):null;
   const reports=new Map();
@@ -433,19 +434,10 @@ function snapshot(s, step, attempt, home) {
   return {
     ...(source?{continuationEvidence:{sourceTaskId:source.id,originalError:source.error,
       workerReports:[...reports.values()],
+      observations:await continuationObservations(versioning,source,attempt.continuation.draft,step.checks,home,attempt.execution),
       workRequests:source.work?.requests??[],acceptance:source.work?.acceptance??[],
-      members:source.members??[],tools:(source.tools??[]).map(({snapshot,tools,kernelInput,...tool})=>({
-        ...tool,
-        // Runtime sources and tool registrations already belong to the frozen
-        // runtime. Restored files are read from their public version, not copied
-        // into a new prompt as internal snapshots or edit payloads.
-        ...(kernelInput?.command?{command:kernelInput.command,args:kernelInput.args??[]}:{}),
-        ...(tool.name==='resource_exec'&&tool.result?{result:{...tool.result,
-          files:Object.keys(tool.result.files??{}),
-          edits:(tool.result.edits??[]).map(({contentBase64,...edit})=>edit),
-        }}:{}),
-      })),
-      instruction:'The saved draft is already restored. Complete remaining work. workerReports contain the latest collected report per work/model, with verified execution and process-check receipts, not verified semantic correctness. Reuse unaffected completed contributions instead of replacing workers solely because this is a continuation; retain each report’s scope, version and read-only limits. Recheck changed content, current fixed checks and any required version-bound candidate review. Unconfirmed old outputs are not adopted.'}}:{}),
+      members:source.members??[],tools:continuationToolHistory(source),
+      instruction:'Continue remaining work, not the whole task. workerReports are collected reports with verified execution/check receipts, not semantic approval. Reuse unaffected work; do not redelegate solely because this is a continuation. observations lists successful source-preserving commands on identical candidate bytes, checks and environment. Consult their output references before repeating optional tests; repeat only for changed inputs/conditions, time-sensitive state, missing evidence or a specific unresolved question. Re-evaluate after any edit. Never treat old commands as current fixed-check, visual or independent-review acceptance; those requirements remain mandatory. Failed, unknown and invalidated observations are not passes.'}}:{}),
     id: s.id,
     projectId: s.id,
     taskId: attempt.taskId,
@@ -793,7 +785,7 @@ async function launchStep(host, signal, uiContext, s, step) {
   if (attempt.frozenConfig) config = structuredClone(attempt.frozenConfig);
   if (attempt.execution) config.work.execution = attempt.execution;
   config.work.projectPluginRuntime = attempt.projectPluginRuntime ?? undefined;
-  const binding = snapshot(active,job,attempt,home), staff = createProjectStaff(host);
+  const binding = await snapshot(active,job,attempt,home,host.kernel), staff = createProjectStaff(host);
   const projectPolicy = createProjectPolicy({host,binding,staff,home}), controller = new AbortController();
   const ready = Promise.withResolvers(), observer = {};
   if (host.acquireRequestSeat) Object.assign(projectPolicy,{

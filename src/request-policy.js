@@ -343,6 +343,11 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
               call.endedAt = new Date().toISOString();
               task.writeRequest(call);
               task.save();
+              if(call.transport.firstSseError?.error?.code==='credit_balance_exhausted'&&task.rootOwner){
+                const root=task.rootOwner.rootTask;
+                root.record.providerCreditStop={requestId:call.id,taskId:task.record.id,code:'credit_balance_exhausted'};root.save();
+                void task.rootOwner.stopAndDrain({cause:'provider-credit-exhausted'}).catch(error=>{root.record.localExecutionCloseError=error.message;root.save();});
+              }
             }
             output.push(event);
           }

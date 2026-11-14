@@ -3,7 +3,7 @@ import {restorationPaths} from './work-changes.js';
 import {inspectRepairVerification,inspectUnspentRepair} from './project-route.js';
 import {isDeepStrictEqual} from 'node:util';
 import {readTask,readRequest,problem} from './task.js';
-import {projectScopesOverlap,inScope} from './versioning.js';
+import {createVersioning,projectScopesOverlap,inScope} from './versioning.js';
 import {continuationLineage,confirmedContinuation,continuedTask} from './project-continuation.js';
 
 export function completedContinuationCovers(state,currentTaskId,proofs,{taskId,requestId}) {
@@ -197,4 +197,61 @@ export async function bindContinuationRoute({home,host,binding,change,versioning
     delete active.judgmentCall;
     return structuredClone(active);
   });
+}
+
+/** Observations only: never authorizes skipping a current fixed check or review. */
+export async function continuationObservations(versioning,source,draft,checks,home,execution) {
+  const owned=!versioning;
+  versioning??=await createVersioning({home,project:source.work.root,readOnly:true,execution});
+  try {
+  const result={candidate:draft.version,commands:[],invalidated:[],fixedChecksRequired:true};
+  const current=await versioning.inspect();
+  const environment=({workContainers,checkContainers,...config}={})=>config;
+  const conditions=!!draft.baseVersion&&current.version===draft.baseVersion&&isDeepStrictEqual(source.project?.checks,checks)&&
+    source.work?.execution?.network==='none'&&isDeepStrictEqual(environment(source.work.execution),environment(current.execution));
+  for(const tool of source.tools??[]) {
+    if(tool.name!=='bash'||!tool.requestId)continue;
+    const reject=reason=>result.invalidated.push({requestId:tool.requestId,reason});
+    if(!conditions){reject('checks_or_environment_changed');continue;}
+    if(tool.status!=='completed'||tool.kernelDispatched!==true||tool.exitCode!==0||
+      !tool.kernelInput?.expectedVersion||typeof tool.kernelInput.command!=='string'){
+      reject('not_a_completed_observation');continue;
+    }
+    try {
+      const start=source.work.operations?.find(op=>op.action==='command_start'&&op.requestId===tool.requestId);
+      const owner=source.work.changes?.find(c=>c.changeId===start?.changeId);
+      if(!owner||owner.changeId!==draft.changeId){reject('command_source_unbound');continue;}
+      const change=await versioning.inspect({changeId:owner.changeId});
+      if(change.actor!==owner.actor||change.privateVersion!==draft.version){reject('command_source_changed');continue;}
+      const receipt=await versioning.inspect({requestId:tool.requestId});
+      if(receipt.status!=='completed'||receipt.requestId!==tool.requestId||receipt.exitCode!==0||
+        !receipt.privateVersion||!Array.isArray(receipt.changedFiles)||receipt.changedFiles.length){
+        reject('receipt_not_successful_or_changed_source');continue;
+      }
+      const before=await versioning.inspect({fromVersion:tool.kernelInput.expectedVersion,toVersion:receipt.privateVersion});
+      const restored=await versioning.inspect({fromVersion:receipt.privateVersion,toVersion:draft.version});
+      if(!Array.isArray(before.files)||before.files.length||!Array.isArray(restored.files)||restored.files.length){
+        reject('candidate_changed');continue;
+      }
+      result.commands.push({requestId:tool.requestId,recordedCommand:tool.kernelInput.command,
+        observedVersion:receipt.privateVersion,candidate:draft.version,outputRef:receipt.outputRef,
+        exitCode:0,checks:structuredClone(checks),execution:structuredClone(environment(current.execution))});
+    } catch {reject('evidence_unavailable');}
+  }
+  return result;
+  } finally {if(owned)await versioning.close();}
+}
+
+export function continuationToolHistory(source) {
+  return (source.tools??[]).map(({snapshot,tools,kernelInput,...tool})=>({
+        ...tool,
+        // Runtime sources and tool registrations already belong to the frozen
+        // runtime. Restored files are read from their public version, not copied
+        // into a new prompt as internal snapshots or edit payloads.
+        ...(kernelInput?.command?{command:kernelInput.command,args:kernelInput.args??[]}:{}),
+        ...(tool.name==='resource_exec'&&tool.result?{result:{...tool.result,
+          files:Object.keys(tool.result.files??{}),
+          edits:(tool.result.edits??[]).map(({contentBase64,...edit})=>edit),
+        }}:{}),
+      }));
 }

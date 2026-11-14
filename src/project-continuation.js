@@ -90,7 +90,7 @@ async function savedInput(state,step,record,v,version,changeId) {
 export async function inspectFileContinuation({home,sourceRootTaskId,draft}) {
   const source=readTask(home,sourceRootTaskId),blockers=[];
   const add=(code,sourceId,message)=>blockers.push({code,sourceId,message});
-  const result={eligible:false,blockers,requestIds:[],stepId:null,draft:null,projectId:null,revision:null,formalVersion:null};
+  const result={eligible:false,requiresManual:!!source.providerCreditStop,creditExhausted:!!source.providerCreditStop,blockers,requestIds:[],stepId:null,draft:null,projectId:null,revision:null,formalVersion:null};
   if(source.flow!=='unified'||!source.projectOperation||!source.proposal?.canonicalRepo) {
     add('CONTINUATION_SOURCE',source.id,'原任务没有可核对的项目执行来源');return result;
   }
@@ -183,7 +183,7 @@ export async function inspectFileContinuation({home,sourceRootTaskId,draft}) {
         const recovered=await recoverContinuationRoute({home,state,source,step:chosen.step,versioning:v,formalVersion:formal.version,draft:chosen.ref});
         const route=recovered??chosen.step.route;
         if(recovered)result.recoveredRoute=recovered;
-        result.requiresManual=result.inputOnly||!!recovered?.scopeRestoration||!!recovered?.inputOnlyFailure||!!route&&route.status!=='resolved';
+        result.requiresManual=result.requiresManual||result.inputOnly||!!recovered?.scopeRestoration||!!recovered?.inputOnlyFailure||!!route&&route.status!=='resolved';
         const verification=route?.status==='repair'?await inspectRepairVerification({versioning:v,route,step:chosen.step,
           record:readTask(home,route.taskId),draft:chosen.ref}):null;
         const unspent=route?.status==='repair'&&await inspectUnspentRepair({home,versioning:v,route,step:chosen.step,record:readTask(home,route.taskId),draft:chosen.ref});
