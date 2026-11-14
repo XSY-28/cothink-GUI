@@ -1,60 +1,14 @@
-import { createHash, randomUUID } from "node:crypto";
+import {continuedTask} from "./project-continuation.js";
+import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
-import { inScope, projectScopesOverlap, assertProjectPathSpellings } from "./versioning.js";
+import { inScope, projectScopesOverlap } from "./versioning.js";
 import { workModelIdentity } from "./workers.js";
 import { problem } from "./task.js";
 import { assertProjectReview, readReviewCandidate, completeProjectReview } from "./project-review.js";
-import { actions, active, ancestry, assignments, changeProjectStaff, fail, maxDepth, position, requireText, scopeList, supervisors, taskStep } from "./project-staff-topology.js";
+import { registerSubwork, completedHandoff, canonical, sameMaterials, authorizedPosition, worksOf, actions, active, ancestry, assignments, changeProjectStaff, fail, maxDepth, needs, position, requireText, scopeList, supervisors, taskStep } from "./project-staff-topology.js";
 export { changeProjectStaff } from "./project-staff-topology.js";
 
-function authorizedPosition(state, { staffId, actor, model, taskId }) {
-  const row = position(state, staffId);
-  if (!active(row) || row.supervisorId !== actor)
-    fail("Position unavailable or outside this supervisor's authority: " + staffId);
-  const chain = supervisors(state, actor, taskId);
-  if ((row.models.length && !row.models.includes(model)) || chain.some((lead) => !lead.models.includes(model)))
-    fail("Model is outside the allowed roster: " + model);
-  return row;
-}
-function worksOf(step) {
-  const planned = step?.works ?? (step?.deliverables ?? step?.scope ?? []).map((path) => ({
-    id: step.id + ":" + path, scope: [path],
-  }));
-  return [...planned, ...(step?.subworks ?? [])];
-}
 const overlap = (a, b) => a.some((path) => inScope(path, b)) || b.some((path) => inScope(path, a));
-const canonical = (paths) => [...new Set(paths ?? [])].sort();
-function registerSubwork(state, taskId, actor, input) {
-  const step = taskStep(state, taskId);
-  if (state.paused || state.status === "paused" || !step || step.attempts.at(-1)?.taskId !== taskId)
-    fail("Registration needs a current project step.");
-  const manager = actor === "root" ? null : supervisors(state, actor, taskId)[0];
-  const scope = canonical(scopeList(input.scope, manager?.scope ?? step.scope, "subwork scope"));
-  if (!scope.length) fail("Subwork needs a nonempty, bounded delivery scope.");
-  scopeList(scope, step.scope, "step scope");
-  const boundary = scope.filter((p) => !scope.some((other) => other !== p && inScope(p, [other])));
-  const historical = [
-    ...state.steps.flatMap((s) => [...(s.scope ?? []), ...worksOf(s).flatMap((w) => w.scope)]),
-    ...state.staff.flatMap((p) => [...(p.scope ?? []), ...(p.readScope ?? [])]),
-    ...assignments(state).flatMap((a) => [...(a.scope ?? []), ...(a.readScope ?? [])]),
-  ];
-  assertProjectPathSpellings([...historical, ...boundary]);
-  const matches = worksOf(step).filter((w) => projectScopesOverlap(w.scope, boundary));
-  const exact = matches.find((w) => JSON.stringify(canonical(w.scope)) === JSON.stringify(boundary));
-  if (exact) return exact;
-  if (matches.some((w) => !boundary.every((p) => inScope(p, w.scope)) || w.effect || w.independentReview || w.parentWorkId) ||
-      matches.length > 1 || step.independentReview)
-    fail("Subwork must be disjoint from siblings and preserve the original frozen checks and effects.");
-  if (assignments(state).some((a) => a.outcome !== "not_sent" && !a.readOnly && projectScopesOverlap(a.scope ?? [], boundary)) ||
-    (state.rootWorkClaims ?? []).some((c) => projectScopesOverlap(c.scope, boundary)))
-    fail("This boundary already belongs to a claimed work.");
-  const hash = createHash("sha256").update(JSON.stringify(boundary)).digest("hex");
-  const work = {id: step.id + ":sub:" + hash, scope: boundary,
-    ...(matches[0] ? {parentWorkId: matches[0].id} : {})};
-  if (worksOf(step).some((w) => w.id === work.id)) fail("Registered work ID collision.");
-  (step.subworks ??= []).push(work);
-  return work;
-}
 function leafMatches(works, scope) {
   return works.filter((w) => overlap(w.scope, scope) &&
     !works.some((child) => child.parentWorkId === w.id && overlap(child.scope, scope)));
@@ -88,7 +42,7 @@ function selectWork(state, input, row) {
     fail("Select the registered subwork for that delivery boundary.");
   if (!work || (!input.readOnly && (!area.length || !area.every((path) => inScope(path, work.scope)))))
     fail("Select a registered work ID and a write scope within that work. Available: " +
-      works.map((w) => w.id).join(", "));
+      works.map((w) => w.id + " " + JSON.stringify(w.scope)).join(", "));
   if (input.readOnly)
     return {workId: JSON.stringify(["inspect", step.id, work.id]), targetWorkId: work.id};
   return {workId: work.id, ...(work.effect ? {effect: work.effect} : {})};
@@ -134,12 +88,7 @@ function collision(state, a, input) {
   if (before?.length && after?.length) return projectScopesOverlap(before, after);
   return true;
 }
-function sameMaterials(a, b) {
-  return ["staffId", "actor", "actorRole", "supervisorMemberId", "model", "identity", "assignment", "implementationAdvice",
-    "readOnly", "reviewOf", "reviewKind"].every((key) => (a[key] ?? null) === (b[key] ?? null)) &&
-    ["scope", "readScope", "dependsOn"].every((key) => JSON.stringify(canonical(a[key])) === JSON.stringify(canonical(b[key])));
-}
-function admitAssignment(state, input, previous) {
+function admitAssignment(state, input, previous, proofs) {
   const { staffId, actor, identity, model, taskId } = input;
   for (const [name, val] of Object.entries({staffId, actor, identity, model, taskId})) requireText(val, name);
   if (state.paused || state.status === "paused") fail("Project is paused.");
@@ -150,33 +99,33 @@ function admitAssignment(state, input, previous) {
   scopeList(input.scope ?? [], row.scope, "write scope");
   scopeList(input.readScope ?? [], row.readScope, "read scope");
   if(state.entryPolicy==="unified")scopeList(input.readScope??[],state.readScope,"root read scope");
-  const held = assignments(state).find((a) => a !== previous && a.status !== "disposed" && collision(state, a, input));
+  const held = assignments(state).find((a) => a !== previous && a.status !== "disposed" && !continuedTask(state,input.taskId,a.taskId,proofs) && collision(state, a, input));
   if (held) {
     if (held.actor === input.actor && (!input.actorRole || held.actorRole === input.actorRole))
       fail("Work or position held by " + held.dispatchId + ". Handle its original request/draft first.");
     fail("Work or position held by another authorized session.");
   }
-  if (!input.readOnly && (state.rootWorkClaims ?? []).some((c) => !c.abandoned &&
+  if (!input.readOnly && (state.rootWorkClaims ?? []).some((c) => !c.abandoned && !c.accepted && !continuedTask(state,taskId,c.taskId,proofs) &&
       taskStep(state, c.taskId)?.id === taskStep(state, taskId)?.id &&
       (c.workId === input.workId || projectScopesOverlap(c.scope, input.scope ?? []))))
     fail("Root already owns this work.");
   assertProjectReview(state, input);
 }
-function beginStaffAssignment(state, input, beforeNew) {
+function beginStaffAssignment(state, input, beforeNew, proofs) {
   state.staffAssignments ??= {};
   const row = authorizedPosition(state, input);
   verifyActor(state, input);
   const epoch = row.transitions?.length ?? 0;
   input = {...input, ...selectWork(state, input, row), grantEpoch: epoch};
   const prior = assignments(state).findLast((a) =>
-    input.workId && priorWork(state, a) === input.workId && a.outcome !== "not_sent");
+    input.workId && priorWork(state, a) === input.workId && a.outcome !== "not_sent" && !continuedTask(state,input.taskId,a.taskId,proofs));
   if (prior) {
     if (state.status === "paused" || state.paused) fail("Project is paused.");
     if (sameMaterials(prior, input) && (prior.grantEpoch ?? 0) === epoch)
       return {...prior, reused: true};
     if (!completedHandoff(state, prior)) fail("This work already has an assignment. Use its original owner and materials or resolve the handoff.");
   }
-  admitAssignment(state, input);
+  admitAssignment(state, input,undefined,proofs);
   const dispatchId = input.dispatchId ?? randomUUID();
   if (Object.hasOwn(state.staffAssignments, dispatchId) || Object.hasOwn(Object.prototype, dispatchId))
     fail("Dispatch id already exists or is invalid.");
@@ -187,15 +136,13 @@ function beginStaffAssignment(state, input, beforeNew) {
   state.staffAssignments[a.dispatchId] = a;
   return a;
 }
-function completedHandoff(state, a) {
-  return a.status === "disposed" && a.outcome === "abandoned" &&
-    (position(state, a.staffId).transitions?.length ?? 0) > (a.grantEpoch ?? 0);
-}
-function recordRootAbandonment(state, {taskId, changeId, requestId, reason}) {
-  if (!requestId) fail("Root handoff requires its original abandonment receipt.");
+function recordRootSettlement(state, {taskId, changeId, requestId, reason, acceptedVersion}) {
+  if (!requestId) fail("Root handoff requires its original settlement receipt.");
   for (const claim of state.rootWorkClaims ?? []) {
-    if (claim.taskId === taskId && claim.changeId === changeId && !claim.abandoned)
-      claim.abandoned = {requestId, reason};
+    if (claim.taskId === taskId && claim.changeId === changeId && !claim.abandoned) {
+      if (acceptedVersion) claim.accepted = {requestId, version:acceptedVersion};
+      else claim.abandoned = {requestId, reason};
+    }
   }
 }
 function checkAssignedScope(state, assignment, scope) {
@@ -207,7 +154,7 @@ function checkAssignedScope(state, assignment, scope) {
   if (!leafMatches(works, scope).includes(work))
     fail("This work scope belongs to a registered subitem.");
 }
-function resumeAssignment(state, input) {
+function resumeAssignment(state, input, proofs) {
   const prev = state.staffAssignments?.[input.dispatchId];
   if (!prev || !["result", "disposed"].includes(prev.status))
     fail("Feedback requires a known, settled result.");
@@ -223,7 +170,7 @@ function resumeAssignment(state, input) {
   checkAssignedScope(state, prev, next.scope ?? []);
   if (prev.reviewOf && JSON.stringify(canonical(next.readScope)) !== JSON.stringify(canonical(prev.readScope)))
     fail("Review feedback must retain the fixed candidate read scope.");
-  admitAssignment(state, next, prev);
+  admitAssignment(state, next, prev,proofs);
   Object.assign(prev, next, { status: "active" });
   delete prev.candidate;
   delete prev.failure;
@@ -254,7 +201,7 @@ function reconcileAssignments(state, record, requests, kernelFacts = []) {
   const abandoned = (record.work?.requests ?? []).filter((op) =>
     op.action === "abandonChange" && facts.get(op.requestId) === "abandoned");
   for (const op of abandoned)
-    recordRootAbandonment(state, {taskId: record.id, changeId: op.changeId, requestId: op.requestId});
+    recordRootSettlement(state, {taskId: record.id, changeId: op.changeId, requestId: op.requestId});
   const resolved = (id) =>
     [
       "accepted",
@@ -415,7 +362,9 @@ function resumePausedCandidate(state, input) {
 
 export function createProjectStaff(host) {
   const change = (action, input, actor = "root", automatic = false, options) =>
-    host.update((state) => changeProjectStaff(state, action, input, actor, automatic, options));
+    host.update((state) => action === "register_work"
+      ? registerSubwork(state, options?.taskId, actor, input ?? {}, host.completedContinuations)
+      : changeProjectStaff(state, action, input, actor, automatic, options));
   return {
     list: () => host.read().staff ?? [],
     rootReview: (ref, task, v, scope) => readReviewCandidate(host, ref, task, v, scope),
@@ -423,9 +372,9 @@ export function createProjectStaff(host) {
     completeReview: (member, task, v) => completeProjectReview(host,member,task,v),
     assignment: (id) => host.read().staffAssignments?.[id],
     change,
-    abandonedRoot: (detail) => host.update((state) => recordRootAbandonment(state, detail)),
-    begin: (input, beforeNew) => host.update((state) => beginStaffAssignment(state, input, beforeNew)),
-    resume: (input) => host.update((state) => resumeAssignment(state, input)),
+    settledRoot: (detail) => host.update((state) => recordRootSettlement(state, detail)),
+    begin: (input, beforeNew) => host.update((state) => beginStaffAssignment(state, input, beforeNew,host.completedContinuations)),
+    resume: (input) => host.update((state) => resumeAssignment(state, input,host.completedContinuations)),
     update: (id, patch) => host.update((state) => updateStaffAssignment(state, id, patch)),
     pause: (input, snapshot) => host.update((state) => pauseAssignments(state, input, snapshot)),
     resumePausedCandidate: (input) => host.update((state) => resumePausedCandidate(state, input)),
@@ -470,7 +419,7 @@ export function createProjectStaff(host) {
           fail("Model does not match its current assignment.");
       }
       const locked = assignments(state).find((a) => !priorWork(state, a) && a.identity === canonicalIdentity &&
-        a.status !== "disposed" && a !== current && collision(state, a, current));
+        a.status !== "disposed" && a !== current && !continuedTask(state,taskId,a.taskId,host.completedContinuations) && collision(state, a, current));
       if (locked) fail("Legacy model identity held by " + locked.dispatchId);
       return true;
     },
@@ -502,10 +451,10 @@ export function createProjectStaff(host) {
         const works = worksOf(step);
         const selected = leafMatches(works, scope);
         if (!selected.length || scope.some((p) => !selected.some((w) => inScope(p, w.scope))))
-          fail("Root edit must select a registered work boundary.");
+          fail("Root edit must select a registered work boundary. Available: " + works.map((w) => w.id + " " + JSON.stringify(w.scope)).join(", "));
         for (const w of selected) {
           const target = {taskId, role, workId: w.id, scope: w.scope};
-          const owner = assignments(state).find((a) => a.outcome !== "not_sent" && !a.readOnly && !completedHandoff(state, a) &&
+          const owner = assignments(state).find((a) => a.outcome !== "not_sent" && !a.readOnly && !completedHandoff(state, a) && !continuedTask(state,taskId,a.taskId,host.completedContinuations) &&
             (priorWork(state, a) === w.id || (a.status !== "disposed" && collision(state, a, target))));
           if (owner) fail("This work belongs to its employee; use its original draft and feedback.");
         }
@@ -523,7 +472,7 @@ export function createProjectStaff(host) {
           name: "project_staff",
           label: "Project staff",
           description:
-            "Manage persistent project positions, separate from a Team model. List existing positions first. Appoint only for an independent deliverable, independent review, or configured capability gap. Never add credentials or capacity. register_work {scope} returns a stable work ID for a bounded subitem of this step. Supply an input object, e.g. appoint {id,responsibility,scope,readScope,models,need,reason}; promote {id,subgoal,models}; retain {id,reason}; handoff {id,decision,pending,failure,version}; transfer {id,supervisorId,reason} or retire {id,reason}, then finish {id} once unresolved work is settled." +
+            "Manage persistent project positions, separate from a Team model. List existing positions first. Appoint only for an independent deliverable, independent review, or configured capability gap. Never add credentials or capacity. need is exactly deliverable, review or capability. register_work {scope} returns a stable work ID only within this step and the current position scope; inspect the available work IDs and scopes first. Supply an input object, e.g. appoint {id,responsibility,scope,readScope,models,need,reason}; promote {id,subgoal,models}; retain {id,reason}; handoff {id,decision,pending,failure,version}; transfer {id,supervisorId,reason} or retire {id,reason}, then finish {id} once unresolved work is settled." +
             (actor === "root" ? " Root may set_depth {maxDepth} for this turn. Count root as layer one, use three layers by default and select four for work that needs another supervisor. Settle affected assignments before reducing depth." : ""),
           parameters: Type.Object({
             action: Type.Union([...actions, "register_work", ...(actor === "root" ? ["set_depth"] : [])].map((a) => Type.Literal(a))),
@@ -535,7 +484,7 @@ export function createProjectStaff(host) {
                 scope: Type.Optional(Type.Array(Type.String())),
                 readScope: Type.Optional(Type.Array(Type.String())),
                 models: Type.Optional(Type.Array(Type.String())),
-                need: Type.Optional(Type.String()),
+                need: Type.Optional(Type.Union(needs.map((need) => Type.Literal(need)))),
                 reason: Type.Optional(Type.String()),
                 subgoal: Type.Optional(Type.String()),
                 decision: Type.Optional(Type.String()),
@@ -548,9 +497,7 @@ export function createProjectStaff(host) {
           }),
           async execute(_id, { action, input }) {
             admit({staffControl:{action,input:input??{}}});
-            const result = action === "register_work"
-              ? host.update((state) => registerSubwork(state, taskId, actor, input ?? {}))
-              : action === "list"
+            const result = action === "list"
                 ? host
                     .read()
                     .staff.filter((p) => actor === "root" || p.id === actor || p.supervisorId === actor)

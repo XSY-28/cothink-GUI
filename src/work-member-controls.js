@@ -132,3 +132,47 @@ export function createMemberControls({
   }
   return {pauseEvidence,stopMemberRuntime,settleMemberPause,readPausedCandidate,requestStaffGroup};
 }
+
+/** Drain the existing work actors before persisting local closure. */
+export async function settleWork({task,work,processCheck,processSource,members,runtimes,pluginWork,v,shared,
+  leaderSeat,releaseSeat,abortMembers,finishPromise,save,executionError}) {
+    const cleanupErrors=[];
+    const cleanup=async(phase,run)=>{try{await run();}catch(error){cleanupErrors.push({phase,error});}};
+    if (processCheck) await cleanup("process-check",()=>processCheck.detach(processSource));
+    if (task.signal.aborted) await cleanup("abort-members",()=>abortMembers());
+    for (const m of members.values()) {
+      await cleanup("cancel-member:"+m.record.memberId,()=>{m.controller.abort();if(!m.attempt)finishPromise(m);});
+    }
+    await cleanup("plugin-helpers",()=>pluginWork?.close());
+    const aborts=await Promise.allSettled([...runtimes].map(rt=>rt.session.abort()));
+    aborts.forEach((result,index)=>{if(result.status==="rejected")cleanupErrors.push({phase:"abort-runtime:"+index,error:result.reason});});
+    await Promise.allSettled([...members.values()].map(m=>m.promise));
+    await Promise.allSettled([...members.values()].map(m=>m.pauseSettlement));
+    await cleanup("capacity",()=>releaseSeat(leaderSeat));
+    // A known partial result or an unknown shutdown in one session cannot skip another session.
+    for(const rt of runtimes)await cleanup("runtime:"+rt.sessionManager.getSessionId(),()=>rt.dispose());
+    task.signal.removeEventListener("abort",abortMembers);
+    if (v) for (const change of work.changes) {
+      if (change.readOnly || ['accepted','outcome_unknown'].includes(change.status)) continue;
+      await cleanup('versioning:'+change.changeId,async()=>{
+        const actual=await v.inspect({changeId:change.changeId});
+        // Member abort may still be queued after an earlier abandonment. The
+        // public operation serializes behind it; a cached status cannot drain it.
+        if (!['accepted','outcome_unknown'].includes(actual.status)) {
+          const closed=await v.abandonChange(change.changeId);
+          if (!['abandoned','accepted'].includes(closed.status))
+            throw problem('STOP_UNKNOWN','Change shutdown remains unknown: '+(closed.requestId??change.changeId));
+        }
+      });
+    }
+    if (v && !shared) await cleanup("versioning",()=>v.close());
+    if(!cleanupErrors.length) {
+      task.record.localExecutionClosedAt=new Date().toISOString();
+      try { save(); } catch(error) { task.record.localExecutionClosedAt=null; throw error; }
+    }
+    if(cleanupErrors.length) {
+      work.cleanupErrors=cleanupErrors.map(({phase,error})=>({phase,code:error.code??null,message:error.message??String(error)}));
+      try{save();}catch{}
+      if(!executionError)throw cleanupErrors[0].error;
+    }
+}

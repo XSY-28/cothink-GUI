@@ -1,17 +1,12 @@
-import {resolveDelivery,resolveDeliveryEvidence} from "./project-delivery.js";
 import { homedir } from "node:os";
 import { realpathSync, readFileSync, lstatSync, statSync, accessSync, constants, readdirSync, mkdirSync, rmdirSync } from "node:fs";
-import { resolve, join, relative, isAbsolute, dirname } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { resolve, join, isAbsolute, dirname } from "node:path";
 import { createVersioning } from "./versioning.js";
-import { taskOutputRefs } from "./gui-projection.js";
 import { inspectGuiPreparation, inspectGuiGitChanges, protectedGuiProjectPath } from "./gui-project-preparation.js";
 import { workspaceError, workspaceForProject } from "./gui-workspace-state.js";
 import { guiExecutionConfigDigest } from "./gui-settings.js";
 import { conversationFolderName, readManagedDirectory } from "./conversation.js";
 import { git } from "../packages/agent-sync/src/git.js";
-const exec = promisify(execFile);
 export function inspectGuiDirectory(path) {
   let canonicalPath=null;
   try {
@@ -259,113 +254,7 @@ export async function inspectGuiProject(home, path, work = {}, { includeChanges 
     return unavailable(error.message);
   }
 }
-export async function withGuiWork(home, record, fn) {
-  const delivery=resolveDeliveryEvidence(home,record);
-  const sources=delivery?.sources??[];
-  const selected=sources.findLast(s=>s.record.work?.version===record.deliveryRef.version);
-  const work = delivery ? (selected ? {...selected.record.work,startVersion:delivery.startVersion} : null) : record.work;
-  if (!work?.root) throw Error("任务没有已保存的工作项目。");
-  const v = await createVersioning({
-    home,
-    project: work.root,
-    readOnly: true,
-    backend: work.backend,
-    toolHome: work.toolHome,
-  });
-  try {
-    return await fn(v, work, delivery);
-  } finally {
-    await v.close();
-  }
-}
-export async function guiWorkVersions(v, w) {
-  let from = w.startVersion,
-    to = w.version, accepted = null;
-  if (!from) throw Error("旧任务未记录可信起点，无法生成任务差异。");
-  if (!w.resultWorkspace) {
-    for (const saved of (w.acceptance ?? []).toReversed()) {
-      if (!saved.requestId) continue;
-      const receipt = await v.inspect({requestId:saved.requestId});
-      if (receipt.status === "accepted" && receipt.acceptedVersion &&
-          (!saved.acceptedVersion || receipt.acceptedVersion === saved.acceptedVersion)) {
-        accepted = receipt.acceptedVersion;
-        break;
-      }
-    }
-    to = accepted ?? to;
-  }
-  if (!to) throw Error("任务未记录可信终点；未知接纳不自动重发。");
-  return {fromVersion: from, toVersion: to, accepted};
-}
-export async function guiDiff(home, record) {
-  return withGuiWork(home, record, async (v, w) => {
-    const {fromVersion: from, toVersion: to, accepted} = await guiWorkVersions(v, w);
-    if (record.project && !w.resultWorkspace && !accepted)
-      throw Object.assign(Error("没有已接纳的固定版本，不能生成成果补丁。"),{code:"FILE_UNAVAILABLE"});
-    const diff = await v.inspect({ fromVersion: from, toVersion: to });
-    if (!Array.isArray(diff.files) || typeof (diff.text ?? diff.patch) !== "string")
-      throw Object.assign(Error("旧任务不支持可信固定版本差异。"), {code:"FILE_UNSUPPORTED"});
-    return {
-      fromVersion: from,
-      toVersion: to,
-      files: diff.files,
-      text: diff.text ?? diff.patch ?? "",
-      binaryFiles: diff.binaryFiles ?? [],
-    };
-  });
-}
-export async function guiOutput(
-  home,
-  record,
-  outputRef,
-  offset = 0,
-  limit = 65536,
-) {
-  const ownOutput=taskOutputRefs(record).includes(outputRef);
-  if(record.deliveryRef&&!ownOutput){const source=resolveDelivery(home,record).find(s=>taskOutputRefs(s.record).includes(outputRef));if(!source)throw Error("outputRef 不属于此根任务的已核验交付。");return guiOutput(home,source.record,outputRef,offset,limit);}
-  if (!ownOutput)
-    throw Error("outputRef 不属于此任务。");
-  return withGuiWork(home, record, async (v) => {
-    const page = await v.read({ outputRef, offset, limit });
-    return {
-      text: Buffer.from(page.contentBase64, "base64").toString("utf8"),
-      nextOffset: page.nextOffset,
-      eof: page.eof,
-    };
-  });
-}
-export async function guiResultWorkspace(v, work, version) {
-  if (!work.resultWorkspace || !work.resultChangeId)
-    throw Object.assign(Error("此任务没有可核验的成果目录。"),{code:"FILE_UNAVAILABLE"});
-  const result=await v.inspect({changeId:work.resultChangeId});
-  if(result.readOnly!==true || result.baseVersion!==version || typeof result.workspace!=="string" || resolve(result.workspace)!==resolve(work.resultWorkspace))
-    throw Object.assign(Error("成果目录与任务固定版本不匹配，已拒绝读取。"),{code:"FILE_IDENTITY_MISMATCH"});
-  try {
-    const info=lstatSync(work.resultWorkspace),path=realpathSync(work.resultWorkspace);
-    const local=v.toolHome?relative(resolve(v.toolHome),resolve(work.resultWorkspace)):null;
-    if(!info.isDirectory() || info.isSymbolicLink() || local!==null&&
-      (!local||local===".."||local.startsWith("../")||local.startsWith("..\\")||isAbsolute(local)||path!==resolve(realpathSync(v.toolHome),local)))
-      throw Object.assign(Error("成果目录包含链接或不是目录。"),{code:"FILE_PATH_INVALID"});
-    return path;
-  } catch(error) {
-    if(error.code?.startsWith("FILE_"))throw error;
-    throw Object.assign(Error("成果目录已不存在或不可读取。"),{code:"FILE_UNAVAILABLE"});
-  }
-}
-export async function revealGuiTask(home, record) {
-  const path = await withGuiWork(home,record,async(v,w)=>{
-    const {toVersion}=await guiWorkVersions(v,w);
-    return guiResultWorkspace(v,w,toVersion);
-  });
-  const command =
-    process.platform === "darwin"
-      ? "open"
-      : process.platform === "win32"
-        ? "explorer.exe"
-        : "xdg-open";
-  await exec(command, [path]);
-  return { path };
-}
+export {withGuiWork,guiWorkVersions,guiDiff,guiOutput,guiResultWorkspace,revealGuiTask,revealGuiDirectory,resolveTaskDraft,exportTaskDraft,withGuiFileWork} from "./gui-work-files.js";
 
 export { readVisualFrame as guiArtifact } from "./visual-project-delivery.js";
 

@@ -16,9 +16,9 @@ const actions = new Set([
   "session.create", "session.fork", "session.archive", "session.pin", "session.close", "session.name", "session.draft", "session.mode",
   "session.team", "session.thinking", "session.view", "team.save", "team.remove",
   "workspace.create", "workspace.update", "workspace.bind", "workspace.rebind", "workspace.rebind.query",
-  "provider.save", "settings.work", "settings.builtinSkills", "releaseNotes.ack", "project.inspect", "project.browse", "project.mkdir", "project.prepare",
+  "provider.save", "provider.inspectMetadata", "settings.work", "settings.builtinSkills", "releaseNotes.ack", "project.inspect", "project.browse", "project.mkdir", "project.prepare",
   "extension.commands", "extension.command", "extension.reload", "extension.respond",
-  "context.organize", "task.submit", "task.continuePrepared", "task.confirmWork", "task.cancel", "task.reveal", "updates.check", "updates.configure",
+  "context.organize", "task.submit", "task.continuePrepared", "task.confirmWork", "task.inspectContinuation", "task.continueWork", "work.exportDraft", "task.cancel", "task.reveal", "updates.check", "updates.configure",
 ]);
 const mime = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -197,8 +197,16 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
         }
         if(url.pathname === "/api/file" || url.pathname === "/api/file-diff") {
           const content=url.pathname === "/api/file";
-          query(url,content?["taskId","version","path","purpose"]:["taskId","version","path"],["taskId","version","path"]);
+          query(url,content?["taskId","version","path","purpose","draft"]:["taskId","version","path","draft"],["taskId","version","path"]);
           const ref=Object.fromEntries(["taskId","version","path"].map(k=>[k,url.searchParams.get(k)]));
+          if(url.searchParams.has("draft")) {
+            try {
+              const draft=JSON.parse(url.searchParams.get("draft"));
+              if(!draft||typeof draft!=="object"||Array.isArray(draft)||Object.keys(draft).length!==2||
+                typeof draft.changeId!=="string"||typeof draft.baseVersion!=="string")throw Error();
+              ref.draft=draft;
+            } catch {throw Object.assign(Error("草稿引用无效。"),{code:"FILE_VERSION_MISMATCH"});}
+          }
           if(!content)return send(res,200,await call("fileDiff",ref));
           const purpose=url.searchParams.get("purpose")??"source", result=await call("file",ref,{purpose});
           const filename=encodeURIComponent(result.filename).replace(/[!'()*]/g,c=>"%"+c.charCodeAt(0).toString(16).toUpperCase());

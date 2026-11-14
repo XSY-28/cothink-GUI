@@ -2,18 +2,16 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { CredentialSynchronizationError, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createModelRuntime, projectModelFacts } from "./pi-runtime.js";
-import { loadConfig, updateConfig, positiveInteger, validateConfig } from "./config.js";
+import { loadConfig, updateConfig, validateConfig } from "./config.js";
 import {
   addTeam,
   createTeamConfig,
   normalizeTeamName,
   removeTeam,
 } from "./teams.js";
-import { selectModelRef } from "./setup.js";
-import { acquireSessionWriter, privateDirectory, writePrivateJson } from "./storage.js";
+import { privateDirectory } from "./storage.js";
 import {normalizeThinkingPreference} from "./thinking.js";
 export {validateThinkingModels as validateGuiThinking} from "./thinking.js";
 export { saveGuiBuiltinSkills, saveGuiLocalSkills } from "./gui-skills.js";
@@ -65,78 +63,7 @@ export function saveGuiWork(home, work) {
     return { ...c, work: structuredClone(work) };
   }).work;
 }
-export async function saveGuiProvider(home, { providerId, apiKey, custom }) {
-  if (
-    typeof providerId !== "string" ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(providerId)
-  )
-    throw Error("服务商 ID 无效。");
-  if (typeof apiKey !== "string" || !apiKey.trim() || /[\r\n]/.test(apiKey))
-    throw Error("API key 不能为空或包含换行。");
-  if (custom) {
-    if (!["openai-completions", "anthropic-messages"].includes(custom.api))
-      throw Error("协议无效。");
-    if (typeof custom.modelId !== "string" || !custom.modelId.trim())
-      throw Error("模型 ID 不能为空。");
-    if (custom.contextWindow !== undefined)
-      positiveInteger(custom.contextWindow, "contextWindow");
-    if (custom.maxTokens !== undefined)
-      positiveInteger(custom.maxTokens, "maxTokens");
-  }
-  const lock = acquireSessionWriter(
-    join(home, "provider-write"),
-    "48b7614a-e0b7-4c05-925a-d33b7deed1d0",
-  );
-  try {
-    const runtime = await createModelRuntime(home);
-    if (custom) {
-      // Use the same catalog conflict, endpoint and Pi authentication path as CLI setup.
-      const values = {
-        "自定义配置 ID": providerId,
-        "API 根地址": custom.baseUrl,
-        "模型 ID": custom.modelId,
-      };
-      await selectModelRef({
-        runtime,
-        home,
-        role: "GUI",
-        io: {
-          select: async (label) => (label === "协议" ? custom.api : "custom"),
-          prompt: async (p) =>
-            p.type === "secret" ? apiKey : values[p.message],
-          notify() {},
-        },
-      });
-      const path = join(home, "pi/models.json"),
-        models = JSON.parse(readFileSync(path, "utf8"));
-      const model = models.providers[providerId].models[0];
-      if (custom.name !== undefined) model.name = String(custom.name);
-      if (custom.contextWindow !== undefined)
-        model.contextWindow = Number(custom.contextWindow);
-      if (custom.maxTokens !== undefined)
-        model.maxTokens = Number(custom.maxTokens);
-      writePrivateJson(path, models, lock.assertOwned);
-    } else {
-      const provider = runtime.getProvider(providerId);
-      if (!provider) throw Error("服务商不可用。");
-      if (!provider.auth?.apiKey?.login)
-        throw Error(
-          "此服务商需要 OAuth 或环境认证；请在 CLI 使用 cothink 后 /login。已有 OAuth 可直接复用。",
-        );
-      try {
-        await runtime.login(providerId, "api_key", {
-          prompt: async () => apiKey,
-          notify() {},
-        });
-      } catch {
-        throw Error("认证未完成；请检查服务商认证方式和本机存储权限。");
-      }
-    }
-    return { providerId, saved: true, verified: false };
-  } finally {
-    lock.release();
-  }
-}
+export { saveGuiProvider } from "./gui-provider-settings.js";
 const authPromptMessages = {
   text:"请输入服务商要求的内容。",
   secret:"请输入服务商要求的密钥。",

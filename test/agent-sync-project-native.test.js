@@ -13,7 +13,7 @@ test('PROJECT original background parallel workflow continues after tool return 
  const rootReturned=new Promise(resolve=>releaseBackground=resolve);
  const f=await fixture(t,async({body})=>{
   try{
-   const system=String(body.messages.find(m=>m.role==='system')?.content??''),last=body.messages.findLast(m=>m.role==='tool')?.content??'';
+   const system=String(body.messages.find(m=>['system','developer'].includes(m.role))?.content??''),last=body.messages.findLast(m=>m.role==='tool')?.content??'';
    if(system.includes('You are helper ')){
     helperCalls++;await rootReturned;
     if(JSON.stringify(body.messages).includes('PARALLEL_WRITER')&&body.messages.at(-1).role==='user')return tool('write',{path:'a.txt',content:'BACKGROUND_NATIVE'});
@@ -39,7 +39,7 @@ test('PROJECT original background parallel workflow continues after tool return 
 test('PROJECT parent SIGINT stops original native cgroup and retains partial files and unknown sent request',{timeout:120000},async t=>{
  const {spawn}=await import('node:child_process');const {fileURLToPath}=await import('node:url');const repo=repository(t);let rootCalls=0,helperCalls=0,child;
  const f=await fixture(t,({body})=>{
-  const system=String(body.messages.find(m=>m.role==='system')?.content??'');
+  const system=String(body.messages.find(m=>['system','developer'].includes(m.role))?.content??'');
   if(system.includes('You are helper ')){
    if(++helperCalls===1)return tool('write',{path:'a.txt',content:'PARTIAL_BEFORE_CANCEL'});
    setImmediate(()=>child.kill('SIGINT'));return null;
@@ -57,7 +57,7 @@ test('PROJECT parent SIGINT stops original native cgroup and retains partial fil
 
 test('PROJECT original native parallel children compete for one remaining actual HTTP call',{timeout:120000},async t=>{
  const repo=repository(t);let rootCalls=0,helperCalls=0;
- const f=await fixture(t,({body})=>{const system=String(body.messages.find(m=>m.role==='system')?.content??'');if(system.includes('You are helper ')){helperCalls++;return {text:'Exactly one physical helper send admitted.'};}if(++rootCalls===1)return tool('next_change',{reason:'Native budget race within one work',scope:['a.txt'],readScope:['a.txt']});return tool('project_plugin_0_subagent',{workflow:'parallel',args:{tasks:[{agent:'native-project',task:'RACE_ONE answer briefly',model:'fixture/main'},{agent:'native-project',task:'RACE_TWO answer briefly',model:'fixture/main'}]},model:'fixture/main',async:false});});
+ const f=await fixture(t,({body})=>{const system=String(body.messages.find(m=>['system','developer'].includes(m.role))?.content??'');if(system.includes('You are helper ')){helperCalls++;return {text:'Exactly one physical helper send admitted.'};}if(++rootCalls===1)return tool('next_change',{reason:'Native budget race within one work',scope:['a.txt'],readScope:['a.txt']});return tool('project_plugin_0_subagent',{workflow:'parallel',args:{tasks:[{agent:'native-project',task:'RACE_ONE answer briefly',model:'fixture/main'},{agent:'native-project',task:'RACE_TWO answer briefly',model:'fixture/main'}]},model:'fixture/main',async:false});});
  installNative(f);mkdirSync(join(f.home,'pi/agents'),{recursive:true});writeFileSync(join(f.home,'pi/agents/native-project.md'),'---\nname: native-project\ndescription: Actual original budget-race child\nmodel: fixture/main\ntools: read\ninheritProjectContext: false\ninheritGlobalContext: false\ninheritSkills: false\n---\nAnswer briefly.\n');
  saveConfig(f.home,{formatVersion:2,...f.models,work:{execution,projectPluginRuntime:runtime}});const plan=join(f.home,'plan.json');writeFileSync(plan,JSON.stringify({goal:'Two original native helpers may compete for remaining project call; stop at budget',scope:['a.txt'],plugins:['pi-subagents'],budget:{maxCalls:3},deliverables:['a.txt'],checks:[{command:'node',args:['-e','process.exit(0)']}]}));
  const run=await invoke(f,['project','start','--file',plan,'--json'],'',repo.project);const task=listTasks(f.home)[0];evidence('project-native-budget-task.json',task);evidence('project-native-budget-run.json',run);
@@ -66,7 +66,7 @@ test('PROJECT original native parallel children compete for one remaining actual
 
 test('PROJECT original nested native child reads creator overlay and returns files through its actual creator',{timeout:120000},async t=>{
  const repo=repository(t);let rootCalls=0,parentCalls=0,leafCalls=0,fixtureError,parentId,leafId;
- const f=await fixture(t,({body})=>{try{const system=String(body.messages.find(m=>m.role==='system')?.content??''),last=body.messages.findLast(m=>m.role==='tool')?.content??'';
+ const f=await fixture(t,({body})=>{try{const system=String(body.messages.find(m=>['system','developer'].includes(m.role))?.content??''),last=body.messages.findLast(m=>m.role==='tool')?.content??'';
   if(system.includes('You are helper ')){
    if(system.includes('PARENT_NATIVE_MARKER')){switch(++parentCalls){case 1:return tool('write',{path:'a.txt',content:'PARENT_OVERLAY'});case 2:return tool('subagent',{agent:'native-leaf',task:'Read a.txt creator overlay then write NESTED_FINAL',model:'fixture/main',async:false,artifacts:false});case 3:{const match=last.match(/"helperId":"([a-f0-9-]+)"/);assert.ok(match,last);leafId=match[1];return tool('cothink_helper_result',{helperId:leafId,decision:'adopt',reason:'Actual creator inspected grandchild exact overlay and file result'});}default:return {text:'Creator adopted native child file into its own overlay'};}}
    if(++leafCalls===1)return tool('read',{path:'a.txt'});if(leafCalls===2){assert.match(last,/PARENT_OVERLAY/);return tool('write',{path:'a.txt',content:'NESTED_FINAL'});}return {text:'Leaf used actual creator overlay'};

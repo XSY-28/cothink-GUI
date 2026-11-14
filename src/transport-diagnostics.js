@@ -1,3 +1,4 @@
+import {problem} from './task.js';
 import { redact } from "./storage.js";
 
 // Error properties are non-enumerable. Copy a narrow diagnostic set rather than
@@ -111,4 +112,28 @@ export function observeResponse(response, trace, secrets = []) {
   const result = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   for (const key of ["url", "redirected", "type"]) Object.defineProperty(result, key, { value: response[key] });
   return result;
+}
+
+// These pinned Pi adapters pass options.fetch to their actual HTTP client.
+// Codex Responses is pinned to SSE in projects because WebSocket skips the fetch fence.
+const projectHttpApis = new Set(["openai-completions","openai-responses","openai-codex-responses",
+  "anthropic-messages","azure-openai-responses","mistral-conversations","pi-messages"]);
+export function assertFencedModelTransport(model,client) {
+  if(!projectHttpApis.has(model?.api)||client)
+    throw problem("PROJECT_TRANSPORT","Selected Pi adapter has no project-controlled HTTP dispatch fence: "+(model?.api??"unknown"));
+}
+export function hostToolsOnlyPayload(model,payload) {
+  const groups=[payload?.tools??[],payload?.additional_tools??[],
+    ...(Array.isArray(payload?.input)?payload.input.filter(item=>item?.type==='additional_tools').map(item=>item.tools):[])];
+  return projectHttpApis.has(model?.api)&&!!payload&&typeof payload==='object'&&
+    !payload.background&&!payload.computer&&!payload.container&&!payload.previous_response_id&&!payload.conversation&&
+    groups.every(group=>Array.isArray(group)&&group.every(tool=>tool&&(tool.type==='function'||
+      (!tool.type&&typeof tool.name==='string'&&tool.input_schema))));
+}
+
+/** Preserve explicit dispatch evidence; only old absent markers may be reconstructed. */
+export function hostOnlyRequest(request) {
+  const frozen=hostToolsOnlyPayload(request.actualModel,request.payload);
+  return request.transport?.hostToolsOnly===true?(!request.payload||frozen):
+    request.transport?.hostToolsOnly===undefined&&request.transport?.projectDispatched===true&&frozen;
 }

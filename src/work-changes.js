@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import {Type} from 'typebox';
+import {isDeepStrictEqual} from 'node:util';
+import { randomUUID, createHash } from "node:crypto";
 import { inScope, withChangeQueue } from "./versioning.js";
 import { problem } from "./task.js";
 
@@ -34,8 +36,11 @@ export function createWorkChanges({
         const resumeCandidate = action === "acceptChange" ? input.resumeCandidate : undefined;
         if (staff && coordinated && input.actor === "main" && change?.actor?.startsWith("member:"))
           staff.checkOwner({taskId:task.record.id, actorRole:"main", dispatchId:change.actor.slice(7), rootReview:true, resumeCandidate});
-        if (task.projectPolicy && action !== "abandonChange")
-          task.projectPolicy.admit(action === "acceptChange" || action === "checkCurrent" ? "accept" : "scope", {
+        if(task.projectPolicy&&action==='beginChange'&&(input.restoreFrom||input.actor==='main'&&input.readOnly&&!work.changes.length&&
+          task.record.project?.continuation?.draft&&task.record.project.continuation.stepId===task.record.project.stepId))
+          await task.projectPolicy.admitContinuationRestore({...input,requestId:id},v);
+        else if (task.projectPolicy && action !== "abandonChange")
+          task.projectPolicy.admit(action === "acceptChange" || action === "checkCurrent" || action === "prepareChange" && input.check ? "accept" : "scope", {
             actor: input.actor ?? change?.actor ?? "main",
             actorRole:input.actorRole,
             scope: input.scope ?? change?.scope ?? [],
@@ -103,8 +108,15 @@ export function createWorkChanges({
       readOnly,
       wait: options.wait ?? false,
       ...(options.baseVersion ? {baseVersion:options.baseVersion} : {}),
+      ...(options.restoreFrom ? {restoreFrom:options.restoreFrom} : {}),
       ...(shared && !readOnly ? {checkPolicy:task.record.project.checkPolicy} : {}),
     };
+    if(options.restoreFrom&&work.requests.some(r=>r.requestId===input.requestId)) {
+      const receipt=await v.inspect({requestId:input.requestId});
+      if(receipt.changeId&&!['unknown','pending','outcome_unknown'].includes(receipt.status))
+        return syncChange(await v.inspect({changeId:receipt.changeId}));
+      throw Object.assign(problem('OPERATION_UNKNOWN','恢复授权回执尚未核实：'+input.requestId),{requestId:input.requestId});
+    }
     const c = await invoke("beginChange", input, (id) =>
       v.beginChange(
         { ...input, requestId: id },
@@ -137,7 +149,7 @@ export function createWorkChanges({
     });
     if (staff && c.actor === "main" && c.status === "abandoned") {
       const receipt = work.requests.findLast(r => r.action === "abandonChange" && r.changeId === c.changeId && r.status === "abandoned");
-      if (receipt) staff.abandonedRoot({taskId:task.record.id, changeId:c.changeId, requestId:receipt.requestId, reason});
+      if (receipt) staff.settledRoot({taskId:task.record.id, changeId:c.changeId, requestId:receipt.requestId, reason});
     }
     notify(true);
       return result;
@@ -288,6 +300,19 @@ export function createWorkChanges({
     }
     return c;
   }
+  async function restoreOriginalScope(actor,route) {
+    if(route?.status!=='repair'||!route.restoredFrom||route.edit)return;
+    if(staff)for(const path of route.judgment.repairScope)
+      if(!staff.works(task.record.id).some(w=>inScope(path,w.scope)))
+        staff.change('register_work',{scope:[path]},'root',true,{taskId:task.record.id});
+    if(route.judgment.repairScope.every(p=>inScope(p,actor.current.scope)))return;
+    const v=getVersioning(),args={scope:task.record.project.scope,readScope:task.record.project.readScope,
+      reason:'Restore the already confirmed step scope before the first continuation request'};
+    const result=await invoke('refreshChange',{changeId:actor.current.changeId,...args},id=>v.refreshChange(actor.current.changeId,{...args,requestId:id},{wait:false,signal:task.signal}));
+    if(result.status==='unknown'){actor.unknownOperation=result.requestId;actor.current.status='outcome_unknown';throw problem('OPERATION_UNKNOWN',JSON.stringify(result));}
+    if(result.status!=='open'||task.projectPolicy.routeNeedsDecision())throw problem('PROJECT_ROUTE','The original grant could not be restored on unchanged candidate bytes');
+    actor.current=syncChange(result);actor.reviewedVersion=null;save();
+  }
   async function prepare(actor, check = false, caller = actor.role) {
     const v=getVersioning();
     const c = actor.current;
@@ -297,7 +322,7 @@ export function createWorkChanges({
     const requestId = randomUUID();
     const member = actor.role.startsWith("member:") ? members.get(actor.role.slice(7)) : null;
     const signal = member ? AbortSignal.any([task.signal, member.controller.signal]) : task.signal;
-    const r = await invoke("prepareChange", { changeId: c.changeId, actor:caller, requestId }, (id) =>
+    const r = await invoke("prepareChange", { changeId: c.changeId, actor:caller, requestId, check }, (id) =>
       v.prepareChange(c.changeId, { requestId: id, check, signal }),
     );
     actor.current = syncChange(r);
@@ -312,5 +337,41 @@ export function createWorkChanges({
     return actor.current;
   }
   return {invoke,begin,abandon,currentRequest,receivedVersion,refreshReady,markRefresh,
-    observationScope,observedDelta,ensureMainWrite,prepare};
+    observationScope,observedDelta,ensureMainWrite,prepare,restoreOriginalScope};
+}
+
+export async function restorationPaths(v,draft,formalVersion,scope) {
+  const diff=await v.inspect({fromVersion:draft.baseVersion,toVersion:draft.version});
+  const paths=[],conflicts=[];
+  for(const path of diff.files) {
+    if(!inScope(path,scope))throw problem('CONTINUATION_SCOPE','保存草稿包含当前授权范围外的路径：'+path);
+    const [base,current,saved]=await Promise.all([draft.baseVersion,formalVersion,draft.version].map(version=>v.read({version,path})));
+    const same=(a,b)=>a.contentHash===b.contentHash&&a.mode===b.mode;
+    if(same(current,saved))continue;
+    if(same(current,base))paths.push(path);else conflicts.push(path);
+  }
+  return {paths,conflicts};
+}
+
+export async function writeSourceFiles({versioning,c,binding,trace,files,editing,cache,pathOf,signal,guard,beforeWrite,save,onChanged}) {
+  const edits=[];
+  for(const {path,content}of files){
+    guard();signal.throwIfAborted();
+    const p=pathOf(path,c),actual=await versioning.read({changeId:c.changeId,path:p});
+    const old=editing?{hash:createHash('sha256').update(cache.get(p)).digest('hex')}:binding.reads.get(p);
+    if(actual.contentHash!==null&&!old)throw problem('NEED_READ','覆盖已有文件前先read：'+p);
+    edits.push({path:p,oldHash:old?.hash??null,contentBase64:Buffer.from(content).toString('base64')});
+  }
+  const input={requestId:trace.requestId,expectedVersion:c.privateVersion,edits};
+  trace.kernelInput=input;save();beforeWrite();trace.kernelDispatched=true;save();
+  const result=await versioning.edit(c.changeId,input,{signal});
+  if(result.status!=='applied')throw problem('OPERATION_UNKNOWN',JSON.stringify(result));
+  Object.assign(c,await versioning.inspect({changeId:c.changeId}));binding.reviewedVersion=c.privateVersion;
+  for(const edit of edits){binding.failedMutations.delete(edit.path);binding.reads.set(edit.path,{hash:createHash('sha256').update(Buffer.from(edit.contentBase64,'base64')).digest('hex'),version:c.privateVersion});}
+  onChanged(c);return result;
+}
+
+export function atomicWriteDefinition(def) {
+  return {...def,description:def.description+' To create or replace two files atomically, supply files:[{path,content},{path,content}] instead of path/content. Both paths must already be writable; read existing files first. The pair consumes one write operation and never applies only one half.',
+    parameters:Type.Object({...Object.fromEntries(Object.entries(def.parameters.properties).map(([key,value])=>[key,Type.Optional(value)])),files:Type.Optional(Type.Array(def.parameters,{minItems:2,maxItems:2}))})};
 }

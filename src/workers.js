@@ -1,7 +1,8 @@
+import {restorationPaths} from "./project-continuation.js";
 import { formalProcessSource } from "./process-check.js";
 import { formalCompletionFeedback } from "./project-collaboration-evidence.js";
 import { createWorkChanges } from "./work-changes.js";
-import { createMemberControls } from "./work-member-controls.js";
+import { createMemberControls, settleWork } from "./work-member-controls.js";
 import { createPreviewTool, runVisualReview } from "./visual-preview.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -214,7 +215,7 @@ export async function runWork({
       );
   }
   const {invoke,begin,abandon,currentRequest,receivedVersion,refreshReady,markRefresh,
-    observationScope,observedDelta,ensureMainWrite,prepare}=createWorkChanges({
+    observationScope,observedDelta,ensureMainWrite,prepare,restoreOriginalScope}=createWorkChanges({
     task,staff,shared,work,members,observerErrors,save,guard,notify,syncChange,
     getVersioning:()=>v,getPluginWork:()=>pluginWork,getMainBinding:()=>mainBinding,
   });
@@ -753,7 +754,7 @@ export async function runWork({
       label: name,
       description,
       parameters: Type.Object(properties),
-      ...(staff && ["collect","project_effect"].includes(name) ? {executionMode:"sequential"} : {}),
+      ...(staff && ["collect","project_effect","prepare_change"].includes(name) ? {executionMode:"sequential"} : {}),
       async execute(id, args, signal) {
         guard();
         if (signal?.aborted) throw signal.reason;
@@ -860,7 +861,7 @@ export async function runWork({
         ...(staff ? {staffId: Type.String({description:"Authorized direct report position ID."}),
           workId: Type.Optional(Type.String({description:"Host-registered work ID. Omit only when the host can identify one authorized boundary."})),
           reviewKind: Type.Optional(Type.Union([Type.Literal("ordinary"), Type.Literal("independent")])),
-          reviewOf: Type.Optional(Type.String({description:"Employee dispatch ID or exact root candidate reviewOf returned by prepare_change."}))} : {}),
+          reviewOf: Type.Optional(Type.String({description:"Employee dispatch ID or exact root candidate reviewOf returned by prepare_change. This creates a candidate-review job (ordinary or independent), separate from collaboration worker counts."}))} : {}),
       },
       async (args, toolId, owner) => {
         if ("task" in args || "materials" in args)
@@ -1168,7 +1169,7 @@ export async function runWork({
     const decision = Type.Union([Type.Literal("repair"), Type.Literal("shorten"), Type.Literal("blocked")]);
     register(
       "project_route_judge",
-      "After a failed user-entry check, propose one read-only test on the exact frozen candidate. Give the repository path, distinguishing literal, and bounded decisions for finding or missing that literal. Use the resulting evidence before any repair.",
+      "When the host pauses a route for a failed user-entry check or scope expansion, propose one read-only test on the exact frozen candidate. Give the repository path, distinguishing literal, and bounded decisions for finding or missing that literal. Use the resulting evidence before any repair.",
       {reason:Type.String(), path:Type.String(), contains:Type.String(), ifPresent:decision, ifAbsent:decision,
         repairScope:Type.Array(Type.String())},
       async (args, toolCallId) => {
@@ -1385,6 +1386,7 @@ export async function runWork({
             acceptance: result,
           });
         if (m) staffUpdate(m, "disposed");
+        else staff?.settledRoot({taskId:task.record.id, changeId:fixed.changeId, requestId:result.requestId, acceptedVersion:result.acceptedVersion});
         notify(true);
       } else if (result.status === "unknown") {
         fixed.status = "outcome_unknown";
@@ -1713,14 +1715,22 @@ export async function runWork({
     task.record.members = [];
     save();
     await acquireSeat(leaderSeat);
-    const intent = task.record.workIntent ?? {},
-      initial = await begin(
+    const intent = task.record.workIntent ?? {};
+    const continuation=task.record.project?.continuation;
+    let restore;
+    if(continuation?.draft&&continuation.stepId===task.record.project.stepId) {
+      restore=await restorationPaths(v,continuation.draft,expectedStart,task.record.project.scope);
+      if(restore.conflicts.length)throw problem('RESTORE_CONFLICT','正式文件已变化：'+restore.conflicts.join(', '));
+      if(restore.paths.length){work.restoreRequestId??=randomUUID();save();}
+    }
+    const initial = await begin(
         "main",
-        intent.scope,
+        restore?restore.paths:intent.scope,
         intent.readScope,
         task.record.input,
-        !intent.scope?.length,
-        shared ? {baseVersion:expectedStart} : {},
+        restore?!restore.paths.length:!intent.scope?.length,
+        {...(shared||restore?{baseVersion:expectedStart}:{}),...(restore?.paths.length?
+          {baseVersion:expectedStart,restoreFrom:continuation.draft.version,requestId:work.restoreRequestId}:{})},
       );
     shared?.initialProjectionSettled();
     work.startVersion = initial.baseVersion ?? work.startVersion;
@@ -1729,6 +1739,10 @@ export async function runWork({
     if (initial.status === "blocked")
       throw problem("SCOPE_BLOCKED", JSON.stringify(initial));
     mainBinding = binding(initial, "main", work);
+    if(restore&&task.projectPolicy) {
+      const route=await task.projectPolicy.bindContinuationRoute(initial,v);
+      if(route){task.record.project.route=route;await restoreOriginalScope(mainBinding,route);save();}
+    }
     const stage = task.beginPhase("work", "main", config.main);
     leader = await createRuntime({
       home,
@@ -1855,6 +1869,11 @@ export async function runWork({
     if (mainBinding.unknownOperation)
       throw problem("OPERATION_UNKNOWN", "领导尚有未知命令。");
     const checkAndSnapshot = async () => {
+      if(task.record.project&&!work.acceptance.length&&work.changes.every(c=>c.readOnly)) {
+        const version=(await v.inspect()).version;
+        for(const path of task.record.project.deliverables)if(!(await v.read({version,path})).contentHash)
+          throw problem('DELIVERABLE_MISSING','本阶段尚未交付：'+path+'；保留输入版本，不将只读调查当作实现候选。');
+      }
       work.finalCheck = await invoke("checkCurrent", {}, (id) =>
         v.checkCurrent({requestId:id,signal:task.signal,...(shared ? {checkPolicy:task.record.project.checkPolicy} : {})}),
       );
@@ -1937,35 +1956,7 @@ export async function runWork({
     }
     throw e;
   } finally {
-    const cleanupErrors=[];
-    const cleanup=async(phase,run)=>{try{await run();}catch(error){cleanupErrors.push({phase,error});}};
-    if (processCheck) await cleanup("process-check",()=>processCheck.detach(processSource));
-    if (task.signal.aborted) await cleanup("abort-members",()=>abortMembers());
-    for (const m of members.values()) {
-      await cleanup("cancel-member:"+m.record.memberId,()=>{m.controller.abort();if(!m.attempt)finishPromise(m);});
-    }
-    await cleanup("plugin-helpers",()=>pluginWork?.close());
-    const aborts=await Promise.allSettled([...runtimes].map(rt=>rt.session.abort()));
-    aborts.forEach((result,index)=>{if(result.status==="rejected")cleanupErrors.push({phase:"abort-runtime:"+index,error:result.reason});});
-    await Promise.allSettled([...members.values()].map(m=>m.promise));
-    await Promise.allSettled([...members.values()].map(m=>m.pauseSettlement));
-    await cleanup("capacity",()=>releaseSeat(leaderSeat));
-    // A known partial result or an unknown shutdown in one session cannot skip another session.
-    for(const rt of runtimes)await cleanup("runtime:"+rt.sessionManager.getSessionId(),()=>rt.dispose());
-    task.signal.removeEventListener("abort",abortMembers);
-    if (v && !shared) await cleanup("versioning",()=>v.close());
-    if (shared) for (const change of work.changes) {
-      if (change.readOnly || ['accepted','abandoned','interrupted','outcome_unknown'].includes(change.status)) continue;
-      await cleanup('versioning:'+change.changeId,async()=>{
-        const actual=await v.inspect({changeId:change.changeId});
-        if (!['accepted','abandoned','interrupted','outcome_unknown'].includes(actual.status))
-          await v.abandonChange(change.changeId);
-      });
-    }
-    if(cleanupErrors.length) {
-      work.cleanupErrors=cleanupErrors.map(({phase,error})=>({phase,code:error.code??null,message:error.message??String(error)}));
-      try{save();}catch{}
-      if(!executionError)throw cleanupErrors[0].error;
-    }
+    await settleWork({task,work,processCheck,processSource,members,runtimes,pluginWork,v,shared,
+      leaderSeat,releaseSeat,abortMembers,finishPromise,save,executionError});
   }
 }

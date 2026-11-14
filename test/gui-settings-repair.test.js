@@ -243,3 +243,19 @@ test("a frozen execution inspection uses its original image after live settings 
   assert.equal(result.configDigest,settings.guiExecutionConfigDigest(work));
   assert.equal(fixture.calls.find(args=>args[2]==="image").at(-1),image);
 });
+test("shutdown aborts and drains a stalled metadata body without retaining settings ownership",async t=>{
+  const {createServer}=await import("node:http"),{readFileSync}=await import("node:fs");
+  const f=await fixture(t),previous=process.env.PI_OFFLINE;process.env.PI_OFFLINE="0";
+  let arrived,disconnected,pending,controller;
+  const received=new Promise(resolve=>arrived=resolve),closed=new Promise(resolve=>disconnected=resolve);
+  const server=createServer((req,res)=>{res.writeHead(200,{"content-type":"application/json"});res.write('{"data":[');res.on("close",disconnected);arrived();});
+  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
+  t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await pending;await controller?.close();if(previous===undefined)delete process.env.PI_OFFLINE;else process.env.PI_OFFLINE=previous;});
+  const path=join(f.home,"pi/models.json"),catalog=JSON.parse(readFileSync(path,"utf8"));
+  catalog.providers.fixture.baseUrl=`http://127.0.0.1:${server.address().port}/v1`;writeFileSync(path,JSON.stringify(catalog));
+  const {createGuiController}=await import("../src/gui-controller.js");controller=await createGuiController({home:f.home,cwd:f.home});
+  pending=controller.action("provider.inspectMetadata",{providerId:"fixture"});await received;
+  const state=await controller.beginShutdown();assert.equal(state.settled,true,state.reason);
+  const result=await pending;assert.equal(result.status,"unavailable");assert.match(result.message,/取消/);
+  await closed;await controller.close();assert.equal(f.calls.length,0);
+});

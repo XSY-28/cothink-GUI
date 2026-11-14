@@ -1,3 +1,4 @@
+import {isUtf8} from 'node:buffer';
 export { capturePreview, parsePreviewOutput, preflightVisual, visualManifest, visualRuntimeProblem } from "./visual-browser.js";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -7,6 +8,25 @@ import { validatePreviewInput } from "../scripts/visual-preview.mjs";
 import { problem } from "./task.js";
 import { capturePreview, sha } from "./visual-browser.js";
 
+/** Preserve authoritative bytes; binary output is not UTF-8 model context. */
+export function binaryOutputNotice(bytes,ref) {
+  if(isUtf8(bytes)&&!bytes.includes(0))return null;
+  return `Binary command output retained at output:${ref}; read it as an image if supported. Mixed binary/text logs are not decoded as model text.`;
+}
+export function imageMime(b) {
+      if (
+        b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      )
+        return "image/png";
+      if (b[0] === 255 && b[1] === 216) return "image/jpeg";
+      if (b.subarray(0, 3).toString() === "GIF") return "image/gif";
+      if (
+        b.subarray(0, 4).toString() === "RIFF" &&
+        b.subarray(8, 12).toString() === "WEBP"
+      )
+        return "image/webp";
+      return null;
+}
 export function checkedVisualReview(evidence, version, imageRequestCompleted) {
   const review=evidence.review;
   return !!version && imageRequestCompleted && review?.status==="completed" &&

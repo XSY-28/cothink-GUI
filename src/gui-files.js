@@ -1,8 +1,8 @@
 import {resolveOwnedTasks} from "./project-delivery.js";
 import { posix } from 'node:path';
-import {withGuiWork, guiWorkVersions, guiResultWorkspace} from './gui-work.js';
+import {withGuiWork, guiWorkVersions, guiResultWorkspace,resolveTaskDraft,withGuiFileWork} from './gui-work.js';
 import {inScope} from './versioning.js';
-import { FILE_LIMITS, changed, format, raster, readAcceptedBlob, readBounded, regular, reject, sha256, snapshot, statusOf, text, unsupported, validateFilePath } from "./gui-file-content.js";
+import { FILE_LIMITS, changed, format, raster, readFixedBlob, readBounded, regular, reject, sha256, snapshot, statusOf, text, unsupported, validateFilePath } from "./gui-file-content.js";
 import { staticPreview } from "./gui-file-preview.js";
 export { FILE_LIMITS, fileError, validateFilePath } from "./gui-file-content.js";
 
@@ -58,7 +58,12 @@ export function splitFileDiff(diff, s) {
 }
 export async function guiFiles(home, record) {
   if(record.flow==='unified'&&!record.deliveryRef)return guiPartialFiles(home,record);
-  try { return await guiWorkFiles(home,record); }
+  try {
+    const result=await guiWorkFiles(home,record);
+    if(record.deliveryRef)return result;
+    const drafts=await guiDraftFiles(home,record);
+    return {...result,items:[...result.items,...drafts.items],warnings:[...result.warnings,...drafts.warnings]};
+  }
   catch(error) {
     if(record.flow!=='unified')throw error;
     return guiPartialFiles(home,record,'正式交付来源尚不能核验：'+error.message);
@@ -72,13 +77,32 @@ async function guiPartialFiles(home,record,reason) {
   catch(error){addError(error);}
   for(const child of children.filter(c=>c.work?.root)){
     try{
-      const list=await guiWorkFiles(home,child);
+      const list=await guiFiles(home,child);
       items.push(...list.items.map(item=>({...item,patchTaskId:list.patchTaskId,revealTaskId:list.revealTaskId})));
       warnings.push(...list.warnings);
     }catch(error){warnings.push(error.message);}
   }
-  if(items.length)warnings.unshift('项目整体验收尚未完成；以下是已接纳的固定版本文件或差异。');
+  if(items.length)warnings.unshift('项目整体验收尚未完成；已接纳文件与未验收草稿分别标记。');
   return {taskId:record.id,fromVersion:null,toVersion:null,items,limits:FILE_LIMITS,warnings:[...new Set(warnings)]};
+}
+async function guiDraftFiles(home,record) {
+  const items=[],warnings=[];
+  for(const change of record.work?.changes??[]) {
+    try {
+      const draft=await resolveTaskDraft({home,record,changeId:change.changeId});
+      if(!draft)continue;
+      const ref={taskId:record.id,version:draft.version,draft:{changeId:draft.changeId,baseVersion:draft.baseVersion}};
+      await withGuiFileWork(home,record,ref,async(v,w,_,source)=>{
+        const s=await snapshot(v,w,{fromVersion:draft.baseVersion,toVersion:draft.version,accepted:null});
+        for(const path of changed(s).filter(source.allows))items.push({
+          ref:{...ref,path},name:path,status:statusOf(s.before.get(path),s.after.get(path)),...format(path),
+          readable:!!regular(s.after.get(path)),source:change.actor,unverified:true,
+        });
+      });
+    }catch(error){warnings.push(`草稿 ${change.changeId}：${error.message}`);}
+  }
+  if(items.length)warnings.unshift('未验收草稿来自已保存的固定版本；尚未确认接纳、测试或完整可运行。');
+  return {items,warnings};
 }
 async function guiWorkFiles(home,record) {
   return withGuiWork(home,record,async(v,w,delivery)=>{
@@ -118,9 +142,10 @@ async function guiWorkFiles(home,record) {
   });
 }
 export async function guiFileDiff(home,record,ref) {
-  return withGuiWork(home,record,async(v,w)=>{
-    const s=await snapshot(v,w);validateRef(record,ref,s);
-    if(record.project&&!w.resultWorkspace&&!s.accepted)reject('FILE_UNAVAILABLE','此任务尚无已接纳的文件版本。');
+  return withGuiFileWork(home,record,ref,async(v,w,_,source)=>{
+    const s=await snapshot(v,w,source?{fromVersion:source.draft.baseVersion,toVersion:source.draft.version,accepted:null}:undefined);validateRef(record,ref,s);
+    if(source&&!source.allows(ref.path))reject('FILE_NOT_FOUND','文件不在原草稿授权范围内。');
+    if(!source&&record.project&&!w.resultWorkspace&&!s.accepted)reject('FILE_UNAVAILABLE','此任务尚无已接纳的文件版本。');
     const diff=await v.inspect({fromVersion:s.fromVersion,toVersion:s.toVersion});
     const split=splitFileDiff(diff,s);
     if(split.warning)reject('FILE_DIFF_UNSUPPORTED',split.warning);
@@ -134,15 +159,17 @@ function validateRef(record,ref,s,artifacts) {
 }
 export async function guiFile(home, record, ref, {purpose='source'}={}) {
   if(!['source','preview','download'].includes(purpose))reject('FILE_PURPOSE_INVALID','文件读取用途无效。');
-  return withGuiWork(home,record,async(v,w,delivery)=>{
-    const s=await snapshot(v,w);validateRef(record,ref,s,delivery?.artifacts);
+  return withGuiFileWork(home,record,ref,async(v,w,delivery,source)=>{
+    const s=await snapshot(v,w,source?{fromVersion:source.draft.baseVersion,toVersion:source.draft.version,accepted:null}:undefined);validateRef(record,ref,s,delivery?.artifacts);
+    if(source&&!source.allows(ref.path))reject('FILE_NOT_FOUND','文件不在原草稿授权范围内。');
     const entry=s.after.get(ref.path);if(!entry)reject('FILE_DELETED','文件在此版本已删除，仅能查看差异。');
-    const workspace=s.accepted?null:await guiResultWorkspace(v,w,s.toVersion),type=format(ref.path);
+    const workspace=s.accepted||source?null:await guiResultWorkspace(v,w,s.toVersion),type=format(ref.path);
     const read=(path,file,limit)=>{
-      if(!s.accepted)return readBounded(workspace,path,file,limit);
-      if(path!==ref.path&&!inScope(path,[...(record.project?.scope??[]),...(record.project?.readScope??[])]))
+      if(!s.accepted&&!source)return readBounded(workspace,path,file,limit);
+      if(source&&!source.allows(path))unsupported('预览资源不在该草稿的读取范围内');
+      if(!source&&path!==ref.path&&!inScope(path,[...(record.project?.scope??[]),...(record.project?.readScope??[])]))
         unsupported('预览资源不在该次执行的读取范围内');
-      return readAcceptedBlob(v.root,path,file,limit);
+      return readFixedBlob(v.root,path,file,limit);
     };
     if(purpose==='preview'&&type.previewKind==='unsupported')reject('FILE_PREVIEW_UNSUPPORTED','此格式暂不支持内嵌预览，请下载原文件或打开成果目录。');
     const max=purpose==='download'?FILE_LIMITS.downloadBytes:purpose==='preview'&&type.previewKind==='image'?FILE_LIMITS.previewBytes:FILE_LIMITS.textBytes;

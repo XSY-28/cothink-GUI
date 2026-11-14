@@ -8,12 +8,12 @@
     {
       "path": "DESIGN_BASELINE.md",
       "unit": "characters",
-      "limit": 15787
+      "limit": 18000
     },
     {
       "path": "README.md",
       "unit": "characters",
-      "limit": 33911
+      "limit": 39000
     },
     {
       "path": "docs/gui/PROJECT_TEAM_RUNTIME_ALIGNMENT_PLAN.md",

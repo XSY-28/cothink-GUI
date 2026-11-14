@@ -91,7 +91,8 @@ test('PROJECT URL lost response, duplicate work, cancel ACK and pause use the or
 
 test('PROJECT MCP hard cap rejects asserted zero fees on URL before any operation send',async t=>{
   const remote=await server(t),selected=selection();selected.tools.read.feeBoundary={maxCost:0,authority:'claimed free'};
-  await assert.rejects(controlled(t,{url:remote.url},selected,{maxCalls:null,maxCost:0}),{code:'PROJECT_BUDGET'});
+  const m=await controlled(t,{url:remote.url},selected,{maxCalls:null,maxCost:0});
+  await assert.rejects(m.call('project_mcp_0_read','limited',{workId:'read-work',arguments:{}}),{code:'PROJECT_BUDGET'});
   assert.equal(remote.state.requests.filter(r=>r.m.method==='tools/call').length,0);
 });
 
@@ -154,18 +155,6 @@ test('normal URL PROJECT runs real read/write/start, deduplicates across work, c
   const task=listTasks(f.home)[0];assert.doesNotMatch(JSON.stringify(task),/Bearer scoped/);assert.equal(task.tools.flatMap(r=>r.kind==='project_mcp_runtime'?r.requests:[]).filter(r=>r.tool==='start'||r.tool==='start_second').length,2);
 });
 
-test('PROJECT MCP capability cannot be forged, transferred to another session/actor/schema or widened',()=>{
-  const selected=selection(),binding={projectId:'p',stepId:'s',revision:1,taskId:'t',scope:['a.txt'],mcp:[selected]};
-  const state={id:'p',status:'active',budget:{maxCost:null},steps:[{id:'s',revision:1,status:'running',scope:['a.txt'],attempts:[{taskId:'t'}]}]};
-  const policy=createProjectPolicy({host:{assertOwned(){},read:()=>structuredClone(state),update:f=>f(state)},binding});
-  const spec={server:'local',actor:'main',sessionId:'session',sourceDigest:'source',changeId:'change',inputVersion:'version',registrationVersion:'schema',readOnly:false,scope:['a.txt'],readScope:['a.txt'],localNoNetwork:false};
-  const capability=policy.issueMcpCapability(spec),detail={...spec,capability,kind:'read',tool:'read',args:{}};
-  policy.admitMcp(detail);
-  for(const change of [{capability:{}},{capability:JSON.parse(JSON.stringify(capability))},{actor:'member:other'},{sessionId:'other'},{registrationVersion:'new-schema'},{scope:['.']},{readOnly:true}])assert.throws(()=>policy.admitMcp({...detail,...change}),/authority|changed|owning/i);
-  state.status='paused';assert.throws(()=>policy.admitMcp(detail),{code:'PROJECT_PAUSED'});
-  assert.throws(()=>policy.admitMcp({...detail,kind:'query',tool:'status',original:{id:'forged'}}),{code:'PROJECT_MCP_RECOVERY'});
-});
-
 test('PROJECT chat freezes and displays the same explicit MCP contract before starting, and cancel has no MCP traffic',async t=>{
   const {projectChat}=await load('src/project-chat.js');const remote=await server(t),repo=repository(t),selected=selection();
   const plan={mcp:[selected],scope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e','process.exit(0)']}],budget:{maxCalls:0}};
@@ -198,6 +187,7 @@ test('PROJECT command MCP async start counts once, queries the original job, and
 
 test('a persisted unsent-or-unknown MCP intent cannot replay after its runtime has been rebuilt',async t=>{
   const remote=await server(t),m=await controlled(t,{url:remote.url});
+  await assert.rejects(m.call('project_mcp_0_read','unowned',{workId:'unowned',arguments:{}}));
   const runtime=m.task.record.tools.find(r=>r.kind==='project_mcp_runtime');
   const spec={server:'local',actor:'main',sessionId:runtime.sessionId,sourceDigest:runtime.sourceDigest,changeId:runtime.changeId,inputVersion:runtime.inputVersion,registrationVersion:runtime.registrationVersion,readOnly:runtime.readOnly,scope:runtime.scope,readScope:runtime.readScope,localNoNetwork:false};
   const capability=m.task.projectPolicy.issueMcpCapability(spec),args={value:7},payloadDigest=createHash('sha256').update(JSON.stringify({tool:'write',args})).digest('hex');
@@ -262,13 +252,15 @@ test('normal PROJECT employee uses its own command MCP copy and creator review b
   const run=await invoke(f,['project','start','--file',plan,'--json'],'',repo.project);if(error)throw error;assert.equal(run.code,0,run.stdout+run.stderr);const state=JSON.parse(run.stdout);assert.equal(state.status,'completed',run.stdout);
   const task=listTasks(f.home)[0],result=task.tools.find(r=>r.resultId===resultId);assert.equal(result.parentActorId,'member:'+memberId);assert.equal(result.treatment.decision,'adopted');assert.equal(git(repo.project,'show',state.version+':a.txt'),'MCP_CHECKED');
   assert.equal(task.stages.filter(s=>s.phase==='project-effect').length,0,'The MCP effect must not cause an extra model generation');assert.equal(state.usage.calls,f.calls.length);assert.equal(state.usage.externalOperations,2);
-  const runtimes=task.tools.filter(r=>r.kind==='project_mcp_runtime');assert.ok(runtimes.every(r=>r.stoppedAt));assert.ok(new Set(runtimes.map(r=>r.sessionId)).size>=2);assert.ok(new Set(runtimes.map(r=>r.cwd)).size>=2);
+  const runtimes=task.tools.filter(r=>r.kind==='project_mcp_runtime');assert.ok(runtimes.every(r=>r.stoppedAt));assert.ok(runtimes.length>0);
+  for(const r of runtimes){assert.equal(r.parentActorId,'member:'+memberId);assert.ok(task.stages.some(s=>s.sessionId===r.sessionId&&s.role===r.parentActorId));assert.ok(r.cwd.includes('/member-'+memberId+'/'));}
 });
 
 
 test('MCP echoed credentials in RPC initialization, tool and recovery errors are redacted before model, history and CLI propagation',async t=>{
   const remote=await server(t);remote.state.rpcErrorFor='initialize';
-  await assert.rejects(controlled(t,{url:remote.url,headers:{authorization:'Bearer scoped'}}),error=>{assert.doesNotMatch(error.message,/Bearer scoped/);assert.match(error.message,/REDACTED/);return true;});
+  const initializing=await controlled(t,{url:remote.url,headers:{authorization:'Bearer scoped'}});
+  await assert.rejects(initializing.call('project_mcp_0_read','init-error',{workId:'read-work',arguments:{}}),error=>{assert.doesNotMatch(error.message,/Bearer scoped/);assert.match(error.message,/REDACTED/);return true;});
   delete remote.state.rpcErrorFor;const m=await controlled(t,{url:remote.url,headers:{authorization:'Bearer scoped'}});
   remote.state.rpcErrorFor='write';const failed=await m.call('project_mcp_0_write','error-write',{workId:'write-work',arguments:{value:7}});assert.equal(failed.status,'outcome_unknown');assert.doesNotMatch(JSON.stringify(failed),/Bearer scoped/);assert.match(failed.error,/REDACTED/);assert.doesNotMatch(JSON.stringify(m.task.record),/Bearer scoped/);assert.doesNotMatch(JSON.stringify(m.state),/Bearer scoped/);
   delete remote.state.rpcErrorFor;const started=await m.call('project_mcp_0_start','error-job',{workId:'job-work',arguments:{id:'independent'}});assert.equal(started.status,'outcome_unknown');

@@ -72,7 +72,8 @@ export async function fixture(t, handler = () => ({ text: "fixture answer" })) {
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((r) => server.close(r));
-    rmSync(home, { recursive: true, force: true });
+    // macOS file viewers can finish directory metadata writes after the App exits.
+    rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   });
   return {
     home,

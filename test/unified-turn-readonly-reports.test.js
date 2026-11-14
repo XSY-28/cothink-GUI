@@ -255,3 +255,49 @@ test('a saved file route rejects a later read-only delegation from the same resp
  assert.equal(task.record.stages.some(stage=>stage.assignment),false);
  assert.equal(f.calls.length,1);
 });
+
+for(const maxCalls of [12,3]) test(`readonly checker correction shares root budget ${maxCalls} and preserves original output`,async t=>{
+ let checks=0;
+ const detached=Promise.withResolvers();
+ const f=await fixture(t,async({body})=>{
+   if(JSON.stringify(body.messages).includes('cothink-process-observation')) {
+     const index=++checks;
+     if(maxCalls===3&&index===1)await detached.promise;
+     return {text:index===1?'{"issues":false}':'{"issues":[]}'};
+   }
+   if(body.model==='r2')return {text:'Independent evidence verified'};
+   const tools=body.messages.filter(message=>message.role==='tool');
+   if(!tools.length)return {toolCalls:[{name:'delegate',args:{workId:'checked',model:'fixture/r2',assignment:'Investigate',reason:'Separate evidence'}}]};
+   if(tools.length===1)return {toolCalls:[{name:'collect',args:{assignmentId:JSON.parse(tools[0].content).assignmentId}}]};
+   return {text:'Combined evidence verified'};
+ });
+ const task=await runProjectTurn({...opts(f),input:'Investigate together.',budget:{maxCalls},
+   onTaskCreated(root){
+     if(maxCalls!==3)return;
+     const checker=root.rootOwner.processCheck,detach=checker.detach.bind(checker);
+     // Return the real malformed HTTP response only once teardown has entered
+     // the real detach method; the employee reservation must still be held.
+     checker.detach=source=>{const settled=detach(source);detached.resolve();return settled;};
+   },
+ });
+ const [original,correction]=task.record.processCheck.observations;
+ assert.equal(original.status,'failed');
+ assert.equal(correction.correctionOf,original.id);
+ assert.equal(task.requests().find(row=>row.id===original.requestId).status,'completed');
+ assert.equal(task.record.rootRequests.filter(row=>!row.notSent).length,f.calls.length);
+ assert.equal(task.record.usage.calls,f.calls.length);
+ assert.ok(f.calls.length<=maxCalls);
+ if(maxCalls===3){
+   assert.notEqual(task.record.status,'completed');
+   assert.equal(checks,1);
+   assert.equal(task.record.processCheck.gap.code,'ROOT_BUDGET');
+ }else{
+   assert.equal(task.record.status,'completed',task.record.error);
+   assert.equal(correction.status,'completed');
+   const {projectGuiProcessCheck}=await import('../src/gui-process-projection.js');
+   const messages=task.requests().map(row=>({...row,taskId:task.record.id,sessionId:task.record.stages.find(stage=>stage.id===row.stageId)?.sessionId}));
+   const view=projectGuiProcessCheck(task.record,messages);
+   assert.equal(view.observations.find(row=>row.id===correction.id).correctionOf,original.id);
+   assert.ok(view.observations.some(row=>row.members.some(member=>member.covered)));
+ }
+});

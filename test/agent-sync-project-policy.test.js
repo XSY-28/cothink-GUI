@@ -9,48 +9,8 @@ import { invoke } from "./helpers/cli-fixture.js";
 import { saveConfig } from "../src/config.js";
 import { createProjectPolicy, recordRouteObservation } from "../src/project-policy.js";
 
-const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
-const checks = [
-  {
-    command: "node",
-    args: ["-e", "const value = require('./export.json'); if(value.version !== 2) process.exit(1)"],
-  },
-];
-const review = {
-  path: "export.json",
-  contains: '"version":1',
-  reason: "An old version tag predicts an upgrade fault. If absent we do not know the cause.",
-  ifPresent: "repair",
-  ifAbsent: "blocked",
-  repairScope: ["export.json"],
-};
+import {project,tool,checks,review} from './project-policy.fixture.js';
 
-async function project(t, { spec = {}, budget = { maxCalls: 7 }, handler }) {
-  const repo = repository(t),
-    f = await fixture(t, handler);
-  saveConfig(f.home, { formatVersion: 2, ...f.models, work: { checks, execution } });
-  const input = join(f.home, "plan.json");
-  writeFileSync(
-    input,
-    JSON.stringify({
-      goal: "Export a readable version 2 artifact.",
-      scope: ["export.json"],
-      budget,
-      steps: [
-        {
-          id: "export",
-          goal: "Read version tag through normal entry.",
-          deliverables: ["export.json"],
-          checks,
-          ...spec,
-        },
-      ],
-    }),
-  );
-  const reply = await invoke(f, ["project", "start", "--file", input, "--json"], "", repo.project);
-  assert.ok(reply.stdout.trim(), reply.stderr);
-  return { repo, f, reply, state: JSON.parse(reply.stdout) };
-}
 function responses(c, n) {
   const turns = [
     tool("write", { path: "export.json", content: '{"version":1}' }),

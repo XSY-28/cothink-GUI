@@ -288,9 +288,14 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
     },
     async detach(source) {
       if (!sources.delete(source)) return;
-      for (const [role, taskId] of allowances) if (taskId === source.task.record.id) allowances.delete(role);
       if (!sources.size) cancelTimer();
-      if (inspectionOwner === source) await inflight;
+      try {
+        if (inspectionOwner === source) await inflight;
+      } finally {
+        // A pending correction must not spend the employee's reserved call
+        // merely because its source is being detached during root teardown.
+        for (const [role, taskId] of allowances) if (taskId === source.task.record.id) allowances.delete(role);
+      }
     },
     close() {
       if (closePromise) return closePromise;

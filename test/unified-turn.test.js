@@ -149,3 +149,45 @@ test('cancellation during confirmed import leaves no operation intent',async t=>
  const rejected=assert.rejects(pending,{code:'CANCELLED'});await root.cancel();await rejected;
  assert.equal(root.record.projectOperation,undefined);assert.equal(root.record.confirmationSource,undefined);assert.ok(root.record.cancelSettledAt);assert.equal(f.calls.length,0);
 });
+
+test('advertised start_work arguments reject mixed or missing action-specific sources before dispatch',async()=>{
+ const {cothinkExtension}=await import('../src/extensions/cothink.js'),{validateToolArguments}=await import('@earendil-works/pi-ai');
+ const tools=[];cothinkExtension({flow:'unified'})({on(){},registerTool(tool){tools.push(tool);}});const tool=tools.find(t=>t.name==='start_work');
+ const plan={goal:'file'},planRef={taskId:'saved',field:'proposal',sha256:'hash'};
+ const check=arguments_=>validateToolArguments(tool,{name:'start_work',arguments:arguments_});
+ for(const action of ['start','revise']){
+  assert.doesNotThrow(()=>check({action,reason:'bounded work',plan}));
+  assert.throws(()=>check({action,reason:'bounded work',plan,planRef}));
+  assert.throws(()=>check({action,reason:'bounded work',planRef}));
+ }
+ assert.doesNotThrow(()=>check({action:'resume',reason:'saved source',planRef}));
+ assert.throws(()=>check({action:'resume',reason:'saved source',plan,planRef}));
+ assert.throws(()=>check({action:'resume',reason:'saved source',plan}));
+});
+
+test('staff tool rejects unsupported needs and reports the current registered scope without widening it',async()=>{
+ const {createProjectStaff}=await import('../src/project-staff.js'),{validateToolArguments}=await import('@earendil-works/pi-ai');
+ const state={staff:[],scope:['a.txt'],readScope:['a.txt'],steps:[{id:'main',scope:['a.txt'],deliverables:['a.txt'],attempts:[{taskId:'current'}]}]};
+ const staff=createProjectStaff({read:()=>state,update:fn=>fn(state)}),tool=staff.tools('root',()=>{},'current',['fixture/r1']).find(t=>t.name==='project_staff');
+ for(const need of ['deliverable','review','capability'])assert.doesNotThrow(()=>validateToolArguments(tool,{name:tool.name,arguments:{action:'appoint',input:{need}}}));
+ assert.throws(()=>validateToolArguments(tool,{name:tool.name,arguments:{action:'appoint',input:{need:'implementation'}}}));
+ await assert.rejects(tool.execute('outside',{action:'register_work',input:{scope:['b.txt']}}),error=>error.code==='PROJECT_STAFF'&&error.message.includes('a.txt'));
+ assert.equal(state.steps[0].subworks,undefined);
+});
+
+test('an explicit two-employee requirement cannot be fulfilled by the manager plus one collected employee',async t=>{
+ let main=0;
+ const f=await fixture(t,({body})=>{
+  if(JSON.stringify(body.messages).includes('cothink-process-observation'))return {text:'{"issues":[]}'};
+  if(body.model==='r2')return {text:'Read-only source investigation completed; execution and playtesting remain unverified.'};
+  if(++main===1)return {toolCalls:[{name:'delegate',args:{workId:'source-review',model:'fixture/r2',assignment:'Review source evidence without execution',reason:'First explicitly required employee'}}]};
+  if(main===2)return {toolCalls:[{name:'collect',args:{assignmentId:JSON.parse(body.messages.findLast(m=>m.role==='tool').content).assignmentId}}]};
+  return {text:'One employee was collected; a second employee is still missing.'};
+ });
+ const task=await runProjectTurn({...opts(f),input:'安排两名员工分析证据。'});
+ assert.equal(task.record.status,'partial',task.record.error);assert.equal(task.record.collaborationResult[0].requirement.workers,2);
+ assert.equal(task.record.collaborationResult[0].status,'unfulfilled');assert.equal(task.record.collaborationResult[0].evidence.length,1);
+ assert.equal(task.record.stages.filter(s=>s.assignment&&!s.assignment.reviewOf).length,1);
+ const employee=f.calls.find(c=>c.body.model==='r2');assert.ok(employee);
+ assert.ok(!employee.body.tools.some(t=>['bash','preview_html','write','edit'].includes(t.function.name)));
+});

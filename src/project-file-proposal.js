@@ -7,9 +7,10 @@ import { checkedPlanCollaboration, digest, userCollaboration } from "./project-c
 import { checkPlanScope, completedDelivery, executeConfirmed, selectedExecutionScope, workConfirmationBlocker } from "./project-file-confirmation.js";
 import { resolveHandoffContext } from "./project-readonly-reports.js";
 
+export const workIntentActions=Object.freeze(["start","resume","revise"]);
 export function validateWorkIntent(task,args) {
   if(!args||Object.keys(args).some(key=>!["action","reason","plan","planRef"].includes(key))||
-    !["start","resume","revise"].includes(args.action)||typeof args.reason!=="string"||!args.reason.trim()||
+    !workIntentActions.includes(args.action)||typeof args.reason!=="string"||!args.reason.trim()||
     (args.action==="resume"?(!args.planRef||args.plan!==undefined):(!args.plan||args.planRef!==undefined)))
     throw problem("WORK_PLAN","Use only plan for start/revise, only planRef for resume; never combine them. Provide a nonempty reason.");
   let plan=args.plan,previous,authorityRoot,planCollaboration;

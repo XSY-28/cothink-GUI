@@ -311,3 +311,13 @@ test("result revision tracks the visible delivery but ignores timers, usage and 
   assert.notEqual(revision(root),revision({...root,deliveryRef:{...root.deliveryRef,version:"v2"}}));
   assert.notEqual(revision(root),revision({...root,deliveryRef:{...root.deliveryRef,checksRef:[{requestId:"check-2"}]}}));
 });
+
+test('saved draft versions refresh the original file list while a writer is still running',()=>{
+  const record={status:'running',stages:[],work:{changes:[{changeId:'draft',actor:'main',baseVersion:'base',privateVersion:'saved-one',readOnly:false}]}};
+  const first=projection.guiResultRevision(record,'');
+  assert.match(first,/^[0-9a-f]{64}$/);
+  const later=structuredClone(record);later.work.changes[0].privateVersion='saved-two';
+  assert.notEqual(projection.guiResultRevision(later,''),first);
+  const root={status:'running',stages:[]};
+  assert.notEqual(projection.guiResultRevision(root,'',[record]),projection.guiResultRevision(root,'',[later]));
+});

@@ -186,6 +186,7 @@ export function projectGuiTask(record, requests = [], sessionEntries = [], {deli
         version: w.version ?? null,
         integrationRef: w.integrationRef ?? null,
         resultWorkspace: w.resultWorkspace ?? null,
+        changes: (w.changes??[]).map(({changeId,actor,baseVersion,privateVersion,readOnly})=>({changeId,actor,baseVersion,privateVersion,readOnly})),
         finalCheck: clone(w.finalCheck),
         visualEvidence: (w.visualEvidence ?? []).map(e => {
           const imageRequestCompleted = !!e.imageRequestId && requests.some(r => r.id === e.imageRequestId && r.status === "completed");
@@ -287,9 +288,13 @@ export function projectGuiExecutions(home, task, sources) {
   });
 }
 // Hash only what can change the delivery the user reads.
-export function guiResultRevision(record, text) {
+export function guiResultRevision(record, text, executionTasks=[]) {
+  const drafts=[record,...executionTasks].flatMap(source=>(source.work?.changes??[])
+    .filter(change=>!change.readOnly&&change.privateVersion)
+    .map(change=>[source.id,change.changeId,change.baseVersion,change.privateVersion,
+      (source.members??[]).find(member=>member.changeId===change.changeId)?.collected]));
   const status = taskDisplayStatus(record);
-  if (!["completed", "partial", "failed", "cancelled", "blocked", "outcome_unknown", "stop_unknown"].includes(status))
+  if (!drafts.length && !["completed", "partial", "failed", "cancelled", "blocked", "outcome_unknown", "stop_unknown"].includes(status))
     return null;
   const work = record.work;
   const accepted = !work?.resultWorkspace && work?.acceptance?.findLast(receipt => receipt.status === "accepted");
@@ -298,7 +303,7 @@ export function guiResultRevision(record, text) {
     !!check.reusedFrom, check.checks?.map(result =>
       [result.name, result.command, result.status, result.verification, result.exitCode, result.signal])] : null;
   return createHash("sha256").update(JSON.stringify([
-    status, text, record.error ?? null,
+    status, text, record.error ?? null, drafts,
     work ? [work.startVersion, accepted?.acceptedVersion ?? work.version, work.integrationRef, evidence] : null,
     record.deliveryRef ? [record.deliveryRef.version,record.deliveryRef.checksRef,record.deliveryRef.artifactsDigest,record.deliveryPlacement,record.managerFinal?.callId] : null,
   ])).digest("hex");

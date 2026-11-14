@@ -1,3 +1,4 @@
+import {continuationSources} from './project-continuation.js';
 import { createHash } from 'node:crypto';
 import { problem, readRequest, readRequests, readTask } from './task.js';
 import { workModelIdentity } from "./model-roster.js";
@@ -212,12 +213,14 @@ function receivedWorkerResult(member,child,calls) {
 
 export function formalCollaborationCandidates(task,state,sources) {
   const facts=[];
-  for (const {record:child,stepId,relation} of sources) {
+  const {inputs,inheritedRoots}=continuationSources(task,state,sources);
+  for (const {record:child,stepId,relation} of inputs) {
     if (!child.members?.length) continue;
     const root=relation==="owned"?task.record:readTask(task.home,child.rootTaskId);
     const reusedRequirements=relation==="inherited"?root.proposal?.collaboration:null;
-    if (relation==="inherited"&&(task.record.proposal.action!=="resume"||!reusedRequirements?.length||
-        root.projectOperation?.revision!==state.revision||root.projectOperation.commandId!==child.project.commandId||
+    const continued=inheritedRoots.has(root.id)&&root.proposal?.contextDigest===task.record.proposal.contextDigest;
+    if (relation==="inherited"&&((!continued&&(task.record.proposal.action!=="resume"||root.projectOperation?.revision!==state.revision))||!reusedRequirements?.length||
+        root.projectOperation.commandId!==child.project.commandId||
         root.workspace?.id!==task.record.workspace.id||root.sessionId!==task.record.sessionId||
         !root.projectOperation.childTaskIds?.includes(child.id))) continue;
     let calls;

@@ -4,16 +4,18 @@ import {McpClient,StreamableHttpTransport,StdioTransport} from '@earendil-works/
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {randomUUID,createHash} from 'node:crypto';
-import {realpathSync} from 'node:fs';
-import {isAbsolute} from 'node:path';
+import {realpathSync,readFileSync} from 'node:fs';
+import {isAbsolute,join} from 'node:path';
+import {redact} from './storage.js';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {problem} from './task.js';
 const exec=promisify(execFile),hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-export async function openProjectMcp({connection,record,save,authorize,signal}) {
+export async function openProjectMcp({connection,record,save,authorize,signal,discoveryOnly=false}) {
   if(typeof authorize!=='function'||typeof save!=='function'||!record)throw problem('MCP_AUTHORITY','An owning task must authorize and persist MCP operations');
-  if(!['explicit-service-contract','verified-server-readonly'].includes(connection.trust))
+  if(!discoveryOnly&&!['explicit-service-contract','verified-server-readonly'].includes(connection.trust))
     throw problem('MCP_TRUST','MCP requires a confirmed service contract or verified server-side read-only account');
+  if(discoveryOnly&&!connection.url)throw problem('MCP_DISCOVERY','Planning discovery only supports configured HTTP services; command services require isolated execution');
   const client=new McpClient({name:'cothink-project',version:'1',requestTimeoutMs:0});
   let transport,current,container,closed=false,paused=false,closing,connected=false;
   const sendContext=new AsyncLocalStorage();
@@ -68,6 +70,7 @@ export async function openProjectMcp({connection,record,save,authorize,signal}) 
   }
   const originalSend=transport.send.bind(transport);
   transport.send=async(message,options)=>{
+    if(discoveryOnly&&message.method==='tools/call')throw problem('MCP_DISCOVERY','Discovery cannot invoke business tools');
     const detail=message.method==='notifications/cancelled'?{...current?.authority,kind:'cancel',protocolCancellation:true,
       original:current?structuredClone(current.entry):null,protocolRequestId:message.params?.requestId}:(current?.authority??{kind:'connect'});
     await admit(detail);
@@ -92,6 +95,7 @@ export async function openProjectMcp({connection,record,save,authorize,signal}) 
   record.status='connecting';record.connectionIntent={id:randomUUID(),server:connection.url??container};save();
   try {if(signal?.aborted)throw problem('CANCELLED','MCP owner stopped before connect');await client.connect(transport);record.tools=await client.listTools({signal});record.registrationVersion=hash(record.tools);record.status='ready';connected=true;save();}
   catch(error){try{await close();}catch(stopError){error.stopError=stopError.message;}throw error;}
+  if(discoveryOnly)return {tools:record.tools,close};
   async function execute({tool,args={},effectKey,requestId=randomUUID(),originalRequestId},query=false) {
     if(record.registrationChanged)throw problem('MCP_REGISTRATION','Service registration changed; a new confirmed binding is required');
     const grant=connection.tools?.[tool];
@@ -173,4 +177,58 @@ export async function recoverProjectMcpCommand({record,save,authorize,stop=false
   }
   if(!actual||stop){record.stoppedAt??=new Date().toISOString();record.status='stopped';observation.stoppedVerified=true;}
   save();return observation;
+}
+
+export function scrubMcpOutput(value,secrets) {
+  if(!value||typeof value!=="object")return;
+  for(const key of Object.keys(value)) {
+    if(typeof value[key]==="string")value[key]=redact(value[key],secrets);
+    else scrubMcpOutput(value[key],secrets);
+  }
+}
+function mcpConfiguration(home) {
+  try {const data=JSON.parse(readFileSync(join(home,'pi','mcp.json'),'utf8'));if(!data.mcpServers||typeof data.mcpServers!=='object'||Array.isArray(data.mcpServers))throw Error();return data.mcpServers;}
+  catch(error){if(error.code==='ENOENT')return null;throw problem('PROJECT_MCP_CONFIG','Cannot read valid server configuration from COTHINK_HOME/pi/mcp.json');}
+}
+/** Local names and transport readiness only: never expose connection targets or credentials. */
+export function projectMcpSummary(home) {
+  try {const servers=mcpConfiguration(home);return {status:servers?'configured':'not_configured',servers:Object.entries(servers??{}).map(([server,config])=>({server,transport:config?.url?'http':config?.command?'stdio':'unknown',status:config?.disabled?'disabled':config?.url?'configured':config?.command?'requires_isolated_execution':'unsupported'}))};}
+  catch(error){return {status:'invalid_configuration',servers:[],message:error.message};}
+}
+/** Explicit HTTP registration discovery uses the same Pi connection lifecycle as execution. */
+export async function discoverProjectMcp({home,server,signal}) {
+  const base={server,untrusted:true,executionAuthorized:false};let api,secrets=[];
+  try {
+    const config=mcpConfiguration(home)?.[server];
+    if(!config)return {...base,status:'not_configured',message:'No configured MCP service has this name'};
+    if(config.disabled)return {...base,status:'disabled',message:'The configured MCP service is disabled'};
+    if(!config.url)return {...base,status:config.command?'requires_isolated_execution':'unsupported',message:'Command services are discovered only through the existing authorized isolated execution path; planning never starts them'};
+    const source=projectMcpHttpConfig(projectMcpServerConfig(home,server),{server,trust:null,tools:{}});secrets=source.secrets;
+    api=await openProjectMcp({connection:source.connection,discoveryOnly:true,record:{requests:[]},save(){},signal,
+      authorize(detail){if(!['connect','close'].includes(detail.kind))throw problem('MCP_DISCOVERY','Only registration discovery is authorized');}});
+    const tools=api.tools.map(({name,description,inputSchema})=>({name,...(description?{description}:{}),inputSchema}));
+    // Redacting a schema key could change its meaning or collide with another key.
+    // Refuse that registration rather than leak credentials or advertise altered arguments.
+    const pending=[tools];
+    while(pending.length){const value=pending.pop();if(!value||typeof value!=='object')continue;
+      for(const [key,item]of Object.entries(value)){if(redact(key,secrets)!==key)throw problem('PROJECT_MCP_REGISTRATION_SECRET','Service registration contains credentials in field names; discovery was withheld');pending.push(item);}}
+    scrubMcpOutput(tools,secrets);
+    await api.close();api=null;return {...base,status:'discovered',tools};
+  }catch(error){return {...base,status:error.code==='PROJECT_MCP_UNSUPPORTED'?'unsupported':'discovery_failed',message:redact(error.message,secrets)};}
+  finally{try{await api?.close();}catch{/* A discovery failure reports unavailable registration, never execution success. */}}
+}
+export function projectMcpServerConfig(home,server) {
+  const config=mcpConfiguration(home)?.[server];
+  if(config?.disabled===true)throw problem('PROJECT_MCP_CONFIG','Selected MCP server is disabled');
+  if(!config)throw problem('PROJECT_MCP_CONFIG','MCP server is absent from COTHINK_HOME/pi/mcp.json: '+server);
+  if(config.oauth||config.auth||config.env||config.envFile)throw problem('PROJECT_MCP_UNSUPPORTED','OAuth, command environment credentials and automatic account discovery are not adapted');
+  return config;
+}
+export function projectMcpHttpConfig(config,selection) {
+  const safe={server:selection.server,trust:selection.trust,tools:selection.tools};
+  if(config.type&&!['http','streamable-http'].includes(config.type)||config.transport&&!['http','streamable-http'].includes(config.transport))throw problem('PROJECT_MCP_UNSUPPORTED','Only Streamable HTTP is adapted; legacy SSE and account/OAuth transports are not');
+  const url=new URL(config.url);
+  if(url.username||url.password||url.search||url.hash)throw problem('PROJECT_MCP_SECRET','Use fixed MCP URL without embedded credential/query/fragment');
+  if(config.command||config.args)throw problem('PROJECT_MCP_CONFIG','Select one MCP transport');
+  return {selection,secrets:Object.values(config.headers??{}).filter(v=>typeof v==='string'&&v).flatMap(v=>[v,...(/^(?:Bearer|Basic)\s+(.+)$/i.exec(v)?.slice(1)??[])]),connection:{url:url.href,headers:config.headers,trust:selection.trust},digest:hash({...safe,url:url.href,credentialDigest:hash(config.headers??{})})};
 }

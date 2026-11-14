@@ -8,27 +8,23 @@ import {
   revisionMaterial,
   freezeAnswerSkills,
   renderAnswerSkills,
-  loadInputMaterials, materialReference, materialImage, requireMaterialImageModel,
+  loadInputMaterials, materialReference,
 } from "./context.js";
 import {
   createRuntime,
-  createModelRuntime,
-  projectModelFacts,
   selectedResources,
 } from "./pi-runtime.js";
 import { createTask, problem } from "./task.js";
 import { recordCollaborationResult } from "./project-collaboration-evidence.js";
 import { conversationMaterialRefs } from "./conversation.js";
 import {
-  validateModelRefs,
   parseTurnInput,
   singleLineCommand,
   isGenerationCommand,
 } from "./setup.js";
 import { cothinkExtension, mainSystemPrompt } from "./extensions/cothink.js";
 import { snapshotTeam, readSessionTeam } from "./teams.js";
-import { validateConfig } from "./config.js";
-import { DEFAULT_THINKING_LEVEL } from "./thinking.js";
+import { prepareTurnModelFacts } from "./task-model-facts.js";
 import {resolveBuiltinSkills} from './builtin-skills.js';
 const prompt = (name) =>
   readFileSync(new URL(`../prompts/${name}.md`, import.meta.url), "utf8");
@@ -81,29 +77,10 @@ export async function runTurn({
     for (const ref of [frozen.main, ...frozen.secondary])
       ref.maxOutputTokens = options.maxOutputTokens;
   }
-  validateConfig(frozen);
-  const catalog = mainRuntime?.modelRuntime ?? (await createModelRuntime(home));
-  for (const ref of [frozen.main, ...frozen.secondary]) {
-    if (ref.thinkingLevel === undefined && catalog.getModel(ref.provider, ref.modelId)?.reasoning)
-      ref.thinkingLevel = DEFAULT_THINKING_LEVEL;
-  }
-  if (frozen.team)
-    frozen.team = snapshotTeam({
-      ...frozen.team,
-      main: frozen.main,
-      secondary: frozen.secondary,
-    });
-  const projectRoutes = (unified || rootOwner) && !confirmedOperation
-    ? await Promise.all([frozen.main, ...frozen.secondary].map(ref=>projectModelFacts(catalog,ref))) : null;
-  if (projectRoutes) {
-    const [mainRoute] = projectRoutes;
-    if (!mainRoute.available) throw problem(mainRoute.unavailableCode, mainRoute.unavailableReason);
-  } else await validateModelRefs(frozen, catalog, { singleModel: unified || Boolean(rootOwner) || singleModel });
-  if(!confirmedOperation&&allMaterials.some(m=>materialImage(m.manifest))){
-    const reviewPossible=!unified&&!singleModel&&!project;
-    for(const ref of [frozen.main,...(reviewPossible?frozen.secondary.slice(0,1):[])])
-      requireMaterialImageModel(catalog.getModel(ref.provider,ref.modelId),ref);
-  }
+  const { catalog, projectRoutes, modelFactsSnapshot } = await prepareTurnModelFacts({
+    home, frozen, mainRuntime, unified, rootOwner, confirmedOperation,
+    singleModel, project, materials: allMaterials,
+  });
   const configuredResources = options.guiResourceOptions ?? selectedResources(frozen, cwd);
   const builtins=unified&&!options.frozenSkillSource?resolveBuiltinSkills(frozen):{skills:[],diagnostics:[]};
   if(builtins.diagnostics.length)throw Error(builtins.diagnostics.map(d=>d.message).join('\n'));
@@ -183,6 +160,12 @@ export async function runTurn({
       },
       singleModel, flow, constraints, budget, workspace, readAuthorization, frozenConfig:frozen, rootOwner, rootTaskId,
       ...(confirmedOperation?.source ? {confirmationSource:confirmedOperation.reservation.proposalRef,budgetSource:confirmedOperation.reservation.budgetSource}:{}),
+      ...(confirmedOperation?.reservation?.continuation ? {
+        operationAuthorization:confirmedOperation.reservation.authorizationSource,
+        projectOperation:{continuation:confirmedOperation.reservation.continuation,
+          commandId:confirmedOperation.reservation.commandId,action:confirmedOperation.reservation.proposal.action,
+          projectId:confirmedOperation.reservation.proposal.projectId,childTaskIds:[],status:'reserved'},
+      }:{}),
       workRequest,
       project,
       projectPolicy,
@@ -190,6 +173,10 @@ export async function runTurn({
       branchId: manager.getLeafId(),
       ...options,
     });
+    if(modelFactsSnapshot){
+      Object.assign(task.record,modelFactsSnapshot);
+      task.save();
+    }
     if(confirmedOperation?.source) {task.record.confirmationSource=confirmedOperation.reservation.proposalRef;task.record.budgetSource=confirmedOperation.reservation.budgetSource;task.save();}
     task.materialContext=allMaterials;
     onTaskCreated?.(task);
@@ -414,6 +401,10 @@ export async function runTurn({
       } catch {
         /* Memory recovery is the only available copy. */
       }
+    }
+    if(task.rootOwner?.rootTask===task) {
+      try { await task.rootOwner.stopAndDrain({cause:"finished"}); }
+      catch(error) { task.record.localExecutionCloseError=error.message; try { task.save(); } catch {} }
     }
     task.answerSkills = [];
     delete task.synthesizeManagerFinal;

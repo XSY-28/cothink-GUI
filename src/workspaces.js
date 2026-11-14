@@ -1,11 +1,13 @@
+import {atomicWriteDefinition,writeSourceFiles} from './work-changes.js';
 import {readTaskSkillResource} from "./skill-resources.js";
-import { createPreviewTool } from "./visual-preview.js";
+import { createPreviewTool, imageMime, binaryOutputNotice } from "./visual-preview.js";
 import { randomUUID, createHash } from "node:crypto";
-import { readFileSync, lstatSync, unlinkSync, realpathSync } from "node:fs";
+import { readFileSync, lstatSync, unlinkSync, realpathSync, existsSync } from "node:fs";
 import { relative, resolve, isAbsolute, join, posix } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  getAgentDir,
   createReadToolDefinition,
   createWriteToolDefinition,
   createEditToolDefinition,
@@ -18,20 +20,6 @@ import { inScope, withChangeQueue } from "./versioning.js";
 import { problem } from "./task.js";
 const exec = promisify(execFile),
   hash = (b) => createHash("sha256").update(b).digest("hex");
-function imageMime(b) {
-      if (
-        b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-      )
-        return "image/png";
-      if (b[0] === 255 && b[1] === 216) return "image/jpeg";
-      if (b.subarray(0, 3).toString() === "GIF") return "image/gif";
-      if (
-        b.subarray(0, 4).toString() === "RIFF" &&
-        b.subarray(8, 12).toString() === "WEBP"
-      )
-        return "image/webp";
-      return null;
-}
 /** Pi schemas/rendering/matching with per-call operations; never raw host write or Shell. */
 export function workspaceTools({
   task,
@@ -61,7 +49,7 @@ export function workspaceTools({
     createLsToolDefinition("."),
     ...(!readOnly
       ? [
-          createWriteToolDefinition("."),
+          atomicWriteDefinition(createWriteToolDefinition(".")),
           createEditToolDefinition("."),
           createBashToolDefinition(".", { exposeSessionEnvironment: false }),
         ]
@@ -109,7 +97,7 @@ export function workspaceTools({
       if(!isAbsolute(path))break;
     }
     const nativeRel = relative(c.workspace, resolve(c.workspace, path));
-    // Normalize Windows paths before scope checks.
+    // Normalize Windows separators.
     const rel = nativeRel.replaceAll("\\", "/");
     if (
       isAbsolute(nativeRel) ||
@@ -158,6 +146,9 @@ export function workspaceTools({
       throw problem("REVIEW_SOURCE","Review may only read the fixed candidate and frozen skills.");
     const started = performance.now();
     guard();
+    const pair=def.name==='write'&&Object.hasOwn(args,'files')?args.files:null;
+    if(def.name==='write'&&(Object.hasOwn(args,'files')?(args.path!==undefined||args.content!==undefined||!Array.isArray(pair)||pair.length!==2||pair.some(f=>typeof f?.path!=='string'||typeof f.content!=='string')):
+      typeof args.path!=='string'||typeof args.content!=='string'))throw problem('WRITE_INPUT','Supply path/content or exactly two files, not both.');
     if (!["write","edit","bash"].includes(def.name)) task.projectPolicy?.admit("read", {actor:role().role});
     // Read selected skills from the task copy; run inspected scripts in offline Docker.
     const resource = def.name === "read" && readTaskSkillResource(task,args.path);
@@ -184,7 +175,7 @@ export function workspaceTools({
     const trace = prior ?? {
       toolCallId: id,
       name: def.name,
-      ...(def.name==="bash"?{registeredAt:new Date().toISOString(),kernelDispatched:false}:{}),
+      ...(["bash","write","edit"].includes(def.name)?{registeredAt:new Date().toISOString(),kernelDispatched:false}:{}),
       stageId: s.id,
       requestId: randomUUID(),
       status: "preparing",
@@ -194,7 +185,7 @@ export function workspaceTools({
     save();
     let c = getChange(),
       path,
-      logRef,
+      logRef,writePaths,
       tempPaths = new Set(),
       lastKernel;
     if (binding.readChangeId !== c.changeId) {
@@ -211,10 +202,13 @@ export function workspaceTools({
       );
     if (def.name === "read" && args.path?.startsWith("output:"))
       logRef = args.path.slice(7);
-    else if (def.name !== "bash") path = pathOf(args.path ?? ".", c);
+    else if(pair){
+      writePaths=pair.map(f=>pathOf(f.path,c));
+      if(new Set(writePaths).size!==2||writePaths.some(p=>!inScope(p,c.scope)))throw problem('SCOPE','Paired writes need two distinct paths in the current write scope.');
+    }else if (def.name !== "bash") path = pathOf(args.path ?? ".", c);
     trace.sourcePath = path ?? null;
     const projectWrite = (commit = false) => task.projectPolicy?.admit(def.name === "bash" ? "shell" : "write", {
-      actor:s.role, scope:path ? [path] : c.scope, changeId:c.changeId, privateVersion:c.privateVersion, candidate:c.candidateVersion, requestId:trace.requestId, toolCallId:id, commit,
+      actor:s.role, scope:writePaths??(path ? [path] : c.scope), changeId:c.changeId, privateVersion:c.privateVersion, candidate:c.candidateVersion, requestId:trace.requestId, toolCallId:id, commit,
     });
     if (isWrite) {
       projectWrite();
@@ -239,13 +233,12 @@ export function workspaceTools({
           "CHANGE_CLOSED",
           "当前修改已结束，请next_change或明确恢复。",
         );
-      if (def.name !== "bash" && !inScope(path, c.scope))
+      if (def.name !== "bash" && (writePaths??[path]).some(p=>!inScope(p,c.scope)))
         throw problem(
           "SCOPE",
           "写入范围不足；refresh_change保留草稿后扩大范围。",
         );
     }
-    trace.sourcePath = path ?? null;
     trace.changeId = c.changeId;
     trace.cwd = c.workspace;
     trace.status = "running";
@@ -274,48 +267,9 @@ export function workspaceTools({
       });
       return bytes;
     }
-    async function imageType(absolute) {
-      return imageMime(logRef ? await logBuffer(logRef) : await sourceRead(absolute));
-    }
-
-    async function writeSource(absolute, content) {
-      guard();
-      if (combined.aborted) throw combined.reason;
-      const p = pathOf(absolute, c),
-        actual = await versioning.read({ changeId: c.changeId, path: p });
-      const old =
-        def.name === "edit"
-          ? { hash: hash(cache.get(p)), version: c.privateVersion }
-          : binding.reads.get(p);
-      if (actual.contentHash !== null && !old)
-        throw problem("NEED_READ", "覆盖已有文件前先read：" + p);
-      const input = {
-        requestId: trace.requestId,
-        expectedVersion: c.privateVersion,
-        edits: [
-          {
-            path: p,
-            oldHash: old?.hash ?? null,
-            contentBase64: Buffer.from(content).toString("base64"),
-          },
-        ],
-      };
-      trace.kernelInput = input;
-      save();
-      projectWrite(true);
-      lastKernel = await versioning.edit(c.changeId, input, {
-        signal: combined,
-      });
-      if (lastKernel.status !== "applied")
-        throw problem("OPERATION_UNKNOWN", JSON.stringify(lastKernel));
-      Object.assign(c, await versioning.inspect({ changeId: c.changeId }));
-      binding.reviewedVersion = c.privateVersion;
-      binding.failedMutations.delete(p);
-      binding.reads.set(p, {
-        hash: hash(Buffer.from(content)),
-        version: c.privateVersion,
-      });
-      onChanged(c);
+    async function writeSource(absolute,content) {
+      lastKernel=await writeSourceFiles({versioning,c,binding,trace,files:Array.isArray(absolute)?absolute:[{path:absolute,content}],
+        editing:def.name==='edit',cache,pathOf,signal:combined,guard,beforeWrite:()=>projectWrite(true),save,onChanged});
     }
     async function tree(requested) {
       const visible = [...new Set([...c.scope, ...c.readScope])],
@@ -368,9 +322,10 @@ export function workspaceTools({
       return list;
     }
     async function rg(args) {
+      const cached = join(getAgentDir(), "bin", process.platform === "win32" ? "rg.exe" : "rg");
       try {
         return (
-          await exec("rg", args, {
+          await exec(existsSync(cached) ? cached : "rg", args, {
             cwd: c.workspace,
             encoding: "utf8",
             maxBuffer: 8 * 1024 * 1024,
@@ -425,6 +380,13 @@ export function workspaceTools({
       };
     }
     try {
+      if(logRef){
+        const bytes=await logBuffer(logRef);
+        const text=binaryOutputNotice(bytes,logRef);
+        if(!imageMime(bytes)&&text){
+          trace.status='completed';return {content:[{type:'text',text}]};
+        }
+      }
       if (def.name === "read")
         native = createReadToolDefinition(c.workspace, {
           operations: {
@@ -433,10 +395,11 @@ export function workspaceTools({
               else await sourceRead(p);
             },
             readFile: (p) => (logRef ? logBuffer(logRef) : sourceRead(p)),
-            detectImageMimeType: logRef ? async () => null : imageType,
+            detectImageMimeType: async p=>imageMime(logRef?await logBuffer(logRef):await sourceRead(p)),
           },
         });
-      if (def.name === "write")
+      if(pair)native={execute:async()=>{await writeSource(pair);return {content:[{type:'text',text:'Wrote both files atomically: '+writePaths.join(', ')}]};}};
+      else if (def.name === "write")
         native = createWriteToolDefinition(c.workspace, {
           operations: {
             mkdir: async (p) => {
@@ -487,27 +450,12 @@ export function workspaceTools({
       }
       if (def.name === "find") {
         const files = await stableFiles(path);
-        const scopedMember = task.record.project && task.projectPolicy && s.role !== "main";
         native = createFindToolDefinition(c.workspace, {
           operations: {
             exists: () => true,
-            glob: async (pattern, where, opts) => scopedMember
-              ? files.map(p => posix.relative(path, p)).filter(p =>
-                posix.matchesGlob(pattern.includes("/") ? p : posix.basename(p), pattern)).slice(0, opts.limit)
-              : (
-                await rg([
-                  "--files",
-                  "--hidden",
-                  "--glob",
-                  pattern,
-                  "--",
-                  pathOf(where, c),
-                ])
-              )
-                .trim()
-                .split("\n")
-                .filter(Boolean)
-                .slice(0, opts.limit),
+            glob: async (pattern, _where, opts) =>
+              files.map(p => posix.relative(path, p)).filter(p =>
+                posix.matchesGlob(pattern.includes("/") ? p : posix.basename(p), pattern)).slice(0, opts.limit),
           },
         });
       }
@@ -596,6 +544,13 @@ export function workspaceTools({
         : result.isError
           ? "failed"
           : "completed";
+      if(def.name==='bash'&&result.content?.some(p=>p.type==='text'&&/[\uFFFD\u0000]/.test(p.text))){
+        const text=binaryOutputNotice(await logBuffer(trace.outputRef),trace.outputRef);
+        if(text){
+          result.content=[{type:'text',text}];
+          if(result.structuredContent)result.structuredContent.output=text;
+        }
+      }
       const shown = scrub(result);
       if (isWrite)
         shown.content = [
@@ -644,6 +599,7 @@ export function workspaceTools({
   }
   return prototypes.map((def) => ({
     ...def,
+    description:def.description+(def.name==="read"?" Task-owned output:<requestId> references support images too: a command can write only PNG/JPEG bytes to stdout, then read that output without adding a source file.":""),
     async execute(...args) {
       const run = withChangeQueue(versioning, getChange().changeId, () => perform(def, ...args))
         .catch((e) => {

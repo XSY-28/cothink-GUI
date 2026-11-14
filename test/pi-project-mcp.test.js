@@ -100,3 +100,17 @@ test('URL recovery survives pause; cancel acknowledgement does not certify a rem
   const result=await api.query({tool:'status',args:{id:'job-1'},originalRequestId:'original',requestId:'status'});assert.equal(result.structuredContent.status,'completed');assert.equal(starts,1);
   await assert.rejects(api.call({tool:'start',args:{id:'job-2'},effectKey:'new'}),{code:'CANCELLED'});
 });
+
+test('registration-only MCP connection exposes no business invocation and refuses command startup',async t=>{
+ const methods=[],server=createServer(async(req,res)=>{
+  const chunks=[];for await(const b of req)chunks.push(b);const m=JSON.parse(Buffer.concat(chunks));methods.push(m.method);let result;
+  if(m.method==='initialize')result={protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'registration',version:'1'}};
+  if(m.method==='tools/list')result={tools:[{name:'mutate',inputSchema:{type:'object'},annotations:{readOnlyHint:true}}]};
+  if(m.id===undefined){res.writeHead(202);res.end();return;}res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({jsonrpc:'2.0',id:m.id,result}));
+ });await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+ const record={requests:[]},api=await openProjectMcp({connection:{url:`http://127.0.0.1:${server.address().port}/mcp`},discoveryOnly:true,record,save(){},authorize(){}});
+ try{assert.deepEqual(api.tools.map(t=>t.name),['mutate']);assert.equal(api.call,undefined);assert.equal(api.query,undefined);assert.deepEqual(record.requests,[]);}
+ finally{await api.close();}
+ assert.equal(methods.filter(m=>m==='tools/list').length,1);assert.equal(methods.includes('tools/call'),false);assert.equal(record.status,'closed');
+ await assert.rejects(openProjectMcp({connection:{execution,codeDirectory:'/must-not-read',workspace:'/must-not-read',entry:'never.mjs'},discoveryOnly:true,record:{},save(){},authorize(){}}),{code:'MCP_DISCOVERY'});
+});

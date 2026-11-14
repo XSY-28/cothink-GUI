@@ -86,9 +86,10 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
       });
     }
   }
+  const fileQuery = args => new URLSearchParams({...args,...(args.draft?{draft:JSON.stringify(args.draft)}:{})});
   const read = (kind, args = {}) =>
     request(
-      `/api/${kind}${Object.keys(args).length ? "?" + new URLSearchParams(args) : ""}`,
+      `/api/${kind}${Object.keys(args).length ? "?" + fileQuery(args) : ""}`,
     );
   return {
     read,
@@ -105,7 +106,7 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
       return {blob:await response.blob(),sha256:response.headers.get("x-cothink-content-hash"),sourceToken:response.headers.get("x-cothink-material-source")};
     },
     async file(ref, {purpose="source",signal}={}) {
-      const response=await fetcher('/api/file?'+new URLSearchParams({...ref,purpose}),{headers,signal});
+      const response=await fetcher('/api/file?'+fileQuery({...ref,purpose}),{headers,signal});
       if(!response.ok){let failure;try{failure=await response.json();}catch{} throw Object.assign(Error(failure?.error||'文件读取失败。'),{code:failure?.code,status:response.status});}
       const bytes=await response.arrayBuffer();
       return {bytes,mediaType:response.headers.get('content-type'),representation:response.headers.get('x-cothink-representation'),
@@ -124,6 +125,11 @@ export function createApi(token, fetcher = (...args) => fetch(...args)) {
       }),
     async recover(pending) {
       const session = await read("session", { id: pending.sessionId });
+      if(pending.kind==='file_continuation') {
+        const source=session.turns.find(t=>t.taskId===pending.sourceRootTaskId);
+        const intent=source?.fileContinuationIntent;
+        return intent ? session.submissions.find(t=>t.taskId===intent.taskId)??null : null;
+      }
       if(pending.kind==='confirmation') {
         const source=session.turns.find(t=>t.taskId===pending.proposalRef?.sourceTaskId);
         const intent=source?.confirmationIntent;

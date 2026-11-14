@@ -8,6 +8,13 @@ export const initialView = {
   detailsBySession: {},
   navigation: {mobileOpen: false},
 };
+export function restoreDetailFocus(preferred) {
+  for (const node of [preferred, document.querySelector(".conversation-picker-trigger"), document.querySelector(".nav-toggle")]) {
+    if (!node?.isConnected || node.matches(":disabled") || node.closest("[inert]") || !node.getClientRects().length) continue;
+    node.focus();
+    if (document.activeElement === node) break;
+  }
+}
 // Only disposable presentation choices belong here. Host records never enter storage.
 export function readDisplayPreferences(storage, fallbackTheme = "light") {
   let value;

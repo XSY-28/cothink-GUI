@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { CredentialSynchronizationError } from "@earendil-works/pi-coding-agent";
-import { saveConfig, loadConfig, updateConfig, validateConfig, credentials } from "./config.js";
+import { saveConfig, loadConfig, updateConfig, validateConfig, credentials, positiveInteger } from "./config.js";
 import { createModelRuntime } from "./pi-runtime.js";
 import { privateDirectory, writePrivateJson, writePrivateBytes } from "./storage.js";
 import { createTeamConfig, addTeam, normalizeTeamName } from "./teams.js";
@@ -187,8 +187,6 @@ export async function selectModelRef({ runtime, home, io, role, signal }) {
           name: modelId,
           reasoning: false,
           input: ["text"],
-          contextWindow: 32000,
-          maxTokens: 4096,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         },
       ],
@@ -316,8 +314,8 @@ export async function importLegacyConfig({
           name: old.model,
           reasoning: old.supportsThinkingLevels === true,
           input: ["text"],
-          contextWindow: 32000,
-          maxTokens: 4096,
+          ...(old.contextWindow===undefined?{}:{contextWindow:positiveInteger(old.contextWindow,"contextWindow")}),
+          ...(old.maxTokens===undefined?{}:{maxTokens:positiveInteger(old.maxTokens,"maxTokens")}),
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           compat: {
             maxTokensField:

@@ -13,6 +13,36 @@ const {startGuiServer}=await load('src/gui-server.js');
 const {readTask,readRequests}=await load('src/task.js');
 
 const waitFor=async read=>{for(let i=0;i<500;i++){const value=await read();if(value)return value;await new Promise(r=>setTimeout(r,10));}throw Error('waiting fixture did not reach expected state');};
+
+test('background conversation refresh loads process details only while their reader is open',async t=>{
+ const ready=Promise.withResolvers(),release=Promise.withResolvers();
+ const f=await fixture(t,async()=>{ready.resolve();await release.promise;return {text:'Visible finished answer'};});
+ const c=await controller(t,f),session=await fixtureConversation(t,c);let host,browser;
+ try {
+  const accepted=await submitDraft(c,{sessionId:session.id,input:'Answer this ordinary question after processing.'});await ready.promise;
+  host=await startGuiServer({controller:c,open:false});
+  browser=await chromium.launch({headless:true});
+  const page=await browser.newPage({viewport:{width:1440,height:1000}});page.setDefaultTimeout(5000);
+  let processReads=0;page.on('request',r=>{if(new URL(r.url()).pathname==='/api/task')processReads++;});
+  await page.addInitScript(id=>sessionStorage.setItem('cothink.session',id),session.id);await page.goto(host.url);
+  const reply=page.locator(`article[data-task-id="${accepted.taskId}"]`);await reply.getByRole('button',{name:'停止',exact:true}).waitFor();
+  const refresh=async()=>{
+   const response=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/session');
+   await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await response;
+   await page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done))));
+  };
+  await refresh();const closed=processReads;await refresh();
+  assert.equal(processReads,closed,'a closed reader must not poll full process history');
+  await reply.getByRole('button',{name:'查看过程',exact:true}).click();
+  const panel=page.getByRole('complementary',{name:'本轮协作'});await panel.waitFor();
+  await waitFor(()=>processReads>closed);const opened=processReads;await refresh();assert.ok(processReads>opened,'visible process details keep refreshing');
+  await page.getByRole('button',{name:/返回对话/}).click();await panel.waitFor({state:'hidden'});
+  await refresh();const hidden=processReads;await refresh();assert.equal(processReads,hidden,'closing the reader stops its process queries');
+  release.resolve();await complete(c,accepted.taskId);await reply.getByText('Visible finished answer',{exact:true}).waitFor();
+  assert.equal(f.calls.length,1,'view changes never generate another model call');
+ } finally {release.resolve();await browser?.close();await host?.close();}
+});
+
 test('live owned request remains observable through slow stream and manager failure retains file links',{timeout:45000},async t=>{
  const repo=repository(t),ready=Promise.withResolvers(),release=Promise.withResolvers();let output;
  t.after(()=>{release.resolve();output?.destroy();});

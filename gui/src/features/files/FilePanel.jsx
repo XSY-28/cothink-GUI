@@ -4,31 +4,30 @@ import {VisualEvidence} from '../../Collaboration.jsx';
 import {checkLabel} from '../../view.js';
 import styles from './FilePanel.module.css';
 const labels={added:'新增',deleted:'删除',modified:'修改',modeChanged:'权限变化',unchanged:'已核验'};
-const key=ref=>ref?JSON.stringify([ref.taskId,ref.version,ref.path]):'';
+const key=ref=>ref?JSON.stringify([ref.taskId,ref.version,ref.path,ref.draft?.changeId,ref.draft?.baseVersion]):'';
 const choicesFor=(list,selection)=>!list?[]:selection?.taskId===list.taskId?(list.changes??list.items):list.items;
 function downloadBlob(blob,name) {const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 
 export function OutcomeFiles({taskId,status,resultRevision,commands,onOpen}) {
   const [result,setResult]=useState(null),[error,setError]=useState('');
   const current=useRef(commands);current.current=commands;
-  useEffect(()=>{let alive=true;setResult(null);setError('');if(status==='running')return;
+  useEffect(()=>{let alive=true;setResult(null);setError('');
     current.current.loadFiles(taskId).then(value=>{if(alive)setResult(value);}).catch(e=>{if(alive)setError(e.message);});return()=>{alive=false;};
   },[taskId,status,resultRevision]);
-  if(status==='running')return null;
   return <div className={styles.outcome} aria-label="本次成果文件">
-    {result?.items.length>0?<><strong>本次文件</strong><div className={styles.outcomeLinks}>{result.items.map(item=><button key={key(item.ref)} onClick={e=>onOpen(item.ref,item.status==='deleted'?'diff':'preview',e)}>{item.name}<small>{labels[item.status]}</small></button>)}</div></>:
+    {result?.items.length>0?<><strong>本次文件</strong><div className={styles.outcomeLinks}>{result.items.map(item=><button key={key(item.ref)} onClick={e=>onOpen(item.ref,item.status==='deleted'?'diff':'preview',e)}>{item.name}<small>{item.ref?.draft?'未验收草稿 · ':''}{labels[item.status]}</small></button>)}</div></>:
       <p className="field-note">{error|| (result?'本轮没有文件变更或可交付文件；可查看对应执行记录。':'读取本轮成果清单…')}</p>}
   </div>;
 }
 export function FilePanel({task,sessionId,selection,commands,onSelection,onRecords}) {
-  const [list,setList]=useState(null),[listError,setListError]=useState(''),[loadedContent,setContent]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(false),[downloading,setDownloading]=useState(false);
+  const [list,setList]=useState(null),[listError,setListError]=useState(''),[loadedContent,setContent]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(false),[downloading,setDownloading]=useState(false),[exporting,setExporting]=useState(false),[exported,setExported]=useState(null);
   const current=useRef(commands);current.current=commands;
   const callbacks=useRef({onSelection});callbacks.current={onSelection};
   const selected=useRef(selection);selected.current=selection;
   const downloads=useRef(new Set());
   const sources=task?.executionTasks??(task?.work?[task]:[]);
   const visual=task?.deliveryVisual;
-  const fileState=JSON.stringify(sources.map(({id,work})=>[id,work?.version,work?.resultWorkspace,work?.acceptance?.map(r=>[r.requestId,r.status,r.acceptedVersion])]));
+  const fileState=JSON.stringify(sources.map(({id,work})=>[id,work?.version,work?.changes,work?.resultWorkspace,work?.acceptance?.map(r=>[r.requestId,r.status,r.acceptedVersion])]));
   useEffect(()=>{setDownloading(false);return()=>{for(const abort of downloads.current)abort.abort();downloads.current.clear();};},[key(selection?.fileRef)]);
   useEffect(()=>{
     let alive=true;setList(null);setListError('');if(!task?.id)return;
@@ -75,6 +74,13 @@ export function FilePanel({task,sessionId,selection,commands,onSelection,onRecor
     try{const result=await current.current.readFile(item.ref,{purpose:'download',signal:abort.signal});if(!abort.signal.aborted)downloadBlob(new Blob([result.bytes],{type:'application/octet-stream'}),item.ref.path.split('/').at(-1));}
     catch(e){if(!abort.signal.aborted)setError(e.message);}finally{downloads.current.delete(abort);if(!abort.signal.aborted)setDownloading(false);}
   }
+  async function exportDraft() {
+    if(!item?.ref.draft)return;
+    setExporting(true);setError('');setExported(null);
+    try {setExported(await current.current.exportDraft({taskId:item.ref.taskId,version:item.ref.version,...item.ref.draft}));}
+    catch(e){setError(e.message);}
+    finally{setExporting(false);}
+  }
   async function patch() {try{downloadBlob(new Blob([await current.current.downloadPatch(patchTaskId)],{type:'text/x-diff'}),`cothink-${patchTaskId}.patch`);}catch(e){setError(e.message);}}
   const visualSources=visual?[visual,...sources]:sources;
   const selectedEvidence=tab==='preview'&&error&&item? visualSources.flatMap(source=>(source.work?.visualEvidence??[])
@@ -82,7 +88,9 @@ export function FilePanel({task,sessionId,selection,commands,onSelection,onRecor
     .map(e=>({taskId:source.id,evidence:e,version:item.ref.version}))) : [];
   return <section className={styles.panel} aria-label="成果文件阅读">
     <header className={styles.header}><div><small>本轮成果</small><h2>{item?.name||'文件与差异'}</h2></div></header>
-    <div className={styles.tools}>{patchTaskId&&<button onClick={patch}>下载完整补丁</button>}{revealTaskId&&<button onClick={()=>current.current.revealTask(revealTaskId).catch(e=>setError(e.message))}>打开成果目录</button>}<button onClick={onRecords}>执行记录</button></div>
+    <div className={styles.tools}>{item?.ref.draft&&<button disabled={exporting} onClick={exportDraft}>{exporting?'导出中…':'导出草稿'}</button>}{patchTaskId&&<button onClick={patch}>下载完整补丁</button>}{revealTaskId&&<button onClick={()=>current.current.revealTask(revealTaskId).catch(e=>setError(e.message))}>打开成果目录</button>}<button onClick={onRecords}>执行记录</button></div>
+    {item?.ref.draft&&<p className="field-note">未验收草稿 · 来源 {item.source||item.ref.taskId} · 版本 {item.ref.version}。保存状态与新增、修改或删除状态分别记录。</p>}
+    {exported&&<div role="status"><p>草稿已导出：{exported.directory}</p>{exported.warnings.map((message,index)=><p className="field-note" key={index}>{message}</p>)}</div>}
     {!task&&<p role="status">读取任务…</p>}
     {listError&&<p role="alert" className="error-text">{listError}</p>}
     {(list?.warnings??[]).map(message=><p key={message} className="field-note">{message}</p>)}
@@ -91,7 +99,7 @@ export function FilePanel({task,sessionId,selection,commands,onSelection,onRecor
     {list?.checks?.length>0&&<p className="field-note">正式版本检查通过。</p>}
     {list&&!choices.length&&<p>{selection?.taskId===list.taskId?'本轮没有已核验的文件变更。':'本轮尚无可打开的文件或差异。'}</p>}
     {choices.length>0&&<>
-      <details className={styles.fileChoices}><summary>切换文件 · {choices.length} 个</summary><nav className={styles.list} aria-label="本轮文件">{choices.map(f=><button aria-pressed={key(f.ref)===key(item?.ref)} key={key(f.ref)} onClick={()=>onSelection({fileRef:f.ref,tab:tabFor(f,tab)})}><span>{f.name}</span><small>{labels[f.status]}</small></button>)}</nav></details>
+      <details className={styles.fileChoices}><summary>切换文件 · {choices.length} 个</summary><nav className={styles.list} aria-label="本轮文件">{choices.map(f=><button aria-pressed={key(f.ref)===key(item?.ref)} key={key(f.ref)} onClick={()=>onSelection({fileRef:f.ref,tab:tabFor(f,tab)})}><span>{f.name}</span><small>{f.ref?.draft?'未验收草稿 · ':''}{labels[f.status]}</small></button>)}</nav></details>
       <div className={styles.tabs} role="tablist" aria-label="文件视图">{[['preview','预览'],['source','源码'],['diff','差异']].map(([value,label])=><button key={value} role="tab" aria-selected={tab===value} disabled={item?.status==='deleted'&&value!=='diff'||item?.status==='unchanged'&&value==='diff'} onClick={()=>onSelection({fileRef:item?.ref,tab:value})}>{label}</button>)}<button disabled={!item?.readable||downloading} onClick={download}>{downloading?'下载中…':'下载原文件'}</button></div>
       {loading&&<p role="status">读取固定版本文件…</p>}
       {error&&<div className={styles.fallback}><p role="alert">{error}</p><p>原始文件未改写。可切换源码、差异，或查看下方已有截图。</p></div>}

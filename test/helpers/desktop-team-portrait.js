@@ -111,14 +111,23 @@ export async function verifyPackagedTeamPortraits(t,{appPath,launchCandidate}) {
  assert.equal(typeof hoverStart,'number','pointer reached the avatar hit area');
  assert.equal(await name.isVisible(),false,'the name stays hidden when the pointer arrives');
  if(hasArtwork){
-  const firstMotion=await page.waitForFunction(({canvas,idle})=>{
-   const pixels=canvas.toDataURL();
-   return pixels!==idle&&pixels;
-  },{canvas:canvasHandle,idle}).then(result=>result.jsonValue());
-  await page.waitForFunction(({canvas,idle,firstMotion})=>{
-   const pixels=canvas.toDataURL();
-   return pixels!==idle&&pixels!==firstMotion;
-  },{canvas:canvasHandle,idle,firstMotion});
+  let firstMotion;
+  try {
+   firstMotion=await page.waitForFunction(({canvas,idle})=>{
+    const pixels=canvas.toDataURL();
+    return pixels!==idle&&pixels;
+   },{canvas:canvasHandle,idle}).then(result=>result.jsonValue());
+  } catch (error) {
+   throw new Error('Desktop motion did not start: '+JSON.stringify(await hoverDiagnostics.jsonValue()),{cause:error});
+  }
+  try {
+   await page.waitForFunction(({canvas,idle,firstMotion})=>{
+    const pixels=canvas.toDataURL();
+    return pixels!==idle&&pixels!==firstMotion;
+   },{canvas:canvasHandle,idle,firstMotion});
+  } catch (error) {
+   throw new Error('Desktop motion stopped: '+JSON.stringify(await hoverDiagnostics.jsonValue()),{cause:error});
+  }
  }
  const elapsed=await trigger.evaluate(element=>performance.now()-element.avatarTestHoverStarted);
  await page.clock.fastForward(Math.max(0,Math.floor(1750-elapsed)));

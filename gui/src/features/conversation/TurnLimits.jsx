@@ -4,7 +4,7 @@ import {Modal} from "../../Modal.jsx";
 import styles from "./Conversation.module.css";
 
 export function TurnLimits({available, team, models=[], options, onChange, onClose, returnFocusTo}) {
-  const {readOnly, delegate, maxCalls} = options ?? defaultTurnOptions();
+  const {readOnly, delegate, maxCalls, allowFileContinuation} = options ?? defaultTurnOptions();
   const needsReviewUpdate = retiredReviewOption(options);
   const refs = team ? [team.main, ...team.secondary] : [];
   return <Modal title="下一条消息的限制" onClose={onClose} returnFocusTo={returnFocusTo}>
@@ -20,6 +20,12 @@ export function TurnLimits({available, team, models=[], options, onChange, onClo
           禁止派工
         </label>
         <p className="field-note">{needsReviewUpdate ? "请先在草稿中确认采用现行规则。" : "勾选后仅由主模型工作。若成果要求独立审查，需先解决冲突。"}</p>
+        <label className={styles.turnChoice}>
+          <input type="checkbox" checked={allowFileContinuation===true} disabled={readOnly}
+            onChange={event=>onChange({allowFileContinuation:event.target.checked})}/>
+          模型连接中断后，允许从保存成果继续一次
+        </label>
+        <p className="field-note">仅在原本地执行已结清且没有相关未决操作时生效。继续使用本轮剩余额度；旧请求与未知费用保留。再次中断或主动取消后不会自动继续。</p>
         <label>本轮最多模型请求（留空不设上限）
           <input type="number" min="0" step="1" value={maxCalls} onChange={event=>onChange({maxCalls:event.target.value})}/>
         </label>

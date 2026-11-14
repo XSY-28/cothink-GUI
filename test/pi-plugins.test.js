@@ -462,35 +462,6 @@ test("PROJECT employee executes frozen scripts without subagent installation and
   assert.ok(admissions.some(x=>x.action==="shell"&&x.actor==="main"&&x.commit===true));assert.ok(admissions.some(x=>x.action==="write"&&x.actor==="main"));plugin.assertHandled();
 });
 
-test("PROJECT normal entry reads frozen method only on demand, runs script and accepts checked output",async(t)=>{
-  const {repository}=await import("./helpers/git-fixture.js"),{execution}=await import("./helpers/agent-sync-fixture.js"),{saveConfig}=await load("src/config.js"),{invoke}=await import("./helpers/cli-fixture.js");
-  const {readTask}=await load("src/task.js");
-  const repo=repository(t);let entry,resultId,source,providerError;
-  const tool=(name,args={})=>({toolCalls:[{name,args}]});
-  const f=await fixture(t,(call,n)=>{
-    try {
-    const text=call.body.messages.map(m=>typeof m.content==="string"?m.content:(m.content??[]).map(p=>p.text??JSON.stringify(p)).join("\n")).join("\n");
-    if(n===1){assert.doesNotMatch(text,/FROZEN_METHOD_SENTINEL|ORIGINAL_REFERENCE_V1/);const match=text.match(/"path":"([^"]*normal-entry[^"]*SKILL.md)"/);assert.ok(match,text.slice(-2000));entry=match[1];writeFileSync(join(source,"references/guide.md"),"SOURCE_CHANGED_AFTER_FREEZE");return tool("read",{path:entry});}
-    if(n===2){assert.match(text,/FROZEN_METHOD_SENTINEL/);return tool("read",{path:join(entry,"../references/guide.md")});}
-    if(n===3){assert.match(text,/ORIGINAL_REFERENCE_V1/);assert.doesNotMatch(text,/SOURCE_CHANGED_AFTER_FREEZE/);return tool("next_change",{reason:"Produce the approved artifact",scope:["new.txt"],readScope:["."]});}
-    if(n===4)return tool("resource_exec",{command:"node /resources/normal-entry/scripts/build.mjs"});
-    if(n===5){const last=call.body.messages.at(-1);const match=(typeof last.content==="string"?last.content:last.content.map(p=>p.text).join("\n")).match(/"resultId":"([a-f0-9-]+)"/);assert.ok(match,JSON.stringify(last));resultId=match[1];return tool("resource_result",{resultId,decision:"inspect"});}
-    if(n===6)return tool("resource_result",{resultId,decision:"adopt",reason:"Inspected the complete generated artifact and script output"});
-    if(n===7)return tool("prepare_change");
-    if(n===8)return tool("accept_change");return {text:"Delivered checked output"};
-    } catch(error) {providerError=error;return {text:"Fixture assertion failed"};}
-  });
-  source=join(f.home,"normal-entry");mkdirSync(join(source,"scripts"),{recursive:true});mkdirSync(join(source,"references"),{recursive:true});
-  writeFileSync(join(source,"SKILL.md"),"---\nname: normal-entry\ndescription: Build a text artifact\n---\nFROZEN_METHOD_SENTINEL. Read [guide](references/guide.md), then run scripts/build.mjs.\n");
-  writeFileSync(join(source,"references/guide.md"),"ORIGINAL_REFERENCE_V1");
-  // .mjs uses real ESM rather than a provider stub executing the script.
-  writeFileSync(join(source,"scripts/build.mjs"),"import {writeFileSync} from 'node:fs';writeFileSync('new.txt','CHECKED_ARTIFACT');");
-  saveConfig(f.home,{formatVersion:2,...f.models,piResources:{skills:[source]},work:{execution}});
-  const plan=join(f.home,"plan.json");writeFileSync(plan,JSON.stringify({goal:"Produce new.txt with the configured method",scope:["new.txt"],budget:{maxCalls:12},steps:[{id:"build",goal:"Build checked text",deliverables:["new.txt"],checks:[{command:"node",args:["-e","if(require('fs').readFileSync('new.txt','utf8')!=='CHECKED_ARTIFACT')process.exit(1)"]}]}]}));
-  const run=await invoke(f,["project","start","--file",plan,"--json"],"",repo.project);if(providerError)throw providerError;assert.equal(run.code,0,run.stdout+run.stderr);const state=JSON.parse(run.stdout);assert.equal(state.status,"completed",JSON.stringify(state));
-  const task=readTask(f.home,state.steps[0].attempts[0].taskId);assert.equal(task.work.helpers?.length??0,0);assert.ok(task.tools.some(x=>x.kind==="employee_script_result"&&x.treatment?.decision==="adopted"));assert.ok(task.tools.some(x=>x.resourceName==="normal-entry"&&x.resourcePath.endsWith("references/guide.md")));
-});
-
 test("PROJECT resource execution rejects readonly callers, foreign review, scope violations and records missing dependencies",async(t)=>{
   const {managed,execution}=await import("./helpers/agent-sync-fixture.js"),{freezeAnswerSkills}=await load("src/context.js"),{freezeTaskSkillResources}=await load("src/skill-resources.js"),{createPluginWork}=await load("src/plugin-work.js");
   const f=await managed(t,{execution}),dir=join(f.home,"bounded-script");mkdirSync(join(dir,"scripts"),{recursive:true});

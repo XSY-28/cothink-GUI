@@ -111,3 +111,8 @@
 .skillPaths button { flex-shrink: 0; }
 .skillResults { padding-inline-start: 20px; }
 .skillResults li p { margin: 4px 0 10px; }
+.metadataTable { width:100%; border-collapse:collapse; margin:12px 0; text-align:left; font-size:13px; }
+.metadataTable th,.metadataTable td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+.metadataTable th:first-child,.metadataTable td:first-child { padding-left:0; }
+.metadataTable th { font-weight:500; }
+.metadataSource { display:block; color:var(--muted); font-size:11px; line-height:1.6; }

@@ -151,3 +151,51 @@ test("a supervisor pause closes descendant assignments while preserving accepted
   assert.equal(staff.assignment(accepted.dispatchId).version, "accepted-version");
   assert.equal(staff.assignment(accepted.dispatchId).pause, undefined);
 });
+
+test('subwork registration respects live ownership but releases settled and completed predecessor claims',async()=>{
+ const {state,staff,appoint}=roster();
+ state.steps=[{id:'previous',status:'unknown',scope:['src'],attempts:[{taskId:'old'}],works:[{id:'old-work',scope:['src/legacy']}]},
+  {id:'current',status:'running',scope:['src'],attempts:[{taskId:'now'}],works:[{id:'root-work',scope:['src/root']},{id:'employee-work',scope:['src/employee']}]}];
+ state.rootWorkClaims=[{taskId:'old',scope:['src/legacy'],workId:'old-work',changeId:'old-change'}];
+ const tool=staff.tools('root',()=>{},'now')[0],register=scope=>tool.execute('register',{action:'register_work',input:{scope}});
+ await assert.rejects(register(['src/legacy/file']),/claimed work/);
+ state.steps[0].status='completed';await register(['src/legacy/file']);
+ staff.claimWrite({taskId:'now',role:'main',scope:['src/root'],changeId:'root-change'});
+ await assert.rejects(register(['src/root/file']),/claimed work/);
+ staff.settledRoot({taskId:'now',changeId:'root-change',requestId:'accepted-receipt',acceptedVersion:'accepted-version'});
+ await register(['src/root/file']);
+ appoint('writer');const a=staff.begin({taskId:'now',actor:'root',actorRole:'main',staffId:'writer',model:'local/a',identity:'a',workId:'employee-work',scope:['src/employee'],readScope:['src']});
+ for(const status of ['active','unknown','result']){
+  state.staffAssignments[a.dispatchId].status=status;await assert.rejects(register(['src/employee/file']),/claimed work/);
+ }
+ staff.update(a.dispatchId,{status:'disposed',outcome:'accepted'});await register(['src/employee/file']);
+ await assert.rejects(register(['outside']));
+});
+
+test('a later stage registers and edits a bounded file after the real predecessor was accepted',async t=>{
+ const {fixture}=await import('./helpers/pi-fixture.js'),{repository}=await import('./helpers/git-fixture.js');
+ const {projectSession,confirmProject}=await import('./unified-project.fixture.js');
+ const {runProjectTurn}=await import('../src/project-turn.js'),{projectChatState}=await import('../src/project.js');
+ const {createVersioning}=await import('../src/versioning.js');
+ const tool=(name,args={})=>({toolCalls:[{name,args}]});
+ const a='src/legacy/a.txt',b='src/legacy/b.txt',c='src/legacy/check.txt';
+ const check=expr=>[{command:'node',args:['-e',`const f=require('fs');if(!(${expr}))process.exit(1)`]}];
+ const plan={goal:'Deliver A then B with an updated bounded check file',scope:['src/legacy'],readScope:['src/legacy'],steps:[
+  {id:'first',goal:'Deliver A',dependsOn:[],scope:['src/legacy'],deliverables:[a],works:[{id:'legacy-area',scope:['src/legacy']}],checks:check(`f.readFileSync('${a}','utf8')==='A\\n'`)},
+  {id:'second',goal:'Deliver B and its check',dependsOn:['first'],scope:['src/legacy'],deliverables:[b],checks:check(`f.readFileSync('${b}','utf8')==='B\\n'&&f.readFileSync('${c}','utf8')==='C\\n'`)},
+ ]};
+ const script=[tool('start_work',{action:'start',reason:'bounded dependent work',plan}),tool('write',{path:a,content:'A\n'}),
+  tool('project_staff',{action:'register_work',input:{scope:[c]}}),tool('accept_change'),tool('accept_change'),{text:'A delivered.'},
+  tool('project_staff',{action:'register_work',input:{scope:[c]}}),tool('refresh_change',{scope:[b,c],readScope:['src/legacy'],reason:'Use both authorized current work boundaries'}),
+  tool('write',{path:c,content:'C\n'}),tool('write',{path:b,content:'B\n'}),tool('accept_change'),tool('accept_change'),{text:'B delivered.'}];
+ const f=await fixture(t,({body},n)=>{
+  if(n===4)assert.match(body.messages.findLast(m=>m.role==='tool').content,/claimed work/,'an unsettled predecessor claim cannot be subdivided');
+  return script[n-1]??{text:'Both stages delivered.'};
+ });
+ const repo=repository(t),base=await projectSession(t,repo,f),proposal=await runProjectTurn({...base,input:plan.goal}),root=await confirmProject(base,proposal);
+ assert.equal(root.record.status,'completed',root.record.error);
+ const {state}=await projectChatState(f.home,repo.project);assert.ok(state.steps[1].subworks.some(w=>w.scope.includes(c)));
+ assert.ok(state.rootWorkClaims.some(claim=>claim.taskId===state.steps[0].attempts[0].taskId&&claim.accepted));
+ const v=await createVersioning({home:f.home,project:repo.project,readOnly:true});
+ try{assert.equal(Buffer.from((await v.read({version:state.version,path:c})).contentBase64,'base64').toString(),'C\n');}finally{await v.close();}
+});

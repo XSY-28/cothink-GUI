@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fixture } from "./helpers/pi-fixture.js";
 import { repository, git } from "./helpers/git-fixture.js";
-import { isPreparation, latest, outputs, projectDispatch, tool } from "./dispatch.fixture.js";
+import { isPreparation, latest, outputs, projectDispatch, runTurn, tool } from "./dispatch.fixture.js";
 
 test("project cancellation during supervisor collect releases both seats and preserves the in-flight employee", { timeout:60000 }, async t => {
   const repo = repository(t), controller = new AbortController();
@@ -206,4 +206,60 @@ test("a blocked worker asks only its direct supervisor, which may forward the or
   assert.equal(forwardedReport.dispatchId,supervisorId);
   assert.ok(task.requests().some(r=>r.id===directReport.requestId&&r.role==="member:"+memberId&&r.sent));
   assert.ok(task.requests().some(r=>r.id===forwardedReport.requestId&&r.role==="member:"+supervisorId&&r.sent));
+});
+
+test("model occupancy blocks renamed clones and feedback switching without discarding drafts, then permits sequential reuse", async t => {
+  const {readFileSync,writeFileSync}=await import('node:fs');
+  const {join}=await import('node:path');
+  const repo=repository(t); let step=0;
+  const f=await fixture(t,c=>{
+    if (isPreparation(c.body)) return {text: "Independent goal understood; inspect the original task within scope."};
+    if(c.body.model==='r2') {
+      const n=c.body.messages.filter(m=>m.role==='tool').length;
+      return n===0?tool('read',{path:'a.txt'}):n===1?tool('edit',{path:'a.txt',edits:[{oldText:'base A',newText:'preserved draft'}]}):{text:'Draft complete'};
+    }
+    if(c.body.model!=='main') return {text:'Inspection complete'};
+    step++;
+    const results=outputs(c.body), delegated=results.filter(o=>o.memberId && !o.changeId);
+    const first=delegated[0]?.memberId, second=delegated[1]?.memberId;
+    const delegate=model=>tool('delegate',{model,assignment:'inspect '+step,implementationAdvice:'Inspect source',reason:'different bounded task',scope:model==='fixture/r2'?['a.txt']:[],readOnly:model!=='fixture/r2'});
+    if(step===1) return tool('start_work',{reason:'occupancy'});
+    if(step===2) return delegate('fixture/kimi-k3.1-pro');
+    if(step===3) return delegate('fixture/moonshotai/k3.1-pro');
+    if(step===4) return delegate('fixture/r2');
+    if(step===5) return tool('collect',{memberId:second});
+    if(step===6) return tool('feedback',{memberId:second,model:'fixture/moonshotai/k3.1-pro',feedback:'Check a.txt specifically'});
+    if(step===7) return tool('accept_change',{memberId:second});
+    if(step===8) return tool('collect',{memberId:first});
+    if(step===9) return delegate('fixture/moonshotai/k3.1-pro');
+    if(step===10) return tool('collect',{});
+    return {text:'done'};
+  });
+  const path=join(f.home,'pi','models.json'),catalog=JSON.parse(readFileSync(path));
+  catalog.providers.fixture.models.push(...['kimi-k3.1-pro','moonshotai/k3.1-pro'].map(id=>({...catalog.providers.fixture.models[0],id,name:id})));
+  writeFileSync(path,JSON.stringify(catalog));
+  const secondary=[{provider:'fixture',modelId:'kimi-k3.1-pro'},{provider:'fixture',modelId:'moonshotai/k3.1-pro'},...f.models.secondary];
+  const task=await runTurn({home:f.home,cwd:repo.project,input:'inspect',config:{formatVersion:2,...f.models,secondary,work:{checks:[]}}});
+  assert.equal(task.record.status,'completed',task.record.error);
+  assert.equal(task.record.members.length,3);
+  assert.equal(task.record.members[1].model.modelId,'r2');
+  assert.deepEqual(task.record.members[1].feedback,[]);
+  assert.equal(task.record.members[1].status,'accepted');
+  assert.equal(git(repo.project,'show',task.record.work.version+':a.txt'),'preserved draft');
+  assert.equal(f.calls.filter(c=>c.body.model==='kimi-k3.1-pro').length,2);
+  assert.equal(f.calls.filter(c=>c.body.model==='moonshotai/k3.1-pro').length,2);
+  const errors=outputs(f.calls.at(-1).body).filter(o=>o.error?.code==='MEMBER_BUSY');
+  assert.equal(errors.length,2);
+  assert.ok(errors.every(o=>o.error.message.includes(task.record.members[0].memberId)));
+  const context=f.calls[1].body.messages.flatMap(m=>typeof m.content==='string'?[m.content]:m.content.map(part=>part.text??'')).join('\n');
+  assert.match(context,/Leader identity and catalog facts/);
+  assert.match(context,/Eligible secondary models/);
+  assert.match(context,/not independent experts/);
+  assert.equal(context.match(/"actualModelIdentity":"kimi-k3.1-pro"/g)?.length,2);
+  const leaderFacts=JSON.parse(context.match(/Leader identity and catalog facts: (.+)/)[1]);
+  assert.equal(leaderFacts.reasoning,true,'fixture explicitly configures a reasoning model');
+  assert.equal(leaderFacts.thinkingLevel,'high');
+  assert.equal(f.calls[1].body.reasoning_effort,'high');
+  assert.match(context,/Claude Opus5.5/);
+  assert.match(context,/provisional choice/);
 });

@@ -50,7 +50,7 @@ test('two GUI confirmation IDs consume one immutable proposal and open accepted 
  await complete(c,a.taskId);const source=readTask(f.home,a.taskId);
  const editorBefore=await c.session(s.id);
  const nextVersion=(await c.action("project.materials",{ownerId:s.id,source:"saved"})).version;
- const nextOptions={id:randomUUID(),readOnly:true,delegate:false,review:false,maxCalls:'2',readAllowed:true,readPaths:'a.txt',readProject:editorBefore.project,readWorkspaceId:editorBefore.workspaceId,readVersion:nextVersion};
+ const nextOptions={id:randomUUID(),readOnly:true,delegate:false,review:false,allowFileContinuation:false,maxCalls:'2',readAllowed:true,readPaths:'a.txt',readProject:editorBefore.project,readWorkspaceId:editorBefore.workspaceId,readVersion:nextVersion};
  await c.action('session.draft',{sessionId:s.id,text:'Next turn draft stays here',workRequest:null,selectionId:null,editId:randomUUID(),expectedDraftRevision:editorBefore.draftRevision,branchAnchor:editorBefore.branchAnchor,turnOptions:nextOptions});
  const nextTeam=await c.action('team.save',{name:'Next roster',main:f.models.secondary[1],secondary:[f.models.main]});
  await c.action('session.team',{sessionId:s.id,teamId:nextTeam.id});

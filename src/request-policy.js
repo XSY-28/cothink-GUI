@@ -1,5 +1,5 @@
 import { payloadImageHashes } from "./visual-preview.js";
-import { describeError, responseHeaders, observeResponse } from "./transport-diagnostics.js";
+import { describeError, responseHeaders, observeResponse, assertFencedModelTransport, hostToolsOnlyPayload } from "./transport-diagnostics.js";
 import { randomUUID } from "node:crypto";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { redact } from "./storage.js";
@@ -7,14 +7,7 @@ import { problem } from "./task.js";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import { applyMaterials, textOf } from "./request-materials.js";
 
-// These pinned Pi adapters pass options.fetch to their actual HTTP client.
-// Codex Responses is pinned to SSE in projects because WebSocket skips the fetch fence.
-const projectHttpApis = new Set(["openai-completions","openai-responses","openai-codex-responses",
-  "anthropic-messages","azure-openai-responses","mistral-conversations","pi-messages"]);
-export function assertFencedModelTransport(model,client) {
-  if(!projectHttpApis.has(model?.api)||client)
-    throw problem("PROJECT_TRANSPORT","Selected Pi adapter has no project-controlled HTTP dispatch fence: "+(model?.api??"unknown"));
-}
+export {assertFencedModelTransport,hostToolsOnlyPayload} from './transport-diagnostics.js';
 const optionalApis = new Set([
   "openai-completions",
   "openai-responses",
@@ -23,7 +16,7 @@ const optionalApis = new Set([
 ]);
 export const requiresModelOutputLimit = model => model?.api ? !optionalApis.has(model.api) : null;
 export { textOf };
-export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAutoResize = () => true }) {
+export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAutoResize = () => true, capabilitySources = () => null, effectiveModel = model => model }) {
   return {
     stream(model, context, options, send) {
       const output = createAssistantMessageEventStream();
@@ -52,6 +45,7 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
           if (!binding)
             throw problem("UNMANAGED_REQUEST", "模型请求没有绑定 CoThink 任务；已阻止发送。");
           ({ task, stage } = binding);
+          model=effectiveModel(model);
           if (task.record.status !== "running")
             throw problem("TASK_ENDED", "任务已结束，拒绝新的模型请求。");
           binding.assertOwned?.();
@@ -60,14 +54,19 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
           fenced = Boolean(task.projectPolicy || task.rootOwner);
           if(fenced)assertFencedModelTransport(model,options?.client);
           const sendIntent = task.projectPolicy?.locateSend({ task, stage, context, model });
+          await task.projectPolicy?.autoReviewScope?.();
+          context=task.projectPolicy?.projectRequestContext?.(sendIntent,context)??context;
           if (stage.phase === "process-check") context = {...context,
             messages:context.messages.filter(message=>message.role==="system"||message===context.messages.at(-1))};
           const materialContext=await applyMaterials(binding,context,model,imageAutoResize());
           context=materialContext.context;
           if((fenced||binding.task.materialContext?.length)&&model.contextWindow>0){
             const estimate=context.messages.reduce((sum,message)=>sum+estimateTokens(message),0)+Math.ceil((context.systemPrompt?.length??0)/4);
-            if(estimate>=model.contextWindow)
-              throw problem("MATERIAL_CONTEXT_LIMIT","对话及材料超出模型上下文估算上限。请减少材料或手动整理上下文。");
+            if(estimate>=model.contextWindow) {
+              const source=capabilitySources(model)?.contextWindow;
+              const label=({model_override:"本地显式覆盖",local_config_unverified:"本地配置 / 未核实",sdk_default:"SDK 默认 / 未核实",bundled_catalog:"随包目录"})[source]??"来源未核实";
+              throw problem("MATERIAL_CONTEXT_LIMIT",`对话及材料超出模型上下文估算上限 ${model.contextWindow}（${label}）。请在设置的“模型与认证”核对模型能力，或减少材料、手动整理上下文。`);
+            }
           }
           const expectedMaterialImages=materialContext.images;
           const secrets = await getSecrets(model);
@@ -165,6 +164,9 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
                   if (origin !== new URL(model.baseUrl).origin)
                     throw problem("PROJECT_TRANSPORT", "Dispatch origin differs from the approved model endpoint");
                   call.transport.requestOrigin = origin;
+                  let dispatchedPayload;
+                  try { dispatchedPayload=typeof init?.body==='string'?JSON.parse(init.body):call.payload; } catch {}
+                  call.transport.hostToolsOnly = hostToolsOnlyPayload(model,dispatchedPayload);
                   binding.assertOwned?.();
                   if(task.ioError) throw task.ioError;
                   if(task.record.status!=="running") throw problem("TASK_ENDED","Task ended before dispatch");
@@ -262,7 +264,6 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
                 retries: 0,
               };
               if (fenced) {
-                await task.projectPolicy?.autoReviewScope?.();
                 if (actual.provider !== model.provider || actual.id !== model.id || actual.baseUrl !== model.baseUrl)
                   throw problem("PROJECT_TRANSPORT", "Prepared payload changed the approved project route");
                 task.projectPolicy?.admit("prepareSend", sendIntent);

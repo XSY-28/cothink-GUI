@@ -29,7 +29,7 @@ test('confirmed PROJECT settings distinguish coordinator from the active owned m
   assert.equal(modelCapabilities.permissions.fileWrite,true);assert.equal(modelCapabilities.permissions.scriptExecution,true);assert.ok(modelCapabilities.tools.includes('resource_exec'));
   assert.equal(modelCapabilities.permissions.fileReadAuthorized,true,'formal actor reads under its work binding, not the earlier GUI planning grant');assert.equal(modelCapabilities.permissions.readOnly,false);
   assert.equal(modelCapabilities.environment.managedExecutionConfigured,true);
-  assert.equal(initialCapabilities.permissions.fileReadAuthorized,true);assert.equal(initialCapabilities.permissions.readOnly,true);assert.equal(initialCapabilities.permissions.fileWrite,false);assert.equal(initialCapabilities.permissions.scriptExecution,false,'initial observation has no writable grant even if effect tools can later request one');
+  assert.equal(initialCapabilities.permissions.fileReadAuthorized,true);assert.equal(initialCapabilities.permissions.readOnly,true);assert.equal(initialCapabilities.permissions.fileWrite,false);assert.equal(initialCapabilities.permissions.visualPreview,false);assert.equal(initialCapabilities.permissions.scriptExecution,false,'initial observation has no writable grant even if effect tools can later request one');
   for(const hidden of [f.home,session.project,'fixture-secret','sourceDirectory','sourcePath'])assert.ok(!JSON.stringify(shown).includes(hidden),hidden);
  }catch(error){assertionFailure=error;}finally{release();}
  try {const final=await settle(confirmed.taskId);assert.equal(final.status,'completed',final.error);assert.equal(f.calls.length,7);
@@ -99,9 +99,47 @@ test('retained PROJECT member loses current capabilities at result and acceptanc
  }catch(error){failure??=error;return {text:'Fixture observation failed: '+error.message};}});
  saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models,work:{execution}},'Fixture',teamId));c=await createGuiController({home:f.home,cwd:repo.project});
  const settle=async id=>{for(let n=0;n<1000;n++){const value=await c.task(id);if(value.status!=='running')return value;await new Promise(r=>setTimeout(r,10));}throw Error('Lifecycle task did not settle');};
- try {session=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));const submitted=await c.action('task.submit',await prepareSubmit(c,{sessionId:session.id,input:'Deliver final A',submissionId:'lifecycle'})),source=await settle(submitted.taskId);
+ try {session=seedFixtureConversationRepository(repo.project,await fixtureConversation(t,c));const submitted=await c.action('task.submit',await prepareSubmit(c,{sessionId:session.id,input:'组队完成 a.txt 修改',submissionId:'lifecycle'})),source=await settle(submitted.taskId);
   const confirmed=await c.action('task.confirmWork',{sessionId:session.id,submissionId:'lifecycle-confirm',protocolVersion:1,proposalRef:source.proposalRef}),final=await settle(confirmed.taskId);
-  if(failure)throw failure;assert.equal(final.status,'completed',final.error);assert.deepEqual(observations.map(x=>x.label),['active','result','feedback-active','feedback-result','accepted']);
+  if(failure)throw failure;assert.equal(final.status,'completed',final.error);const fulfilled=readTask(f.home,confirmed.taskId).collaborationResult[0];assert.equal(fulfilled.status,'fulfilled');assert.equal(fulfilled.requirement.workers,1);assert.equal(fulfilled.evidence.length,1);assert.deepEqual(observations.map(x=>x.label),['active','result','feedback-active','feedback-result','accepted']);
   assert.equal(observations.at(-1).assignment,'disposed');t.diagnostic(JSON.stringify({observations,requests:f.calls.length}));
  }finally{await c.close();}
+});
+
+test('planning MCP discovery lists only the selected HTTP service without invoking tools or command servers',async t=>{
+ const {createServer}=await import('node:http'),{writeFileSync}=await import('node:fs'),{runProjectTurn}=await import('../src/project-turn.js'),{opts}=await import('./unified-turn.fixture.js');
+ const methods=[],seen=[];
+ const server=createServer(async(req,res)=>{
+  const chunks=[];for await(const chunk of req)chunks.push(chunk);const message=JSON.parse(Buffer.concat(chunks));methods.push(message.method);
+  if(req.url==='/unavailable'){res.writeHead(503,{'content-type':'application/json'});res.end(JSON.stringify({error:'fixture-token'}));return;}
+  let result;if(message.method==='initialize')result={protocolVersion:message.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'catalog',version:'1'}};
+  else if(message.method==='tools/list')result={tools:[{name:'search',description:'External description fixture-token',inputSchema:{type:'object',properties:{query:{type:'string'},...(req.url==='/key-leak'?{'fixture-token':{type:'string'}}:{})}},annotations:{readOnlyHint:true}}]};
+  else if(message.method==='tools/call')throw Error('Discovery must never invoke business tools');
+  if(message.id===undefined){res.writeHead(202);res.end();return;}res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({jsonrpc:'2.0',id:message.id,result}));
+ });await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+ const tool=(args={})=>({toolCalls:[{name:'get_capabilities',args}]}),f=await fixture(t,({body},n)=>{
+  if(n===1)return tool();seen.push(JSON.parse(body.messages.findLast(m=>m.role==='tool').content));
+  if(n===2)return tool({mcpServer:'catalog'});if(n===3)return tool({mcpServer:'command'});if(n===4)return tool({mcpServer:'missing'});if(n===5)return tool({mcpServer:'broken'});if(n===6)return tool({mcpServer:'credential-key'});return {text:'Discovery complete'};
+ });
+ writeFileSync(join(f.home,'pi','mcp.json'),JSON.stringify({mcpServers:{catalog:{url:`http://127.0.0.1:${server.address().port}/mcp`,headers:{Authorization:'Bearer fixture-token'}},command:{command:'node',args:['never-start.mjs'],cwd:'/must-not-read'},disabled:{url:'https://unused.invalid',disabled:true},unavailable:{url:'https://unused.invalid'},broken:{url:`http://127.0.0.1:${server.address().port}/unavailable`,headers:{Authorization:'Bearer fixture-token'}},'credential-key':{url:`http://127.0.0.1:${server.address().port}/key-leak`,headers:{Authorization:'Bearer fixture-token'}}}}));
+ const options=opts(f);options.frozenConfig.main.maxOutputTokens=123;const task=await runProjectTurn(options);
+ assert.equal(task.record.status,'completed',task.record.error);assert.equal(seen.length,6);
+ assert.deepEqual(seen[0].mcp.servers.map(s=>[s.server,s.transport,s.status]),[['catalog','http','configured'],['command','stdio','requires_isolated_execution'],['disabled','http','disabled'],['unavailable','http','configured'],['broken','http','configured'],['credential-key','http','configured']]);
+ assert.equal(seen[1].mcp.discovery.status,'discovered');assert.deepEqual(seen[1].mcp.discovery.tools.map(t=>t.name),['search']);assert.equal(seen[1].mcp.discovery.tools[0].inputSchema.properties.query.type,'string');
+ assert.equal(seen[1].mcp.discovery.untrusted,true);assert.equal(seen[1].mcp.discovery.executionAuthorized,false);
+ assert.equal(seen[2].mcp.discovery.status,'requires_isolated_execution');assert.equal(seen[3].mcp.discovery.status,'not_configured');assert.equal(seen[4].mcp.discovery.status,'discovery_failed');assert.equal(seen[5].mcp.discovery.status,'discovery_failed');
+ assert.equal(methods.filter(m=>m==='tools/list').length,2);assert.equal(methods.filter(m=>m==='tools/call').length,0);
+ for(const snapshot of seen){assert.ok(!JSON.stringify(snapshot).includes('fixture-token'));assert.ok(!JSON.stringify(snapshot).includes('Authorization'));assert.ok(!JSON.stringify(snapshot).includes('/must-not-read'));}
+ assert.ok(f.calls.every(c=>(c.body.max_tokens??c.body.max_completion_tokens)===123));
+ assert.ok(f.calls.every(c=>c.body.messages.some(m=>['system','developer'].includes(m.role)&&m.content.includes('conversation manager'))));
+ assert.ok(f.calls[0].body.tools.find(t=>t.function.name==='get_capabilities').function.parameters.properties.mcpServer);
+});
+
+test('capability snapshot distinguishes preview permission from a tool name during read-only preparation',async()=>{
+ const {capabilitySnapshot}=await import('../src/builtin-skills.js');
+ for(const readOnly of [true,false]){
+  const snapshot=capabilitySnapshot({tools:['read','preview_html','resource_exec'],readOnly,scriptAuthorized:true});
+  assert.equal(snapshot.permissions.visualPreview,!readOnly);
+ }
+ assert.equal(capabilitySnapshot({tools:['read'],readOnly:false}).permissions.visualPreview,false);
 });

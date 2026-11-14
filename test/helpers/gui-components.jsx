@@ -12,3 +12,5 @@ export {ProjectDialog} from "../../gui/src/ProjectDialog.jsx";
 export {Conversation} from "../../gui/src/features/conversation/Conversation.jsx";
 export {Navigation,ConversationPicker} from "../../gui/src/features/navigation/Navigation.jsx";
 export {TurnLimits} from "../../gui/src/features/conversation/TurnLimits.jsx";
+
+export {FileContinuation} from "../../gui/src/features/conversation/ReplyActions.jsx";

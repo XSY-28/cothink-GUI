@@ -6,6 +6,17 @@ import {privateDirectory} from './storage.js';
 import {problem} from './task.js';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const inside=(root,path)=>{const rel=relative(root,path);return !isAbsolute(rel)&&rel!=='..'&&!rel.startsWith('..'+sep);};
+
+// Inspection needs the complete delta and execution evidence, not duplicate
+// copies of every input/output file. Stored snapshots and import bytes stay intact.
+export function skillResultView(operation) {
+  const metadata=files=>Object.fromEntries(Object.entries(files??{}).map(([path,{contentBase64,...file}])=>[path,file]));
+  return {...operation,
+    ...(operation.snapshot?{snapshot:{...operation.snapshot,files:metadata(operation.snapshot.files)}}:{}),
+    ...(operation.result?{result:{...operation.result,files:metadata(operation.result.files)}}:{}),
+  };
+}
+
 function safeRelative(path){return typeof path==='string'&&path&&!isAbsolute(path)&&!/[\\\0]/.test(path)&&!path.split('/').some(p=>!p||p==='.'||p==='..'||p.toLowerCase()==='.git');}
 // Every ancestor and the opened descriptor are checked; a symlink is never followed.
 function stableRead(root,path){

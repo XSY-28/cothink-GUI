@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {constants, lstatSync, realpathSync, openSync, closeSync, fstatSync, readSync} from 'node:fs';
 import {join, resolve, relative, isAbsolute, posix, extname} from 'node:path';
-import { guiWorkVersions } from './gui-work.js';
+import { guiWorkVersions } from './gui-work-files.js';
 import {git} from '../packages/agent-sync/src/git.js';
 
 export const FILE_LIMITS = Object.freeze({textBytes:1048576, previewBytes:8388608, downloadBytes:33554432, resources:64, depth:4, derivedBytes:16777216});
@@ -68,21 +68,21 @@ function verifyBlob(bytes, entry) {
   if(oid!==entry.object)reject('FILE_IDENTITY_MISMATCH','成果内容与任务固定版本不一致，已拒绝返回。');
   return bytes;
 }
-export async function readAcceptedBlob(repo, path, entry, limit) {
+export async function readFixedBlob(repo, path, entry, limit) {
   validateFilePath(path);
   if(!regular(entry))reject('FILE_UNSUPPORTED','该路径不是固定版本中的普通文件。');
   // Agent-sync's version tree gives the exact immutable object. Preflight its size before reading bytes.
   const object=async args=>git(repo,['cat-file',...args,entry.object],undefined,{GIT_NO_LAZY_FETCH:'1'});
   try {
     const size=Number((await object(['-s'])).toString().trim());
-    if(!Number.isSafeInteger(size)||size<0)reject('FILE_UNAVAILABLE','无法核对接纳文件的大小。');
+    if(!Number.isSafeInteger(size)||size<0)reject('FILE_UNAVAILABLE','无法核对固定文件的大小。');
     if(size>limit)reject('FILE_TOO_LARGE',`文件超出本次读取的 ${limit} 字节额度。`);
     const bytes=await object(['blob']);
     if(bytes.length!==size)reject('FILE_IDENTITY_MISMATCH','固定文件对象与核验大小不一致。');
     return verifyBlob(bytes,entry);
   } catch(error) {
     if(error.code?.startsWith('FILE_'))throw error;
-    reject('FILE_UNAVAILABLE','无法读取已接纳版本的文件对象。');
+    reject('FILE_UNAVAILABLE','无法读取固定版本的文件对象。');
   }
 }
 export function readBounded(root, path, entry, limit) {

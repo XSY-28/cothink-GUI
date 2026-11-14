@@ -5,7 +5,7 @@ import {Icon} from "../../Icon.js";
 import { Markdown } from "../../Markdown.js";
 import { ReplyHeading } from "./ReplyHeading.jsx";
 import { ConversationHeading } from "./ConversationMenu.jsx";
-import { ReplyActions, StopButton, UserMessage, WorkProposal } from "./ReplyActions.jsx";
+import { FileContinuation, ReplyActions, StopButton, UserMessage, WorkProposal } from "./ReplyActions.jsx";
 import { useConversationReading } from "./useConversationReading.js";
 import {conversationThinking} from "../../view.js";
 import styles from "./Conversation.module.css";
@@ -192,6 +192,10 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                       </div>
                     )}
                     {turn.hasWork && <OutcomeFiles taskId={turn.taskId} status={turn.status} resultRevision={turn.resultRevision} commands={commands} onOpen={onOpenFile}/>}
+                    {boot.protocol?.fileContinuation===1 && turn.hasWork && !inProgress && !turn.proposalRef &&
+                      ["partial","failed","outcome_unknown","stop_unknown"].includes(turn.status) &&
+                      <FileContinuation turn={turn} disabled={!!boot.active||!!pending||session.readOnly||!!session.selectionError}
+                        onInspect={commands.inspectFileContinuation} onContinue={commands.continueFileWork}/>}
                     <ReplyActions turn={turn} forkDisabled={!!boot.active || !!pending || session.readOnly || !!session.selectionError || !turn.canFork}
                       showChanges={turn.hasWork || task?.id === turn.taskId && task.work}
                       onDetails={onOpenDetails} onCopy={onCopy} onFork={taskId=>safely(onFork(taskId))} />

@@ -18,9 +18,10 @@ import { resolveModelThinking } from "./thinking.js";
 import { resolvePackageResources, localNames } from "./packages.js";
 import {Type} from 'typebox';
 import {readFrozenSkill,taskSkillDirectory} from './skill-resources.js';
-import {capabilitySnapshot} from './builtin-skills.js';
-import { createModelRuntime } from "./pi-model-runtime.js";
-export { createModelRuntime, projectModelFacts, projectRoutingBudget } from "./pi-model-runtime.js";
+import {runtimeCapabilitySnapshot,createCapabilityTool} from './builtin-skills.js';
+import {projectMcpSummary,discoverProjectMcp} from './project-mcp-work.js';
+import { createModelRuntime, effectiveTaskModel } from "./pi-model-runtime.js";
+export { createModelRuntime, projectModelFacts, projectRoutingBudget, inspectProviderMetadata } from "./pi-model-runtime.js";
 
 export const managedSettings = {
   retry: { enabled: false, provider: { maxRetries: 0, timeoutMs: 0 } },
@@ -120,10 +121,8 @@ export async function createRuntime({
     name:'read_skill',label:'Read frozen skill',description:'Read a selected task-frozen skill body or reference. Use its name and either the directory’s advertised skill:<name>/<path> URI or a relative path within that same skill. Omit path for SKILL.md.',
     parameters:Type.Object({name:Type.String(),path:Type.Optional(Type.String()),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer())}),
     execute:async(id,args)=>{if(!binding)throw problem('NO_TASK','No bound task');const {task,stage}=binding;writer.assertOwned();if(binding.allowedSkills&&!binding.allowedSkills.includes(args.name))throw problem('SKILL_RESOURCE','Skill is outside this role’s frozen grant');task.projectPolicy?.admit('read',{actor:stage.role});return {content:[{type:'text',text:JSON.stringify(readFrozenSkill(task,args,{actor:stage.role,stageId:stage.id,toolCallId:id}))}]};}
-  },{
-    name:'get_capabilities',label:'Current capabilities',description:'Inspect host-confirmed skills, active tools, permissions and unavailable context features. This does not grant authority.',parameters:Type.Object({}),
-    execute:async()=>{if(!binding)throw problem('NO_TASK','No bound task');return {content:[{type:'text',text:JSON.stringify(runtime.capabilities())}]};}
-  }]:[];
+  },createCapabilityTool({home,getBinding:()=>binding,getRuntime:()=>runtime,discover:discoverProjectMcp,
+    parameters:Type.Object({mcpServer:Type.Optional(Type.String())})})]:[];
   const contextTools=contextAccess?[
     ['search_context',Type.Object({query:Type.Optional(Type.String()),offset:Type.Optional(Type.Integer()),limit:Type.Optional(Type.Integer()),
       purpose:Type.Optional(Type.String({description:'Use only when necessary to attribute work, verify evidence or explicitly continue it: attribution, evidence, continuation.'})),
@@ -235,6 +234,8 @@ export async function createRuntime({
     }
     const policy = createRequestPolicy({
       getBinding: () => binding,
+      effectiveModel: model => effectiveTaskModel(model,binding?.task),
+      capabilitySources: model => (binding?.task.record.projectModelFacts??binding?.task.rootOwner?.rootTask?.record.projectModelFacts)?.find(fact=>fact.provider===model.provider&&fact.modelId===model.id)?.capabilitySources??mr.getModelCapabilitySources(model.provider,model.id),
       imageAutoResize: () => settingsManager.getImageAutoResize(),
       getSecrets: async (model) => {
         const resolution = await mr.getAuth(model);
@@ -296,6 +297,7 @@ export async function createRuntime({
           for(const name of ['agent_start','agent_end','agent_settled','agent_before_settle','turn_start','turn_end','message_start','message_update','message_end','model_select'])
             pi.on(name,async event=>{await nativeContext?.lifecycle?.(event);});
           pi.on("tool_call",async event=>{
+            if(binding)binding.task.projectPolicy?.admitToolCall?.({task:binding.task,stage:binding.stage,toolCallId:event.toolCallId,toolName:event.toolName});
             validateNativeTools();
             const owner=pluginOwners().get(event.toolName);
             if(!owner) {
@@ -575,17 +577,8 @@ export async function createRuntime({
       },
       projectToolNames: projectToolDefinitions.map(t => t.name),
       capabilities() {
-        // Work adapters supply the current actor's grant; root planning consent is not a work grant.
-        const task=binding?.task,record=task?.record,authority=getWorkspaceAuthority?.(),phase=binding?.stage.phase??'idle',root=task?.rootOwner?.rootTask;
-        const running=t=>!!t&&t.record.status==='running'&&!t.signal.aborted&&!t.ioError&&!t.record.cancelRequestedAt;
-        let active=!disposed&&running(task)&&(!root||running(root))&&authority?.active!==false;
-        if(active&&task.projectPolicy?.staff){try{task.projectPolicy.staff.checkWork({taskId:record.id,role:binding.stage.role});}catch{active=false;}}
-        const tools=active?session.getActiveToolNames():[];
-        const readOnly=!active||!!record?.constraints?.readOnly||!authority||!!authority.readOnly||['review','visual-review','worker-prepare','worker-conflict-resolution','project-effect'].includes(phase);
-        const readable=active&&(authority?!!(authority.readScope?.length||authority.scope?.length):!!record?.readAuthorization);
-        return {...capabilitySnapshot({skills:task?taskSkillDirectory(task).filter(skill=>!binding.allowedSkills||binding.allowedSkills.includes(skill.name)):[],tools,phase,readOnly,
-          hasProject:!!(record?.workspace?.project||record?.project),readAuthorized:readable&&tools.some(n=>['read','grep','find','ls','read_project_context'].includes(n)),writeAuthorized:!!authority?.scope?.length,scriptAuthorized:!!authority&&!authority.readOnly,executionConfigured:!!(record?.work?.execution??record?.frozenConfig?.work?.execution),context:contextAccess?{...contextState(manager),sourceLeaf:record?.branchId??manager.getLeafId()}:null}),
-          active,source:binding?{taskId:record.id,stageId:binding.stage.id,role:binding.stage.role}:null};
+        return runtimeCapabilitySnapshot({binding,skills:binding?.task?taskSkillDirectory(binding.task):[],mcp:projectMcpSummary(home),authority:getWorkspaceAuthority?.(),disposed,
+          getToolNames:()=>session.getActiveToolNames(),context:contextAccess?{...contextState(manager),sourceLeaf:binding?.task.record.branchId??manager.getLeafId()}:null});
       },
       setToolNames(names) {
         managedNames = selectManagedNames(names);
@@ -594,7 +587,7 @@ export async function createRuntime({
       async selectModel(ref) {
         runtime.applyingModel = true;
         try {
-          const model = mr.getModel(ref.provider, ref.modelId);
+          const model = effectiveTaskModel(mr.getModel(ref.provider, ref.modelId),binding?.task);
           if (!model) throw problem("MODEL_UNAVAILABLE", "模型不可用");
           const thinkingLevel = await resolveModelThinking(model, ref.thinkingLevel);
           await session.setModel(model);

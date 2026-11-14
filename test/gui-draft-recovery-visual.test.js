@@ -71,7 +71,7 @@ test("an old review draft waits for acceptance and submits with its existing har
   const args=(await sent).postDataJSON().args;
   assert.equal(args.editorEditId,body.editor.editId);
   assert.equal(args.protocolVersion,1);
-  assert.deepEqual(args.constraints,{readOnly:true,allowedSubtasks:[]});
+  assert.deepEqual(args.constraints,{readOnly:true,allowedSubtasks:[],allowFileContinuation:false});
   assert.deepEqual(args.budget,{maxCalls:1});
   await page.getByText("fixture answer",{exact:true}).waitFor();
   assert.equal(model.calls.length,1);

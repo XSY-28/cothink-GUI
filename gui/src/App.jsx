@@ -2,7 +2,7 @@ import {FilePanel} from "./features/files/FilePanel.jsx";
 import React, { useEffect, useReducer, useRef, useState } from "react";
 import { createApi, consumeToken, copyText } from "./api.js";
 import { useGuiWorkspace } from "./useGuiWorkspace.js";
-import { initialView, workspaceViewReducer, readDisplayPreferences, useDisplayTheme } from "./workspace-view.js";
+import { initialView, workspaceViewReducer, readDisplayPreferences, useDisplayTheme, restoreDetailFocus } from "./workspace-view.js";
 import { Navigation, ConversationPicker, ConversationRename } from "./features/navigation/Navigation.jsx";
 import { Conversation } from "./features/conversation/Conversation.jsx";
 import { ConversationActionDialogs, useConversationActions } from "./features/conversation/ConversationMenu.jsx";
@@ -98,6 +98,10 @@ export function App() {
   const detail = useRef(null), detailTrigger = useRef(null);
   const selection = view.detailsBySession[selectedSessionId];
   const detailOpen = !!selection?.open;
+  useEffect(() => {
+    const wanted = detailOpen ? selection.taskId : null;
+    if (!detailOpen || task?.id !== wanted) void commands.selectTask(wanted, selectedSessionId);
+  }, [detailOpen, selection?.taskId, selectedSessionId, task?.id, commands.selectTask]);
   const navOpen = mobile && view.navigation.mobileOpen;
   const showNotes = !!boot.releaseNotes?.unread && !notesHidden;
   const overlay = view.overlay;
@@ -210,16 +214,9 @@ export function App() {
       : remembered?.open ? {taskId:remembered.taskId,jump:false} : undefined;
     return commands.openSession(id,target);
   }
-  function restoreDetailFocus() {
-    for (const node of [detailTrigger.current, document.querySelector(".conversation-picker-trigger"), document.querySelector(".nav-toggle")]) {
-      if (!node?.isConnected || node.matches(":disabled") || node.closest("[inert]") || !node.getClientRects().length) continue;
-      node.focus();
-      if (document.activeElement === node) break;
-    }
-  }
   function closeDetails() {
     dispatch({type: "details", sessionId: selectedSessionId, change: {open: false}});
-    requestAnimationFrame(restoreDetailFocus);
+    requestAnimationFrame(()=>restoreDetailFocus(detailTrigger.current));
   }
   function openFile(fileRef, tab="preview", event) {
     dispatch({type:"files",sessionId:selectedSessionId,selection:{fileRef,tab}});
@@ -234,7 +231,6 @@ export function App() {
     const trigger = event?.currentTarget || document.activeElement;
     if (!detail.current?.contains(trigger)) detailTrigger.current = trigger;
     dispatch({type: "details", sessionId: selectedSessionId, change: {taskId, tab, open: true}});
-    void commands.selectTask(taskId, selectedSessionId);
   }
   useEffect(() => {
     const media = matchMedia("(max-width: 1179px)");

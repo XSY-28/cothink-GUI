@@ -1,3 +1,4 @@
+import {assertContinuationRequests} from './project-continuation.js';
 import { loadInputMaterials } from "./context.js";
 import {guiTurnIntent} from "./gui-turn-options.js";
 import { assertCleanProjectProcess } from "./pi-runtime.js";
@@ -15,7 +16,7 @@ import { digest } from "./project-collaboration-evidence.js";
 import { checkWorkProject, prepareWork, validateWorkIntent } from "./project-file-proposal.js";
 import { bindReadonlyRoles } from "./project-readonly-roles.js";
 export { digest, recordCollaborationResult } from "./project-collaboration-evidence.js";
-export { assertConfirmedProjectState, checkedProposal, confirmationState, executeConfirmed, reserveConfirmation, workConfirmationBlocker } from "./project-file-confirmation.js";
+export { reserveFileContinuation, fileContinuationState, assertConfirmedProjectState, checkedProposal, confirmationState, executeConfirmed, reserveConfirmation, workConfirmationBlocker } from "./project-file-confirmation.js";
 export { resolveHandoffContext } from "./project-readonly-reports.js";
 export { resolveDelivery, resolveDeliveryEvidence, resolveManagerFinal, resolveOwnedTasks } from "./project-delivery.js";
 
@@ -26,9 +27,9 @@ export function assertRootOwner(owner,rootTaskId) {
   return owner;
 }
 export function normalizeConstraints(input={}) {
-  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['readOnly','allowedSubtasks','requireDifferentModelReview','networkMode'].includes(k)))throw problem('CONSTRAINTS','Invalid turn constraints');
-  const value={readOnly:false,allowedSubtasks:['review','work'],requireDifferentModelReview:false,...input};
-  if(typeof value.readOnly!=='boolean'||typeof value.requireDifferentModelReview!=='boolean'||!Array.isArray(value.allowedSubtasks)||value.allowedSubtasks.some(x=>!['review','work'].includes(x)))throw problem('CONSTRAINTS','Invalid turn constraints');
+  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['readOnly','allowedSubtasks','requireDifferentModelReview','networkMode','allowFileContinuation'].includes(k)))throw problem('CONSTRAINTS','Invalid turn constraints');
+  const value={readOnly:false,allowedSubtasks:['review','work'],requireDifferentModelReview:false,allowFileContinuation:false,...input};
+  if(typeof value.allowFileContinuation!=='boolean'||typeof value.readOnly!=='boolean'||typeof value.requireDifferentModelReview!=='boolean'||!Array.isArray(value.allowedSubtasks)||value.allowedSubtasks.some(x=>!['review','work'].includes(x)))throw problem('CONSTRAINTS','Invalid turn constraints');
   if(value.networkMode!==undefined&&!['whole-turn-offline','artifact-offline'].includes(value.networkMode))throw problem('CONSTRAINTS','Invalid network mode');
   value.allowedSubtasks=[...new Set(value.allowedSubtasks)];return value;
 }
@@ -103,6 +104,7 @@ export function createRootOwner(task, { processCheckClock } = {}) {
           throw problem("PROCESS_UNBOUND","Checker may only send its tool-free host observation");
         cause="observe:"+grant.observation.id;
       }
+      assertContinuationRequests(task.home,task.record.projectOperation?.continuation);
       const budget=task.record.budget;
       if(budget.maxCost!==null)throw problem('ROOT_BUDGET','No enforceable per-request fee upper bound; hard cost cap prevents sending');
       processCheck.assertWorkerSend(request.role);
@@ -127,7 +129,10 @@ export function createRootOwner(task, { processCheckClock } = {}) {
       stopping=(async()=>{
         const operations=[...executions.values()];for(const op of operations)op.cancel(cause);
         const results=await Promise.allSettled([...operations.map(op=>op.settled),...[...children.values()].filter(c=>c!==task).map(c=>c.cancel())]);
+        await processCheck.close();
         if(results.some(r=>r.status==='rejected')||[...children.values()].some(c=>c!==task&&(c.record.cancelStopError||c.record.cancelRequestedAt&&!c.record.cancelSettledAt||["running","cancelling","stop_unknown"].includes(taskDisplayStatus(c.record)))))throw problem('ROOT_STOP_UNKNOWN','Owned execution stop is unconfirmed');
+        task.record.localExecutionClosedAt=new Date().toISOString();
+        try { task.save(); } catch(error) { task.record.localExecutionClosedAt=null; throw error; }
       })();return stopping;
     },
   };

@@ -1,6 +1,10 @@
+import {resolveDeliveryEvidence,resolveManagerFinal} from './project-delivery.js';
+import {executionFacts} from './project-delivery-checks.js';
+import {continuationLineage,continuationSourceRoots,locallyClosed} from './project-continuation.js';
+import {hostOnlyRequest} from './transport-diagnostics.js';
 import { isDeepStrictEqual } from "node:util";
-import { inScope } from "./versioning.js";
-import { readTask } from "./task.js";
+import { inScope, createVersioning } from "./versioning.js";
+import { readTask, readRequest, readRequests } from "./task.js";
 import { assertProjectWorkReviewed } from "./project-review.js";
 
 // Read first-parent changes after a candidate was accepted. A change followed by
@@ -107,4 +111,166 @@ export async function reviewEvidence(v, home, state, step, version, task, reques
     receipts.push(...verified);
   }
   return [...new Map(receipts.map(r => [r.requestId,r])).values()];
+}
+
+/** One public proof predicate for live repair completion and read-only historical recovery. */
+export async function inspectRepairVerification({versioning,route,step,record,draft,result}) {
+  const rejected=reason=>({verified:false,reason});
+  if(!versioning||route?.status!=='repair'||!['scope_expansion','failed'].includes(route.kind)||
+    !route.edit||route.taskId!==record?.id||route.edit.taskId!==record.id||
+    route.edit.changeId!==route.changeId||route.revision!==step.revision||!step.checks?.length)
+    return rejected('No matching diagnosed repair and frozen checks');
+  try {
+    const current=await versioning.inspect({changeId:route.changeId});
+    if(draft&&(draft.taskId!==record.id||draft.changeId!==route.changeId||!draft.version))return rejected('Draft is outside the diagnosed repair');
+    if(!draft&&(current.status!=='prepared'||current.basisStatus!=='current'))return rejected('Current repaired candidate is not prepared on its current basis');
+    const edit=await versioning.inspect({requestId:route.edit.requestId});
+    if(edit.status!=='applied'||!edit.privateVersion)return rejected('Original diagnosed edit has no applied receipt');
+    const candidates=[...(current.candidates??[])].reverse();
+    for(const candidate of candidates) {
+      const checked=candidate.precheck;
+      if(result&&candidate.candidateVersion!==result.binding?.candidateVersion)continue;
+      if(!draft&&(current.candidateVersion!==candidate.candidateVersion||current.privateVersion!==candidate.privateVersion))continue;
+      if(checked?.status!=='passed'||checked.verification!=='passed'||checked.tree!==candidate.tree||
+        checked.binding?.candidateVersion!==candidate.candidateVersion||checked.binding?.policy!==candidate.policy||
+        (record.project?.checkPolicy?.digest&&candidate.policy!==record.project.checkPolicy.digest)||
+        checked.checks?.length!==step.checks.length||!step.checks.every((expected,index)=>{
+          const actual=checked.checks[index];return actual?.command===expected.command&&
+            isDeepStrictEqual(actual.args??[],expected.args??[])&&actual.exitCode===0&&actual.sourceChanged===false;
+        }))continue;
+      if(result){const supplied={...result};delete supplied.requestId;delete supplied.tree;
+        const original={...checked};delete original.tree;
+        if(result.tree!==candidate.tree||!isDeepStrictEqual(supplied,original))continue;}
+      let same=true;
+      for(const version of [edit.privateVersion,...(draft?[draft.version]:[])]) {
+        const diff=await versioning.inspect({fromVersion:candidate.candidateVersion,toVersion:version});
+        if(diff.files?.length||diff.binaryFiles?.length||diff.text){same=false;break;}
+      }
+      if(!same)continue;
+      const requests=(record.work?.requests??[]).filter(request=>request.action==='prepareChange'&&
+        request.changeId===route.changeId&&request.dispatched!==false&&(!result||request.requestId===result.requestId));
+      for(const request of requests) {
+        const receipt=await versioning.inspect({requestId:request.requestId});
+        const fixed=receipt.candidates?.find(item=>item.candidateVersion===candidate.candidateVersion);
+        if(receipt.changeId!==route.changeId||receipt.candidateVersion!==candidate.candidateVersion||
+          receipt.privateVersion!==candidate.privateVersion||!isDeepStrictEqual(fixed?.precheck,checked))continue;
+        return {verified:true,proof:{taskId:record.id,changeId:route.changeId,requestId:request.requestId,
+          candidateVersion:candidate.candidateVersion,privateVersion:candidate.privateVersion,tree:candidate.tree,
+          policy:candidate.policy,checks:structuredClone(checked.checks)}};
+      }
+    }
+    return rejected('No public precheck receipt matches the exact repaired candidate and all frozen checks');
+  }catch(error){return rejected('Public repair verification is unavailable: '+(error.code??error.message));}
+}
+
+
+/** Read-only evidence for this writer invocation; nothing is added to saved state. */
+export async function completedContinuationEvidence(home,state) {
+  if(!home||state.entryPolicy!=='unified')return [];
+  const candidates=Object.entries(state.commands??{}).filter(([,command])=>command.status==='settled'&&command.continuation);
+  if(!candidates.length)return [];
+  const facts=[];let v;
+  try {
+    v=await createVersioning({home,project:state.repo,backend:'agent-sync',readOnly:true});
+    const formal=await v.inspect();
+    if(formal.version!==state.version||formal.integrationRef!==state.integrationRef)return [];
+    const history=new Set();let cursor;
+    do {
+      const page=await v.inspect({history:{limit:100,...(cursor?{cursor}:{})}});
+      for(const item of page.versions)history.add(item.version);
+      cursor=page.nextCursor;
+    }while(cursor);
+    for(const [commandId,command] of candidates)try {
+      const ref=command.continuation,root=readTask(home,command.rootTaskId);
+      if(root.status!=='completed'||root.projectOperation?.commandId!==commandId||!isDeepStrictEqual(root.projectOperation.continuation,ref)||
+        root.executionBinding?.formalRef!==state.integrationRef||!root.deliveryRef||!history.has(root.deliveryRef.version))continue;
+      const lineage=continuationLineage(home,state,root);
+      const delivery=resolveDeliveryEvidence(home,root);
+      if(!delivery||delivery.visualError||!resolveManagerFinal(home,root,delivery))continue;
+      for(const {record:source,stepId} of delivery.sources) {
+        const step=state.steps.find(item=>item.id===stepId),attempt=step?.attempts.find(item=>item.taskId===source.id);
+        if(!attempt||attempt.status!=='completed'||source.status!=='completed'||!isDeepStrictEqual(source.project.scope,step.scope)||
+          !isDeepStrictEqual(attempt.check,source.work.finalCheck)||!history.has(attempt.version))continue;
+        const closure=await executionFacts(v,source,readRequests(home,source));
+        if(closure.pendingEffects.length||!locallyClosed(source,readRequests(home,source),closure))continue;
+        let accepted=false;
+        for(const row of source.work.acceptance??[]) {
+          if(row.status!=='accepted'||!source.work.requests.some(request=>request.action==='acceptChange'&&request.requestId===row.requestId))continue;
+          const receipt=await v.inspect({requestId:row.requestId});
+          if(receipt.status==='accepted'&&receipt.verification==='passed'&&receipt.changeId===row.changeId&&
+            receipt.candidateVersion===row.candidateVersion&&receipt.acceptedVersion===row.acceptedVersion&&
+            history.has(receipt.acceptedVersion)&&(!attempt.acceptedVersion||attempt.acceptedVersion===receipt.acceptedVersion))accepted=true;
+        }
+        if(!accepted)continue;
+        const checked=await v.inspect({requestId:source.work.finalCheck.requestId});
+        if(checked.status!=='passed'||checked.verification!=='passed'||checked.version!==attempt.version||
+          checked.binding?.version!==attempt.version||!isDeepStrictEqual(checked.checks,attempt.check.checks))continue;
+        let rootsClosed=true;
+        for(const ancestor of lineage) {
+          const evidence=await executionFacts(v,ancestor,readRequests(home,ancestor));
+          if(evidence.pendingEffects.length||!locallyClosed(ancestor,readRequests(home,ancestor),evidence)){rootsClosed=false;break;}
+        }
+        if(!rootsClosed)continue;
+        const roots=continuationSourceRoots(state,ref);
+        for(const original of step.attempts) {
+          if(original.taskId===attempt.taskId||!roots.has(original.rootTaskId))continue;
+          const prior=readTask(home,original.taskId),requests=readRequests(home,prior);
+          if(prior.project?.id!==state.id||prior.project.stepId!==step.id||prior.rootTaskId!==original.rootTaskId||
+            !isDeepStrictEqual(prior.project.scope,source.project.scope))continue;
+          const priorFacts=await executionFacts(v,prior,requests);
+          if(priorFacts.pendingEffects.length||!locallyClosed(prior,requests,priorFacts))continue;
+          const unknown=requests.filter(request=>request.sent&&request.status==='outcome_unknown');
+          if(unknown.some(request=>!ref.requestIds.includes(request.id)||request.phase==='project-effect'||!hostOnlyRequest(request)))continue;
+          facts.push({projectId:state.id,formalRef:state.integrationRef,taskId:prior.id,successorTaskId:attempt.taskId,
+            requestIds:unknown.map(request=>request.id),scope:[...prior.project.scope]});
+        }
+      }
+    }catch { /* Missing, incomplete or forged evidence releases no occupancy. */ }
+  }finally{await v?.close();}
+  return facts;
+}
+
+
+/** Carry an unused, observed repair; never grant another judgment or edit. */
+export async function inspectUnspentRepair({home,versioning,route,step,record,draft}) {
+  if(!['repair','blocked'].includes(route?.status)||route.kind!=='failed'||route.edit||route.feedback||route.coordination||
+    !route.judgmentCall||!route.probe?.completedAt||route.probe.error||route.probe.decision!=='repair'||
+    record?.id!==route.taskId||record.project?.id!==route.projectId||record.project.stepId!==step.id||route.revision!==step.revision||
+    draft?.taskId!==record.id||draft.changeId!==route.changeId||draft.version!==(route.expansion?.confirmedVersion??route.privateVersion)||
+    !isDeepStrictEqual(record.project.checks,step.checks)||!isDeepStrictEqual(record.project.scope,step.scope)||
+    !route.judgment?.repairScope?.length||route.judgment.repairScope.some(p=>!inScope(p,step.scope)))return false;
+  try {
+    const origin=route.restoredFrom?(step.routeHistory??[]).find(r=>r.status==='repair'&&!r.restoredFrom&&r.judgmentCall===route.judgmentCall&&
+      isDeepStrictEqual(r.probe,route.probe)&&isDeepStrictEqual(r.judgment,route.judgment)):route;
+    if(!origin||origin.status!=='repair'&&origin!==route||origin.edit||origin.feedback||origin.coordination)return false;
+    const owner=origin===route?record:readTask(home,origin.taskId);
+    if(owner.project.id!==route.projectId||owner.project.stepId!==step.id||!isDeepStrictEqual(owner.project.checks,step.checks)||!isDeepStrictEqual(owner.project.scope,step.scope))return false;
+    const call=readRequest(home,owner.id,origin.judgmentCall);
+    if(call.status!=='completed'||!call.sent||call.role!=='main'||!call.response?.content?.some(part=>part.type==='toolCall'&&
+      part.name==='project_route_judge'&&['path','contains','ifPresent','ifAbsent','repairScope'].every(key=>isDeepStrictEqual(part.arguments?.[key],route.judgment[key]))))return false;
+    for(const source of new Set([owner,record])){
+      const at=source===owner?source.requestIds.indexOf(call.id):-1;if(source===owner&&at<0)return false;
+      const tools=new Set(source.requestIds.slice(at+1).flatMap(id=>readRequest(home,source.id,id).response?.content?.filter(p=>p.type==='toolCall').map(p=>p.id)??[]));
+      if(source.tools?.some(t=>tools.has(t.toolCallId)&&t.kernelInput&&t.kernelDispatched!==false))return false;
+    }
+    const unchanged=async version=>{const d=await versioning.inspect({fromVersion:version,toVersion:draft.version});return !d.files.length&&!d.binaryFiles?.length&&!d.text;};
+    const failed=async(evidence,candidate,changeId)=>{
+      const receipt=await versioning.inspect({requestId:evidence.requestId});
+      const check=receipt.status==='check_failed'?receipt:receipt.candidates?.find(c=>c.candidateVersion===candidate)?.precheck;
+      return receipt.changeId===changeId&&check?.status==='check_failed'&&check.binding?.candidateVersion===candidate&&
+        (!owner.project.checkPolicy||check.binding.policy===owner.project.checkPolicy.digest)&&isDeepStrictEqual(check.checks,evidence.checks)&&
+        check.checks.some(c=>c.exitCode!==0)&&check.checks.length<=step.checks.length&&check.checks.every((c,i)=>
+          c.sourceChanged===false&&c.command===step.checks[i].command&&isDeepStrictEqual(c.args??[],step.checks[i].args??[]))&&await unchanged(candidate);
+    };
+    if(!await failed(origin.evidence,origin.candidate,origin.changeId))return false;
+    if(route.status==='blocked'&&!route.recheck)return false;
+    if(route.recheck&&!await failed(route.recheck.evidence,route.recheck.candidate,route.changeId))return false;
+    const current=await versioning.inspect({changeId:route.changeId});
+    if(current.privateVersion!==draft.version||current.readOnly||!record.work.changes.some(c=>c.changeId===route.changeId&&!c.readOnly))return false;
+    if(route.expansion){const r=await versioning.inspect({requestId:route.expansion.requestId});if(!route.restoredFrom||r.status!=='open'||r.changeId!==route.changeId||r.privateVersion!==draft.version)return false;}
+    const file=await versioning.read({version:origin.candidate,path:route.judgment.path});
+    if(file.contentHash!==route.probe.contentHash||route.probe.path!==route.judgment.path||file.contentBase64===null)return false;
+    const present=Buffer.from(file.contentBase64,'base64').toString('utf8').includes(route.judgment.contains);
+    return present===route.probe.present&&route.judgment[present?'ifPresent':'ifAbsent']==='repair';
+  }catch{return false;}
 }

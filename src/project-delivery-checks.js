@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { legacyGit } from "./git-versioning.js";
-import { createVersioning } from "./versioning.js";
+import { createVersioning, inScope } from "./versioning.js";
 import { readTask, taskDisplayStatus } from "./task.js";
 import { reviewEvidence } from "./project-review-evidence.js";
 
@@ -117,20 +117,10 @@ export async function evidence(home, state, step, record, requests, attempt) {
     const facts = [];
     for (const id of ids)
       facts.push({ id, fact: await v.inspect({ requestId: id }) });
-    const undispatched = new Set([
-      ...(w.requests ?? []).filter(r => r.dispatched === false),
-      ...(record.tools ?? []).filter(t => t.kernelInput && t.kernelDispatched === false),
-    ].map(r => r.requestId));
-    evidence.kernelRequests = facts.map(({ id, fact }) => ({
-      requestId: id,
-      status: fact.status === "not_found" && undispatched.has(id) ? "not_sent" : fact.status,
-    }));
-    if (
-      evidence.kernelRequests.some(r =>
-        ["unknown", "outcome_unknown", "pending", "not_found"].includes(r.status),
-      )
-    )
-      evidence.unknown = true;
+    const uncertainty=await executionFacts(v,record,requests,facts);
+    Object.assign(evidence,{modelUnknown:uncertainty.modelUnknown,operationUnknown:uncertainty.operationUnknown,
+      pendingEffects:uncertainty.pendingEffects,kernelRequests:uncertainty.kernelRequests});
+    if(uncertainty.operationUnknown.length||uncertainty.pendingEffects.length)evidence.unknown=true;
     // The immutable public accept receipts bind each new formal tip to its parent.
     // A check from this task alone does not authorize somebody else's intervening commit.
     const parents = attempt.checkPolicy ? await ownedParents(v, home, state, record, facts) : new Map(
@@ -209,7 +199,7 @@ export async function evidence(home, state, step, record, requests, attempt) {
   return evidence;
 }
 
-export async function provePrevious(home, s, version, dependencyIds, deliveryReviews) {
+export async function provePrevious(home, s, version, dependencyIds, deliveryReviews, continuingStepId) {
   const needed = new Set(dependencyIds ?? s.steps.map((x) => x.id));
   for (let i = 0; i < s.steps.length && s.stepScheduling !== 'dependencies-v1'; i++)
     for (const step of s.steps)
@@ -228,6 +218,8 @@ export async function provePrevious(home, s, version, dependencyIds, deliveryRev
       backend: "agent-sync",
       readOnly: true,
     });
+    const continued=s.steps.find(step=>step.id===continuingStepId);
+    const successors=continued?await ownedParents(v,home,{...s,steps:[continued]}):new Map();
     for (const step of completed) {
       if (deliveryReviews && (step.works.some(work => work.independentReview) ||
           Object.values(s.staffAssignments ?? {}).some(a => a.reviewReceipts?.length))) {
@@ -242,7 +234,8 @@ export async function provePrevious(home, s, version, dependencyIds, deliveryRev
         });
         const actual = await v.read({ version, path: artifact.path });
         if (original.contentHash !== artifact.sha256 || !actual.contentHash ||
-            (s.stepScheduling === 'dependencies-v1' && dependencyIds && actual.contentHash !== artifact.sha256))
+            (s.stepScheduling === 'dependencies-v1' && dependencyIds && actual.contentHash !== artifact.sha256 &&
+              !(continued&&inScope(artifact.path,continued.scope)&&onOwnedLine(successors,version,previous.version))))
           throw Error(
             "Missing previous deliverable or invalid receipt: " +
               step.id +
@@ -397,4 +390,55 @@ export function savedTask(home, id) {
     if (e.code === "ENOENT") return null;
     throw e;
   }
+}
+
+/** The same durable uncertainty facts serve delivery and continuation admission. */
+export async function executionFacts(v, record, requests, knownFacts) {
+  const modelUnknown = requests.filter(r=>r.sent&&r.status==='outcome_unknown').map(r=>r.id);
+  const pendingEffects=[];
+  const add=(code,sourceId,message)=>pendingEffects.push({code,sourceId,message});
+  const changes=[];
+  for(const row of record.work?.changes??[]) {
+    try { changes.push(await v.inspect({changeId:row.changeId})); }
+    catch(error) { add('CHANGE_UNKNOWN',row.changeId,error.message); }
+  }
+  for(const change of changes) if((!change.readOnly&&!['accepted','abandoned'].includes(change.status))||
+    !['absent','stopped'].includes(change.executionState))
+    add('LOCAL_WRITER',change.changeId,'原草稿写入授权或执行停止尚未核实：'+change.status+'/'+change.executionState);
+  for(const helper of record.work?.helpers??[]) if(!helper.stoppedAt)
+    add('HELPER_STOP_UNKNOWN',helper.id??helper.memberId,'原助手尚未确认停止');
+  for(const tool of record.tools??[]) {
+    if((tool.nativeBackground||tool.kind==='employee_script_result'||tool.kind==='project_plugin_runtime'||
+      tool.kind==='project_mcp_runtime'&&tool.containerId)&&!tool.stoppedAt)
+      add('EXECUTION_STOP_UNKNOWN',tool.id??tool.requestId,'原执行尚未确认停止');
+    if(tool.kind==='project_mcp_call'&&['intent','pending','outcome_unknown'].includes(tool.status))
+      add('MCP_PENDING',tool.requestId??tool.id,'原 MCP 操作仍未结清');
+    for(const request of tool.kind==='project_mcp_runtime'?tool.requests??[]:[]) if(!request.originalRequestId&&['pending','outcome_unknown'].includes(request.status))
+      add('MCP_PENDING',request.requestId??request.id,'原 MCP 请求仍未结清');
+  }
+  const rows=[...(record.work?.requests??[]),...(record.work?.acceptance??[]),
+    ...(record.tools??[]).filter(t=>t.kernelInput),...(record.work?.helpers??[]).map(h=>h.import),
+    ...(record.tools??[]).map(t=>t.import)].filter(r=>r?.requestId);
+  const kernelRequests=[];
+  for(const requestId of new Set(rows.map(r=>r.requestId))) {
+    const row=rows.find(r=>r.requestId===requestId);
+    const fact=knownFacts?.find(r=>r.id===requestId)?.fact??await v.inspect({requestId});
+    // Public beginChange rejects malformed scope/input before its journal exists.
+    // A returned validation rejection is different from a lost/uncertain receipt.
+    const rejectedBegin=row.action==='beginChange'&&row.status==='rejected'&&!row.changeId&&
+      ['SCOPE','INPUT'].includes(row.error?.code);
+    const notSent=fact.status==='not_found'&&(row.dispatched===false||row.kernelDispatched===false||rejectedBegin);
+    const status=notSent?'not_sent':fact.status;
+    const unknown=['unknown','outcome_unknown','pending','not_found'].includes(status);
+    const changeId=row.changeId??row.kernelInput?.changeId??fact.changeId;
+    let change=changes.find(c=>c.changeId===changeId);
+    if(!change&&changeId)try {change=await v.inspect({changeId});} catch {}
+    const localOnly=['edit','exec'].includes(row.action)||!!row.kernelInput&&['edit','write','bash'].includes(row.name);
+    const isolated=unknown&&!!change&&['absent','stopped'].includes(change.executionState)&&
+      ((localOnly&&(change.status==='abandoned'||change.status==='accepted'&&change.acceptedVersion)&&record.work?.execution?.engine==='docker'&&record.work.execution.network==='none')||
+       (row.action==='beginChange'&&change.readOnly&&['interrupted','abandoned','accepted'].includes(change.status)));
+    kernelRequests.push({requestId,status,...(isolated?{isolatedClosed:true,changeId:change.changeId}:{})});
+    if(unknown&&!isolated)add('KERNEL_PENDING',requestId,'原内核操作的实际作用尚未结清：'+(row.action??row.name??'operation')+'/'+status);
+  }
+  return {modelUnknown,kernelRequests,operationUnknown:kernelRequests.filter(r=>['unknown','outcome_unknown','pending','not_found'].includes(r.status)).map(r=>r.requestId),pendingEffects,changes};
 }

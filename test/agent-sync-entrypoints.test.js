@@ -155,7 +155,7 @@ test("A04/A05/A09 Markdown+JSON checked CLI work reads failed-check log and repa
   assert.equal(r.code, 0, r.stderr);
   const saved = JSON.parse(r.stdout);
   assert.equal(saved.taskEnd, "completed");
-  const workSystem = f.calls[1].body.messages.find(m => m.role === "system").content;
+  const workSystem = f.calls[1].body.messages.filter(m => ["system","developer"].includes(m.role)).map(m=>m.content).join("\n");
   assert.match(workSystem, /ONE single-model work mode/);
   assert.match(workSystem, /agent-sync owns formal versions/);
   assert.doesNotMatch(workSystem, /scheduling preferences|For delegate|TASK_CONFLICT|collect returns/);

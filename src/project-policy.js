@@ -1,8 +1,12 @@
+import {checkedRouteAcceptance,restoredScopeGrant} from './project-completed-continuation.js';
+import {assertProjectRouteScope as ranges,assertProjectLiveStep as live,recordRouteObservation,runProjectRoute,createProjectRouteRequests,inspectRepairVerification} from './project-route.js';
+export {recordRouteObservation,runProjectRoute} from './project-route.js';
+import {continuedRequest,admitContinuationRestore,bindContinuationRoute} from "./project-continuation.js";
 import { isDeepStrictEqual } from "node:util";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { workModelIdentity } from "./workers.js";
 import { readTask, readRequest, readRequests, problem } from "./task.js";
-import { createVersioning, inScope, projectScopesOverlap, validProjectPath } from "./versioning.js";
+import { inScope, projectScopesOverlap, withChangeQueue } from "./versioning.js";
 import { validateProjectBudget } from "./project-request-accounting.js";
 export { projectUsage, reconcileProjectCalls, validateProjectBudget } from "./project-request-accounting.js";
 
@@ -11,21 +15,7 @@ const fail = (code, message) => {
 };
 const routeError = (message) => fail("PROJECT_ROUTE", message);
 const stamp = () => new Date().toISOString();
-function ranges(paths, allowed) {
-  if (!Array.isArray(paths) || paths.some((path) => !validProjectPath(path, true) || !inScope(path, allowed)))
-    fail("PROJECT_SCOPE", "Requested paths exceed the project's authorized scope");
-}
 
-function live(state, binding) {
-  if (state.id !== binding.projectId)
-    fail("PROJECT_STALE", "Project or goal revision changed; old authority is closed");
-  if (state.status === "paused" || state.paused === true)
-    fail("PROJECT_PAUSED", "User paused this project; no new actions are admitted");
-  const step = state.steps.find((s) => s.id === binding.stepId);
-  if (!step || step.revision !== binding.revision)
-    fail("PROJECT_STALE", "Project step or its goal revision changed");
-  return step;
-}
 function checkBinding(state, binding) {
   const step = live(state, binding);
   if (
@@ -36,185 +26,12 @@ function checkBinding(state, binding) {
   return step;
 }
 
-export function recordRouteObservation(
-  state,
-  stepId,
-  { candidate, kind, evidence, changeId, privateVersion, taskId, actor },
-) {
-  const step = state.steps.find((s) => s.id === stepId);
-  if (!step || !candidate || !evidence)
-    routeError("A route observation needs a frozen candidate and host evidence");
-  let route = step.route;
-  if (route && route.revision === step.revision) {
-    if (kind === "checkpoint" && route.kind === "checkpoint") return route;
-    if (kind !== "checkpoint") {
-      if (route.candidate === candidate && route.evidence.requestId === evidence.requestId) return route;
-      if (["repair", "resolved"].includes(route.status)) {
-        route.status = "blocked";
-        route.recheck = { candidate, evidence, at: stamp() };
-        step.status = "review";
-      }
-      return route;
-    }
-    if (route.status !== "resolved") return route;
-  }
-  route = {
-    projectId: state.id,
-    revision: step.revision,
-    stepId,
-    candidate,
-    taskId,
-    changeId,
-    privateVersion,
-    actor,
-    kind,
-    evidence,
-    status: kind === "environment" ? "blocked" : "paused",
-    at: stamp(),
-  };
-  if (step.route) (step.routeHistory ??= []).push(step.route);
-  step.route = route;
-  step.status = "review";
-  return route;
-}
 
-function activeRoute(state, input) {
-  const step = live(state, { projectId: state.id, stepId: input.stepId, revision: input.revision });
-  const route = step.route;
-  if (
-    !route ||
-    route.projectId !== state.id ||
-    route.revision !== input.revision ||
-    route.candidate !== input.candidate
-  )
-    routeError("Decision does not match current project, goal revision and immutable candidate");
-  return { step, route };
-}
-
-function judge(state, input) {
-  const { step, route } = activeRoute(state, input);
-  if (route.status !== "paused") routeError("This route has no unused read-only judgment");
-  const { path, contains, ifPresent, ifAbsent, reason, repairScope } = input;
-  const choices =
-    route.kind === "checkpoint"
-      ? ["continue", "blocked", "repair", "shorten"]
-      : ["repair", "shorten", "blocked"];
-  const needsEdit = [ifPresent, ifAbsent].some((choice) => ["repair", "shorten"].includes(choice));
-  if (
-    typeof reason !== "string" ||
-    !reason.trim() ||
-    !validProjectPath(path) ||
-    path === "." ||
-    typeof contains !== "string" ||
-    !contains.trim() ||
-    ifPresent === ifAbsent ||
-    ![ifPresent, ifAbsent].every((choice) => choices.includes(choice)) ||
-    (needsEdit && !repairScope?.length)
-  )
-    routeError(
-      "Name a file, a concrete discriminator, two different decisions, why it distinguishes them and a repair scope",
-    );
-  ranges(repairScope ?? [], step.scope);
-  route.judgment = {
-    id: randomUUID(),
-    path,
-    contains,
-    ifPresent,
-    ifAbsent,
-    reason,
-    repairScope: [...(repairScope ?? [])],
-    at: stamp(),
-  };
-  route.status = "judged";
-  return route;
-}
-
-// One read-only discriminating experiment over immutable candidate bytes. Neither models nor
-// control clients supply the observed result. Persist intent first; uncertain probes never replay.
-export async function runProjectRoute({ host, home, action, input, versioning }) {
-  host.assertOwned();
-  if (action === "judge") return host.update((state) => judge(state, input));
-  if (action !== "experiment") routeError("Choose judge or experiment");
-  const { repo, route } = host.update((state) => {
-    const { route } = activeRoute(state, input);
-    if (route.status !== "judged") routeError("This candidate has no unused experiment");
-    route.status = "probing";
-    route.probe = { id: randomUUID(), at: stamp() };
-    return { repo: state.repo, route: structuredClone(route) };
-  });
-  let v;
-  try {
-    v = versioning ?? (await createVersioning({ home, project: repo, readOnly: true }));
-    host.assertOwned();
-    activeRoute(host.read(), input);
-    const file = await v.read({ version: route.candidate, path: route.judgment.path });
-    if (file.version !== route.candidate) routeError("Probe returned a different version");
-    const present =
-      file.contentBase64 !== null &&
-      Buffer.from(file.contentBase64, "base64").includes(Buffer.from(route.judgment.contains));
-    return host.update((state) => {
-      const current = activeRoute(state, input);
-      if (current.route.status !== "probing" || current.route.probe.id !== route.probe.id)
-        routeError("Probe authority changed");
-      const decision = present ? route.judgment.ifPresent : route.judgment.ifAbsent;
-      Object.assign(current.route.probe, {
-        path: route.judgment.path,
-        contentHash: file.contentHash,
-        present,
-        decision,
-        completedAt: stamp(),
-      });
-      if (decision === "continue") {
-        const attempt = current.step.attempts.at(-1);
-        if (attempt?.status !== "completed" || attempt.version !== current.route.candidate)
-          routeError("Cannot release checkpoint without the successful verified artifact on this version");
-        current.route.status = "resolved";
-        current.step.status = "completed";
-      } else {
-        current.route.status = decision === "blocked" ? "blocked" : "repair";
-        current.step.status = decision === "blocked" ? "review" : "pending";
-        const assignments = Object.values(state.staffAssignments ?? {});
-        const employee = assignments.find(
-          (a) => a.taskId === current.route.taskId && a.role === current.route.actor,
-        );
-        if (decision !== "blocked" && employee) {
-          const supervisor = assignments.find(
-            (a) => a.taskId === employee.taskId && a.staffId === employee.actor,
-          );
-          current.route.next = supervisor
-            ? {
-                tool: "feedback",
-                memberId: supervisor.dispatchId,
-                coordinateMemberId: employee.dispatchId,
-                reason:
-                  "Resume the original supervisor to review and correct their employee’s diagnosed candidate",
-              }
-            : {
-                tool: "feedback",
-                memberId: employee.dispatchId,
-                reason: "Give the original employee the observed counterexample",
-              };
-        }
-      }
-      return current.route;
-    });
-  } catch (error) {
-    host.update((state) => {
-      const step = state.steps.find((s) => s.id === input.stepId);
-      if (step?.route?.probe?.id === route.probe.id) {
-        step.route.status = "blocked";
-        step.route.probe.error = error.message;
-      }
-    });
-    throw error;
-  } finally {
-    if (!versioning) await v?.close();
-  }
-}
 
 export function createProjectPolicy({ host, binding, staff, home }) {
   const pendingEffects = new Map();
   const issuedSends = new WeakMap();
+  const {boundJudgment,projectRequestContext,admitToolCall,authorizeProjection,routeNeedsDecision}=createProjectRouteRequests({host,binding,issuedSends,checkBinding});
   const processStages = new WeakMap();
   const pluginCapabilities = new WeakMap();
   const nativeCapabilities=new WeakMap(),nativeStages=new WeakMap(),nativeByLaunch=new Map();
@@ -456,14 +273,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
         readScope: detail.readScope,
       });
     const route = step.route?.revision === step.revision ? step.route : null;
-    const judgment =
-      route?.status === "paused" &&
-      route.kind !== "checkpoint" &&
-      !step.review &&
-      !route.judgmentCall &&
-      route.taskId === binding.taskId &&
-      detail.role === "main" && detail.phase === "work" &&
-      ["prepareSend", "send"].includes(action);
+    const judgment = ["prepareSend", "send"].includes(action) && boundJudgment(step,detail);
     if (route && !["repair", "resolved"].includes(route.status) && !judgment)
       routeError(
         "Route is " +
@@ -475,7 +285,8 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     if (
       action === "scope" &&
       detail.previousScope &&
-      detail.scope?.some((p) => !inScope(p, detail.previousScope))
+      detail.scope?.some((p) => !inScope(p, detail.previousScope)) &&
+      !(detail.actor==='main'&&restoredScopeGrant(home,state,binding.taskId,detail.changeId))
     ) {
       const extra = detail.scope.filter((p) => !inScope(p, detail.previousScope));
       if (
@@ -509,15 +320,11 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     }
     ranges(detail.scope ?? [], step.scope);
     if(binding.rootTaskId)ranges(detail.readScope??[],binding.readScope);
+    if(action==='scope'&&route?.status==='repair'&&route.restoredFrom&&!route.edit&&!route.expansion&&detail.previousScope&&
+      detail.actor==='main'&&detail.changeId===route.changeId&&restoredScopeGrant(home,state,binding.taskId,detail.changeId))
+      host.update(s=>{checkBinding(s,binding).route.expansion={requestId:detail.requestId,changeId:detail.changeId};});
     if (detail.coordination && (action !== "feedback" || route?.status !== "repair"))
       routeError("Supervisor resumption needs an active repair of its original direct report");
-    if (
-      route?.status === "resolved" &&
-      route.edit &&
-      (["delegate", "feedback", "shell", "write"].includes(action) ||
-        (action === "accept" && detail.changeId && detail.changeId !== route.edit.changeId))
-    )
-      routeError("The diagnosed repair already passed. Finish the original checks.");
     const commitRepair = route?.status === "repair" && guardRepair(state, route, action, detail);
     if (action === "plugin") checkPlugin(detail);
     if (action === "helper")
@@ -632,7 +439,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
         route.taskId === binding.taskId &&
         route.changeId === detail.changeId &&
         basis === detail.privateVersion &&
-        (route.kind === "scope_expansion" || detail.candidate === route.candidate);
+        (route.kind === "scope_expansion" || route.restoredFrom || detail.candidate === route.candidate);
       const sameBaseline =
         binding.startVersion === route.candidate && detail.privateVersion === route.candidate;
       if (!sameDraft && !sameBaseline) routeError("Repair candidate or private basis is stale");
@@ -884,6 +691,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     const currentWork = detail.workId && (step.works ?? []).find((w) => w.id === detail.workId);
     for (const prior of state.callIntents ?? []) {
       if (prior.kind === "external" || prior.notSent || prior.id === detail.requestId) continue;
+      if (continuedRequest(state,binding.taskId,prior.id,host.completedContinuations)) continue;
       const oldStep = state.steps.find((s) => s.attempts.some((a) => a.taskId === prior.taskId));
       const oldAssignment = Object.values(state.staffAssignments ?? {}).find(
         (a) => a.taskId === prior.taskId && a.role === prior.role);
@@ -922,8 +730,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
       detail.cause !== "observe:" + process.observation.id || !task.rootOwner?.rootTask.record.processCheck?.observations.includes(process.observation)))
       fail("PROCESS_UNBOUND", "Original observation is no longer authorized for dispatch");
     const route = step.route?.revision === step.revision ? step.route : null;
-    const judgment = route?.status === "paused" && route.kind !== "checkpoint" && !step.review &&
-      !route.judgmentCall && route.taskId === binding.taskId && detail.role === "main" && detail.phase === "work";
+    const judgment = authorizeProjection(detail,step);
     if (route && !["resolved","repair"].includes(route.status) && !judgment)
       routeError("Route is " + route.status + "; inspect its original evidence");
     if (route?.status === "repair" && detail.role !== "main" && detail.role !== route.actor &&
@@ -1008,6 +815,21 @@ export function createProjectPolicy({ host, binding, staff, home }) {
         await runProjectRoute({ host, home, action: "judge", input, versioning });
         await runProjectRoute({ host, home, action: "experiment", input, versioning });
       }
+    } else if(kind==='precheck'&&result.status==='passed'&&step.route?.status==='repair'&&
+      ['scope_expansion','failed'].includes(step.route.kind)) {
+      if(!versioning||!changeId)routeError('Public candidate verification is required');
+      await withChangeQueue(versioning,changeId,async()=>{
+        const verification=await inspectRepairVerification({versioning,route:step.route,step,
+          record:readTask(home,binding.taskId),result});
+        if(!verification.verified)routeError(verification.reason);
+        host.update(current=>{
+          const active=checkBinding(current,binding).route;
+          if(!isDeepStrictEqual(active,step.route))routeError('Repair changed during private verification');
+          active.status='resolved';active.recheck={kind:'precheck',candidate:verification.proof.candidateVersion,
+            privateVersion:verification.proof.privateVersion,requestId:verification.proof.requestId,
+            policy:verification.proof.policy,tree:verification.proof.tree,checks:verification.proof.checks};
+        });
+      });
     } else if (
       ["accepted", "passed"].includes(result.status) &&
       checks.length &&
@@ -1020,16 +842,12 @@ export function createProjectPolicy({ host, binding, staff, home }) {
       )
     ) {
       const route = step.route;
-      if (route?.status === "repair" && route.edit?.changeId === changeId && result.status === "accepted")
-        host.update((s) => {
-          const current = checkBinding(s, binding).route;
-          current.status = "resolved";
-          current.recheck = {
-            candidate,
-            requestId: result.requestId,
-            checks,
-            acceptedVersion: result.acceptedVersion,
-          };
+      const closed=result.status==='accepted'&&(route?.status==='repair'&&route.edit?.changeId===changeId||
+        route?.status==='resolved'&&route.recheck?.kind==='precheck')&&await checkedRouteAcceptance(versioning,step,result);
+      if (closed) host.update((s) => {
+          const current = checkBinding(s, binding);
+          (current.routeHistory??=[]).push(structuredClone(current.route));
+          Object.assign(current.route,{status:"resolved",recheck:closed});
         });
     }
     return host.read().steps.find((s) => s.id === step.id)?.route;
@@ -1093,7 +911,10 @@ export function createProjectPolicy({ host, binding, staff, home }) {
       });
     });
   }
-  return { staff, assertProcessBudget, bindProcessObservation, issueNativeHelper,bindNativeHelperSession,admitNativeHelper,closeNativeHelper,admitNativeCleanup,checkOriginalPluginCapability,
+  return {
+    admitContinuationRestore(input,versioning){host.assertOwned();checkBinding(host.read(),binding);return admitContinuationRestore({home,host,binding,input,versioning});},
+    bindContinuationRoute(change,versioning){host.assertOwned();checkBinding(host.read(),binding);return bindContinuationRoute({home,host,binding,change,versioning});},
+    staff, assertProcessBudget, bindProcessObservation, issueNativeHelper,bindNativeHelperSession,admitNativeHelper,closeNativeHelper,admitNativeCleanup,checkOriginalPluginCapability,
     budgetStatus() {
       host.assertOwned();
       const state = host.read();
@@ -1104,5 +925,5 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     },
     unresolvedMcpClaims:actor=>(host.read().callIntents??[]).filter(c=>c.kind==='external'&&c.taskId===binding.taskId&&(!actor||c.role===actor)&&!c.notSent&&c.status!=='completed').map(c=>structuredClone(c)),
     registerMcpRecovery:(actor,recover)=>mcpRecoveries.set(actor,recover),
-    recoverMcp:(id,action)=>{const claim=host.read().callIntents?.find(c=>c.kind==="external"&&c.id===id&&c.taskId===binding.taskId);const recover=claim&&mcpRecoveries.get(claim.role);if(!recover)fail("PROJECT_MCP_RECOVERY","Original live handle is unavailable");return recover(id,action);}, admit, issueMcpCapability, issueMcpRecoveryCapability, admitMcp, claimMcpEffect, observeMcpRequest, issuePluginCapability, locateSend, originalResult, prepareEffect, observeCheck, observeRefresh, autoReviewScope, judgeLive, environmentFailure };
+    recoverMcp:(id,action)=>{const claim=host.read().callIntents?.find(c=>c.kind==="external"&&c.id===id&&c.taskId===binding.taskId);const recover=claim&&mcpRecoveries.get(claim.role);if(!recover)fail("PROJECT_MCP_RECOVERY","Original live handle is unavailable");return recover(id,action);}, admit, issueMcpCapability, issueMcpRecoveryCapability, admitMcp, claimMcpEffect, observeMcpRequest, issuePluginCapability, locateSend, projectRequestContext, admitToolCall, routeNeedsDecision, originalResult, prepareEffect, observeCheck, observeRefresh, autoReviewScope, judgeLive, environmentFailure };
 }

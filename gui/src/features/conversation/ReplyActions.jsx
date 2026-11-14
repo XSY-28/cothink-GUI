@@ -1,4 +1,5 @@
-import React from "react";
+import React, {useState} from "react";
+import {Modal} from "../../Modal.jsx";
 import {Icon} from "../../Icon.js";
 import {statusLabel} from "../../view.js";
 import styles from "./Conversation.module.css";
@@ -60,4 +61,43 @@ export function ReplyActions({turn, forkDisabled, showChanges, onDetails, onCopy
       description="保留截至此条回复的上下文，在新对话中继续" onClick={()=>onFork(turn.taskId)} />
     {showChanges && <button type="button" onClick={event=>onDetails(turn.taskId,"changes",event)}>变更与检查</button>}
   </footer>;
+}
+
+
+export function FileContinuation({turn, disabled, onInspect, onContinue}) {
+  const [open,setOpen]=useState(false),[facts,setFacts]=useState(null);
+  const [busy,setBusy]=useState(false),[error,setError]=useState('');
+  const inspect=async draft=>{
+    setOpen(true);setBusy(true);setError('');setFacts(null);
+    try{setFacts(await onInspect(turn,draft));}catch(e){setError(e.message);}finally{setBusy(false);}
+  };
+  const confirm=async()=>{
+    if(busy||!facts?.eligible)return;
+    setBusy(true);setError('');
+    try{const result=await onContinue(turn,facts);if(result)setOpen(false);}
+    catch(e){setError(e.message);}finally{setBusy(false);}
+  };
+  return <>
+    <button type="button" disabled={disabled||busy} onClick={()=>inspect()}>从保存成果继续</button>
+    {open&&<Modal title="从保存成果继续" onClose={()=>{if(!busy)setOpen(false);}}>
+      <div className="dialog-body">
+        <p>这将开始一次新的执行尝试。旧请求和未知费用保留，不会重发原请求；沿用原目标、范围和检查。</p>
+        {busy&&!facts&&<p role="status">正在核对已保存版本和原执行状态…</p>}
+        {error&&<p className="error-text" role="alert">{error}</p>}
+        {facts&&<>
+          {facts.draft?<p>{facts.inputOnly?"已保存输入版本":"未验收草稿"}：{facts.draft.changeId} · {facts.draft.version}</p>:<p>{facts.eligible?"沿用已核验的正式成果，只补剩余沟通。":"尚未核实可继续的成果，请查看下方原因。"}</p>}
+          {!!facts.drafts?.length&&facts.drafts.length>1&&<label>选择来源
+            <select disabled={busy} value={facts.draft?.changeId??''} onChange={e=>inspect(facts.drafts.find(d=>d.changeId===e.target.value))}>
+              {facts.drafts.map(d=><option key={d.changeId} value={d.changeId}>{d.changeId} · {d.version.slice(0,12)}</option>)}
+            </select>
+          </label>}
+          {!!facts.remainingRepair?.length&&<p>沿用已完成的判断，仍剩 1 次修复写入。允许路径：{facts.remainingRepair.join("、")}；原检查仍须全部通过。</p>}
+          <p>剩余模型请求：{facts.remainingBudget?.maxCalls==null?'未设上限':facts.remainingBudget.maxCalls}。此次授权只消费一次。</p>
+          {!!facts.models?.length&&<p>沿用阵容：{facts.models.join('；')}</p>}
+          {!!facts.blockers?.length&&<ul aria-label="无法继续的原因">{facts.blockers.map((b,i)=><li key={i}>{b.message}（{b.sourceId??b.code}）</li>)}</ul>}
+        </>}
+        <button type="button" disabled={busy||!facts?.eligible||disabled} onClick={confirm}>确认并继续一次</button>
+      </div>
+    </Modal>}
+  </>;
 }

@@ -1,14 +1,50 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync, unlinkSync, chmodSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
-import { managed } from './helpers/agent-sync-fixture.js';
+import { writeFileSync, readFileSync, unlinkSync, chmodSync, symlinkSync, mkdirSync } from 'node:fs';
+import { join,resolve } from 'node:path';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+import {fixture} from './helpers/pi-fixture.js';
+const productRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL('..',import.meta.url)));
+const load=path=>import(pathToFileURL(join(productRoot,path)));
+import { managed, execution } from './helpers/agent-sync-fixture.js';
 import { snapshotHelper, freezeHelperResult, treatHelperResult, helperBlockers } from '../src/plugin-work.js';
 async function helper(f,id='helper') {
   const cwd=join(f.home,id),snapshot=await snapshotHelper({versioning:f.v,change:f.binding.current,directory:cwd});
   const h={helperId:id,parentActorId:'main',changeId:f.binding.current.changeId,cwd,snapshot,...snapshot,status:'completed',stoppedAt:new Date().toISOString()};
   f.task.record.work??={helpers:[]};f.task.record.work.helpers.push(h);return h;
 }
+
+test('script inspection preserves complete edits without repeating unchanged source snapshots',async t=>{
+ const {freezeAnswerSkills}=await import('../src/context.js'),{freezeTaskSkillResources}=await import('../src/skill-resources.js');
+ const {createPluginWork}=await import('../src/plugin-work.js');
+ const f=await managed(t,{execution,scope:['.']}),baseline='UNCHANGED_SOURCE\n'.repeat(2000);
+ await f.call('read','read-baseline',{path:'b.txt'});await f.call('write','large-baseline',{path:'b.txt',content:baseline});
+ const dir=join(f.home,'result-view-skill');mkdirSync(join(dir,'scripts'),{recursive:true});
+ writeFileSync(join(dir,'SKILL.md'),'---\nname: result-view\ndescription: Check or produce a file\n---\nRun scripts/run.mjs.\n');
+ writeFileSync(join(dir,'scripts/run.mjs'),"import fs from 'node:fs';if(process.argv[2]==='write')fs.writeFileSync('new.txt','COMPLETE_CHANGED_BYTES');console.log('CHECK_DONE');");
+ f.task.record.project={id:'recorded-project'};f.task.frozenSkills=freezeAnswerSkills({cwd:f.project,home:f.home,paths:[dir],project:true});freezeTaskSkillResources({task:f.task});
+ const plugin=await createPluginWork({task:f.task,versioning:f.v,execution});t.after(()=>plugin.close());
+ const defs=plugin.resourceTools({actor:'main',binding:f.binding,assertAllowed(){}});
+ const call=async(name,id,args)=>JSON.parse((await defs.find(d=>d.name===name).execute(id,args,f.task.signal)).content[0].text);
+ for(const change of [false,true]){
+  const id=change?'write':'check',started=await call('resource_exec',id,{command:'node /resources/result-view/scripts/run.mjs'+(change?' write':'')});
+  assert.equal(started.status,'completed');assert.match(started.stdout,/CHECK_DONE/);
+  const before=JSON.stringify(f.task.record.tools.find(r=>r.resultId===started.resultId));
+  const inspected=await call('resource_result','inspect-'+id,{resultId:started.resultId,decision:'inspect'});
+  assert.equal(inspected.snapshot.files['b.txt'].contentBase64,undefined,'baseline bytes are not model inspection material');
+  assert.equal(inspected.result.files['b.txt'].contentBase64,undefined,'unchanged result bytes must not be duplicated');
+  assert.equal(inspected.executions[0].exitCode,0);assert.match(inspected.executions[0].stdout,/CHECK_DONE/);
+  assert.equal(inspected.result.edits.length,change?1:0);
+  if(change)assert.equal(Buffer.from(inspected.result.edits[0].contentBase64,'base64').toString(),'COMPLETE_CHANGED_BYTES');
+  assert.equal(JSON.stringify(f.task.record.tools.find(r=>r.resultId===started.resultId)),before,'inspection never rewrites the immutable source record');
+  const replay=await call('resource_exec',id,{command:'node /resources/result-view/scripts/run.mjs'+(change?' write':'')});
+  assert.equal(replay.replayed,true);assert.equal(replay.result.files['b.txt'].contentBase64,undefined);
+  await call('resource_result','adopt-'+id,{resultId:started.resultId,decision:'adopt',reason:'Reviewed exact file changes and successful command output'});
+ }
+ assert.equal(Buffer.from((await f.v.read({changeId:f.binding.current.changeId,path:'new.txt'})).contentBase64,'base64').toString(),'COMPLETE_CHANGED_BYTES');
+ assert.equal(Buffer.from((await f.v.read({changeId:f.binding.current.changeId,path:'b.txt'})).contentBase64,'base64').toString(),baseline);
+ plugin.assertHandled();
+});
 test('independent public snapshots preserve binary, add/delete/mode and require creator review before import',async t=>{
  const f=await managed(t,{scope:['.']});
  const a=await helper(f,'a'),b=await helper(f,'b');
@@ -57,4 +93,38 @@ test('uncertain import is recovered by original request ID only; no new edit aft
    assertAllowed:()=>{if(owner.signal.aborted)throw Object.assign(Error('Owner cancelled'),{code:'CANCELLED'});}}),{code:'CANCELLED'});
  assert.equal(cancelled.import,undefined);assert.equal(calls,1);f.v.inspect=inspect;
  assert.equal((await f.v.read({changeId:cancelled.changeId,path:'cancelled-owner.txt'})).contentBase64,null);
+});
+
+test("PROJECT normal entry reads frozen method only on demand, runs script and accepts checked output",async(t)=>{
+  const {repository}=await import("./helpers/git-fixture.js"),{execution}=await import("./helpers/agent-sync-fixture.js"),{saveConfig}=await load("src/config.js"),{invoke}=await import("./helpers/cli-fixture.js");
+  const {readTask}=await load("src/task.js");
+  const repo=repository(t);let entry,resultId,source,providerError;
+  const tool=(name,args={})=>({toolCalls:[{name,args}]});
+  const f=await fixture(t,(call,n)=>{
+    try {
+    const text=call.body.messages.map(m=>typeof m.content==="string"?m.content:(m.content??[]).map(p=>p.text??JSON.stringify(p)).join("\n")).join("\n");
+    if(n===1){assert.doesNotMatch(text,/FROZEN_METHOD_SENTINEL|ORIGINAL_REFERENCE_V1/);const match=text.match(/"path":"([^"]*normal-entry[^"]*SKILL.md)"/);assert.ok(match,text.slice(-2000));entry=match[1];writeFileSync(join(source,"references/guide.md"),"SOURCE_CHANGED_AFTER_FREEZE");return tool("read",{path:entry});}
+    if(n===2){assert.match(text,/FROZEN_METHOD_SENTINEL/);return tool("read",{path:join(entry,"../references/guide.md")});}
+    if(n===3){assert.match(text,/ORIGINAL_REFERENCE_V1/);assert.doesNotMatch(text,/SOURCE_CHANGED_AFTER_FREEZE/);return tool("next_change",{reason:"Produce the approved artifact",scope:["new.txt"],readScope:["."]});}
+    if(n===4)return tool("resource_exec",{command:"node /resources/normal-entry/scripts/build.mjs"});
+    if(n===5){const last=call.body.messages.at(-1);const match=(typeof last.content==="string"?last.content:last.content.map(p=>p.text).join("\n")).match(/"resultId":"([a-f0-9-]+)"/);assert.ok(match,JSON.stringify(last));resultId=match[1];return tool("resource_result",{resultId,decision:"inspect"});}
+    if(n===6){
+      const content=call.body.messages.at(-1).content,view=JSON.parse(typeof content==='string'?content:content.map(p=>p.text).join('\n'));
+      for(const files of [view.snapshot.files,view.result.files])assert.ok(Object.values(files).every(file=>!Object.hasOwn(file,'contentBase64')),'actual model wire must omit duplicate source snapshots');
+      assert.equal(Buffer.from(view.result.edits[0].contentBase64,'base64').toString(),'CHECKED_ARTIFACT','actual model wire retains the complete proposed edit');
+      return tool("resource_result",{resultId,decision:"adopt",reason:"Inspected the complete generated artifact and script output"});
+    }
+    if(n===7)return tool("prepare_change");
+    if(n===8)return tool("accept_change");return {text:"Delivered checked output"};
+    } catch(error) {providerError=error;return {text:"Fixture assertion failed"};}
+  });
+  source=join(f.home,"normal-entry");mkdirSync(join(source,"scripts"),{recursive:true});mkdirSync(join(source,"references"),{recursive:true});
+  writeFileSync(join(source,"SKILL.md"),"---\nname: normal-entry\ndescription: Build a text artifact\n---\nFROZEN_METHOD_SENTINEL. Read [guide](references/guide.md), then run scripts/build.mjs.\n");
+  writeFileSync(join(source,"references/guide.md"),"ORIGINAL_REFERENCE_V1");
+  // .mjs uses real ESM rather than a provider stub executing the script.
+  writeFileSync(join(source,"scripts/build.mjs"),"import {writeFileSync} from 'node:fs';writeFileSync('new.txt','CHECKED_ARTIFACT');");
+  saveConfig(f.home,{formatVersion:2,...f.models,piResources:{skills:[source]},work:{execution}});
+  const plan=join(f.home,"plan.json");writeFileSync(plan,JSON.stringify({goal:"Produce new.txt with the configured method",scope:["new.txt"],budget:{maxCalls:12},steps:[{id:"build",goal:"Build checked text",deliverables:["new.txt"],checks:[{command:"node",args:["-e","if(require('fs').readFileSync('new.txt','utf8')!=='CHECKED_ARTIFACT')process.exit(1)"]}]}]}));
+  const run=await invoke(f,["project","start","--file",plan,"--json"],"",repo.project);if(providerError)throw providerError;assert.equal(run.code,0,run.stdout+run.stderr);const state=JSON.parse(run.stdout);assert.equal(state.status,"completed",JSON.stringify(state));
+  const task=readTask(f.home,state.steps[0].attempts[0].taskId);assert.equal(task.work.helpers?.length??0,0);assert.ok(task.tools.some(x=>x.kind==="employee_script_result"&&x.treatment?.decision==="adopted"));assert.ok(task.tools.some(x=>x.resourceName==="normal-entry"&&x.resourcePath.endsWith("references/guide.md")));
 });

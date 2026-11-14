@@ -76,6 +76,7 @@ export function Composer({session,boot,draft,onDraft,onSubmit,busy,submitting,pe
   const chips=[
     readOnly&&["read-only","只分析",()=>onTurnOptions?.({readOnly:false}),onOpenTurnLimits],
     delegate!==true&&["dispatch","禁止派工",needsReviewUpdate?null:()=>onTurnOptions?.({delegate:true}),onOpenTurnLimits],
+    options.allowFileContinuation===true&&["continue-once","断连后继续一次",()=>onTurnOptions?.({allowFileContinuation:false}),onOpenTurnLimits],
     maxCalls!==""&&["max-calls",`最多 ${maxCalls} 次请求`,()=>onTurnOptions?.({maxCalls:""}),onOpenTurnLimits],
     options.readAllowed&&["read-scope",readAllowed?`读取已保存版本：${editorReadPaths(readPaths).join("、")||"未选范围"}`:"项目读取范围需重新确认",()=>onTurnOptions?.({readAllowed:false,readPaths:[]})],
     selectedSkill&&["skill",`技能：${typeof selectedSkill==="string"?selectedSkill:selectedSkill.name}`,onRemoveSkill],

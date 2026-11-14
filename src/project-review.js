@@ -146,7 +146,7 @@ export async function readReviewCandidate(host, reference, task, v, readScope, a
     !["prepared", "accepted"].includes(change.status) ||
     (change.status === "prepared" && change.basisStatus !== "current")
   )
-    reject("The named version is not this change's fixed, current candidate.");
+    reject("The named version is not this change's fixed, current candidate. Run prepare_change after the last edit or command and use its exact reviewOf; do not reuse a historical version.");
   const diff = await v.inspect({ fromVersion: change.baseVersion, toVersion: candidate });
   if (!diff.files.length || diff.files.some((p) => !inScope(p, readScope)))
     reject("The reviewer's read scope must cover the entire candidate diff.");

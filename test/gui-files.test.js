@@ -171,3 +171,53 @@ test('static preview enforces aggregate bytes and resource count on the server b
   const r=await f.publish(contents);
   for(const path of ['bytes.html','count.html'])await assert.rejects(guiFile(f.home,r,ref(r,path),{purpose:'preview'}),{code:'FILE_TOO_LARGE'});
 });
+
+test('draft API preserves its source identity and exports authorized dependencies without Docker or a model',async t=>{
+  const f=await prepared(t),{createTask}=await load('src/task.js'),{exportTaskDraft}=await load('src/gui-work.js');
+  const c=await f.v.beginChange({requestId:randomUUID(),actor:'main',intent:'unaccepted files',scope:['web'],readScope:['a.txt']});
+  const edit=await f.v.edit(c.changeId,{requestId:randomUUID(),expectedVersion:c.privateVersion,edits:[
+    {path:'web/index.html',oldHash:null,contentBase64:Buffer.from('<link rel="stylesheet" href="style.css"><p>saved draft</p>').toString('base64')},
+    {path:'web/style.css',oldHash:null,contentBase64:Buffer.from('p {color: red}').toString('base64')},
+  ]});
+  const saved={...c,privateVersion:edit.privateVersion};
+  const task=createTask({home:f.home,input:'unaccepted files',models:{main:{},secondary:[]},project:{scope:['web'],readScope:['a.txt'],deliverables:['web/index.html','missing.txt']}});
+  task.record.work={root:f.project,backend:'agent-sync',toolHome:f.v.toolHome,startVersion:c.baseVersion,version:c.baseVersion,changes:[saved]};task.finish('failed');
+  const list=await guiFiles(f.home,task.record),item=list.items.find(x=>x.name==='web/index.html');
+  assert.ok(item.ref.draft);
+  const host=await startGuiServer({home:f.home,open:false,controller:{file:(ref,options)=>guiFile(f.home,task.record,ref,options),fileDiff:ref=>guiFileDiff(f.home,task.record,ref),close:async()=>{}}});t.after(()=>host.close());
+  const {createApi}=await load('gui/src/api.js'),api=createApi(host.token,(path,options)=>fetch(host.origin+path,options));
+  assert.match(new TextDecoder().decode((await api.file(item.ref,{purpose:'preview'})).bytes),/color: red/);
+  assert.equal((await api.read('file-diff',item.ref)).path,'web/index.html');
+  await assert.rejects(api.file({...item.ref,draft:{...item.ref.draft,baseVersion:edit.privateVersion}}),{code:'FILE_VERSION_MISMATCH'});
+  const draft={taskId:task.record.id,changeId:c.changeId,baseVersion:c.baseVersion,version:edit.privateVersion};
+  const result=await exportTaskDraft({home:f.home,record:task.record,draft});
+  assert.deepEqual(result.paths.sort(),['a.txt','web/index.html','web/style.css']);
+  assert.ok(result.warnings.some(message=>message.includes('missing.txt')));
+  assert.equal(readFileSync(join(result.directory,'web/style.css'),'utf8'),'p {color: red}');
+  // A fresh process has no model configuration and a Docker command that fails if invoked.
+  const {mkdirSync,existsSync}=await import('node:fs');
+  const commands=join(f.root,'commands'),marker=join(f.root,'docker-called');mkdirSync(commands);
+  writeFileSync(join(commands,'docker'),`#!/bin/sh\nprintf called > '${marker}'\nexit 99\n`,{mode:0o700});
+  const child=spawnSync(process.execPath,['--input-type=module','-e',
+    `const [home,record,ref,draft]=JSON.parse(process.argv[1]);const {guiFile}=await import(process.argv[2]);const {exportTaskDraft}=await import(process.argv[3]);const file=await guiFile(home,record,ref);const result=await exportTaskDraft({home,record,draft});console.log(JSON.stringify({text:file.bytes.toString(),paths:result.paths}));`,
+    JSON.stringify([f.home,task.record,item.ref,draft]),pathToFileURL(join(packageRoot,'src/gui-files.js')).href,pathToFileURL(join(packageRoot,'src/gui-work.js')).href],
+    {encoding:'utf8',env:{...process.env,PATH:commands+':'+process.env.PATH},timeout:15000});
+  assert.equal(child.status,0,child.stderr);assert.match(JSON.parse(child.stdout).text,/saved draft/);assert.equal(existsSync(marker),false);
+  assert.equal((await f.v.inspect()).version,c.baseVersion);
+});
+
+test('file panel labels a draft separately from change status and retains files after export failure',async()=>{
+  const {default:React,act}=await import('react'),{modalEnvironment}=await import('./gui-modal.fixture.js');
+  await modalEnvironment(async({container,root,FilePanel})=>{
+    const ref={taskId:'saved-task',version:'fixed-draft',path:'index.html',draft:{changeId:'saved-change',baseVersion:'base'}};
+    const item={ref,name:'index.html',status:'added',readable:true,previewKind:'text',source:'main',unverified:true};
+    const commands={loadFiles:async()=>({taskId:'saved-task',items:[item],warnings:[]}),readFile:async()=>({bytes:new TextEncoder().encode('saved bytes'),version:'fixed-draft'}),exportDraft:async()=>{throw Error('disk full');}};
+    await act(async()=>root.render(React.createElement(FilePanel,{task:{id:'saved-task',status:'failed',work:{version:'base'}},selection:{fileRef:ref,tab:'source'},commands,onSelection(){},onRecords(){}})));
+    assert.match(container.textContent,/未验收草稿/);
+    assert.match(container.textContent,/新增/);
+    assert.match(container.textContent,/fixed-draft/);
+    const button=[...container.querySelectorAll('button')].find(b=>b.textContent==='导出草稿');assert.ok(button);
+    await act(async()=>button.click());
+    assert.match(container.textContent,/disk full/);assert.match(container.textContent,/saved bytes/);assert.match(container.textContent,/index.html/);
+  });
+});

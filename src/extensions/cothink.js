@@ -2,6 +2,7 @@ import { renderAnswerSkills } from "../context.js";
 import { Type } from "typebox";
 import {readFileSync} from "node:fs";
 import {projectRoutingBudget} from "../pi-runtime.js";
+import {workIntentActions} from "../project-file-proposal.js";
 
 const mainPrompt=readFileSync(new URL("../../prompts/main.md",import.meta.url),"utf8");
 export const mainSystemPrompt=({unified=false}={})=>unified?mainPrompt:mainPrompt+
@@ -9,7 +10,7 @@ export const mainSystemPrompt=({unified=false}={})=>unified?mainPrompt:mainPromp
 
 const workPlanExample={goal:"Create an offline SVG page",scope:["index.html"],deliverables:["index.html"],
   checks:[{command:"node",args:["-e","if (!require('node:fs').readFileSync('index.html','utf8').includes('<svg')) process.exit(1)"]}]};
-const planShape="For a single step provide goal, scope (array of repository-relative path strings), deliverables (array of file paths inside scope), and checks (nonempty array of {command,args?,timeoutMs?} for the configured offline container). The host assigns step id main. For multiple steps use steps instead of top-level deliverables/checks. Each step requires id, goal, deliverables and checks, and may specify scope and dependsOn (step IDs). Specify dependsOn for every step, using [] for independent steps, when asking to allow independent work to overlap. Optional project readScope is an array of paths. To commit to a specific collaboration plan, optionally provide collaboration: {workers?:positive integer,parallel?:boolean,distinctModels?:boolean,stepIds?:string[]}. The default is one worker, or two when parallel or distinctModels is true. Every specified step must participate. The host separately preserves direct user collaboration requirements.";
+const planShape="For a single step provide goal, scope (array of repository-relative path strings), deliverables (array of file paths inside scope), and checks (nonempty array of {command,args?,timeoutMs?} for the configured offline container). The host assigns step id main. For multiple steps use steps instead of top-level deliverables/checks. Each step requires id, goal, deliverables and checks, and may specify scope and dependsOn (step IDs). Specify dependsOn for every step, using [] for independent steps, when asking to allow independent work to overlap. Optional project readScope is an array of paths. To commit to a specific collaboration plan, optionally provide collaboration: {workers?:positive integer,parallel?:boolean,distinctModels?:boolean,stepIds?:string[]}. The default is one worker, or two when parallel or distinctModels is true. workers counts employees only; the manager is separate. distinctModels compares employee identities. stepIds requires coverage across those steps, not the worker count on each step. Omit collaboration when no additional hard staffing commitment is needed. A generic request to form a team can use the manager plus one useful employee. Add staff for implementation or review needs; do not invent two employees per stage or promise all-step coverage without need. Preserve explicit worker counts, parallelism and independent review requirements. The host separately preserves direct user collaboration requirements.";
 export function readOnlyToolDefinitions(host) {
   const result=value=>({content:[{type:"text",text:JSON.stringify(value)}]});
   const invoke=method=>async(id,args)=>{
@@ -80,10 +81,13 @@ export function cothinkExtension(host = {}) {
       pi.registerTool({name:"start_work",label:"Propose file work",
         description:"Use start when no formal project exists, including replacing an unconfirmed proposal. Use resume with only planRef for a saved approved plan, or revise with only a complete plan for an existing formal project. Never combine plan and planRef. A proposal does not grant write permission. "+planShape+" This example is a complete single-step plan. "+JSON.stringify(workPlanExample)+" Optional mcp:[{server,trust,tools:{name:{kind,target,allowedArguments:[exact argument objects]}}}] selects configured pi/mcp.json services; trust is explicit-service-contract or verified-server-readonly. Selected MCP tools become available during file execution; their absence during planning does not establish service unavailability. Never include credentials or infer authorization from tool annotations. For a requested visual check, set workRequest to {kind:\"html-svg\",entry:\"index.html\"} with an HTML/SVG entry declared in deliverables. Optional viewport, frameTimesMs and actions define how to inspect this entry. Actions use {kind:\"click\",selector}, {kind:\"fill\",selector,value}, or {kind:\"key\",key}.",
         parameters:Type.Object({
-          action:Type.Union([Type.Literal("start"),Type.Literal("resume"),Type.Literal("revise")]),reason:Type.String(),
+          action:Type.Union(workIntentActions.map(action=>Type.Literal(action))),reason:Type.String(),
           plan:Type.Optional(Type.Any({description:planShape})),
           planRef:Type.Optional(Type.Object({taskId:Type.String(),field:Type.Literal("proposal"),sha256:Type.String()},{description:"Reference previously reported by the host for this conversation"})),
-        }),
+        },{additionalProperties:false,anyOf:[
+          {properties:{action:{enum:["start","revise"]}},required:["plan"],not:{required:["planRef"]}},
+          {properties:{action:{const:"resume"}},required:["planRef"],not:{required:["plan"]}},
+        ]}),
         async execute(id,args){
           try{
             const intent=await host.task.unifiedIntent("start_work",id,args);

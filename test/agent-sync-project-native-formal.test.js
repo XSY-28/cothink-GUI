@@ -14,7 +14,7 @@ test('PROJECT formal employee uses its allowed same-model original native helper
  const repo=repository(t);let rootCalls=0,employeeCalls=0,helperCalls=0,memberId,helperId,fixtureError;
  const f=await fixture(t,({body})=>{
   try{
-   const system=String(body.messages.find(message=>message.role==='system')?.content??''),names=(body.tools??[]).map(item=>item.function.name),last=body.messages.findLast(message=>message.role==='tool')?.content??'';
+   const system=String(body.messages.find(message=>['system','developer'].includes(message.role))?.content??''),names=(body.tools??[]).map(item=>item.function.name),last=body.messages.findLast(message=>message.role==='tool')?.content??'';
    if(system.includes('You are helper ')){
     assert.equal(body.model,'r1','helper must use the actual employee-approved model');
     if(++helperCalls===1)return tool('write',{path:'a.txt',content:'EMPLOYEE_NATIVE'});

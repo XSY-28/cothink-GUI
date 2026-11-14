@@ -3,20 +3,14 @@ import {createHash,randomUUID} from 'node:crypto';
 import {readFileSync,existsSync,readdirSync,lstatSync,realpathSync,cpSync} from 'node:fs';
 import {join,resolve,relative,isAbsolute,dirname} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
-import {openProjectMcp,recoverProjectMcpCommand} from './project-mcp.js';
+import {openProjectMcp,recoverProjectMcpCommand,projectMcpServerConfig,projectMcpHttpConfig,scrubMcpOutput as scrub} from './project-mcp.js';
+export {projectMcpSummary,discoverProjectMcp} from './project-mcp.js';
 import {snapshotHelper,freezeHelperResult,treatHelperResult} from './plugin-work.js';
 import {redact,privateDirectory} from './storage.js';
 import {problem} from './task.js';
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const response=value=>({content:[{type:'text',text:JSON.stringify(value)}]});
 const kinds=['read','write','start','query','cancel'];
-function scrub(value,secrets) {
-  if(!value||typeof value!=="object")return;
-  for(const key of Object.keys(value)) {
-    if(typeof value[key]==="string")value[key]=redact(value[key],secrets);
-    else scrub(value[key],secrets);
-  }
-}
 function scrubRuntime(record,secrets) {
   // Host identities, exact approved arguments and hashes are authority, not server
   // output; changing them would detach receipts from their original operation.
@@ -79,19 +73,9 @@ function treeDigest(root) {
   walk(root);return hash(items);
 }
 function configured(task,selection,index) {
-  let data;try{data=JSON.parse(readFileSync(join(task.home,'pi','mcp.json'),'utf8'));}catch{throw problem('PROJECT_MCP_CONFIG','Cannot read valid JSON from COTHINK_HOME/pi/mcp.json');}
-  const config=data.mcpServers?.[selection.server];
-  if(config?.disabled===true)throw problem('PROJECT_MCP_CONFIG','Selected MCP server is disabled');
-  if(!config)throw problem('PROJECT_MCP_CONFIG','MCP server is absent from COTHINK_HOME/pi/mcp.json: '+selection.server);
-  if(config.oauth||config.auth||config.env||config.envFile)throw problem('PROJECT_MCP_UNSUPPORTED','OAuth, command environment credentials and automatic account discovery are not adapted');
+  const config=projectMcpServerConfig(task.home,selection.server);
   const safe={server:selection.server,trust:selection.trust,tools:selection.tools};
-  if(config.url) {
-    if(config.type&&!['http','streamable-http'].includes(config.type)||config.transport&&!['http','streamable-http'].includes(config.transport))throw problem('PROJECT_MCP_UNSUPPORTED','Only Streamable HTTP is adapted; legacy SSE and account/OAuth transports are not');
-    const url=new URL(config.url);
-    if(url.username||url.password||url.search||url.hash)throw problem('PROJECT_MCP_SECRET','Use fixed MCP URL without embedded credential/query/fragment');
-    if(config.command||config.args)throw problem('PROJECT_MCP_CONFIG','Select one MCP transport');
-    return {selection,secrets:Object.values(config.headers??{}).filter(v=>typeof v==='string'&&v).flatMap(v=>[v,...(/^(?:Bearer|Basic)\s+(.+)$/i.exec(v)?.slice(1)??[])]),connection:{url:url.href,headers:config.headers,trust:selection.trust},digest:hash({...safe,url:url.href,credentialDigest:hash(config.headers??{})})};
-  }
+  if(config.url)return projectMcpHttpConfig(config,selection);
   if(config.type&&config.type!=='stdio'||config.transport&&config.transport!=='stdio')throw problem('PROJECT_MCP_UNSUPPORTED','Command MCP requires the stdio transport');
   if(config.command!=='node'||!Array.isArray(config.args)||config.args.length!==1||typeof config.args[0]!=='string'||!isAbsolute(config.cwd??''))throw problem('PROJECT_MCP_UNSUPPORTED','Command MCP currently requires node, one JS entry and an absolute dedicated code cwd');
   const source=realpathSync(config.cwd),entryPath=realpathSync(resolve(source,config.args[0])),entry=relative(source,entryPath);
@@ -174,9 +158,13 @@ export async function createProjectMcpContext({task,versioning,execution,state,i
   async function start(entry) {
     try{return await startInternal(entry);}catch(error){throw sanitizedError(error,entry.source.secrets??[]);}
   }
-  async function ensure(entry) {
+  function requireRegisteredTool(entry,tool) {
+    if(!entry.record.tools.some(t=>t.name===tool))throw problem('PROJECT_MCP_TOOL','Confirmed MCP tool is not registered: '+tool);
+  }
+  async function ensure(entry,tool) {
     const current=state.binding.current;
     if(!entry.api||sessionId!==entry.record.sessionId||current.changeId!==entry.record.changeId||current.privateVersion!==entry.record.inputVersion||Boolean(current.readOnly)!==entry.record.readOnly||!isDeepStrictEqual(current.scope,entry.record.scope)||!isDeepStrictEqual(current.readScope,entry.record.readScope))await start(entry);
+    requireRegisteredTool(entry,tool);
   }
   async function recoverOriginal(originalRequestId,action) {
     // Recovery deliberately does not call guard(): pause leaves only this original-handle authority.
@@ -213,13 +201,12 @@ export async function createProjectMcpContext({task,versioning,execution,state,i
   for(const source of entries){source.source={...source};if(source.directory)source.source.codeDigest=treeDigest(source.directory);}
   return {actor,cwd:state.binding.current.workspace,get changeId(){return state.binding.current.changeId;},bindSession:async id=>{sessionId=id;},
     async projectTools() {
-      const definitions=[];
-      // Discovery starts only the declared source in its independent copy. No tool side effects are sent.
+      guard();const definitions=[];
+      // Frozen contracts define tool availability. Connect only for an actual
+      // operation; ensure() verifies registration before any business call.
       for(const [index,entry]of entries.entries()) {
-        await start(entry);
         for(const [tool,grant]of Object.entries(entry.selection.tools)) {
           if(['query','cancel'].includes(grant.kind))continue;
-          const actual=entry.record.tools.find(t=>t.name===tool);if(!actual)throw problem('PROJECT_MCP_TOOL','Confirmed MCP tool is not registered: '+tool);
           definitions.push({name:'project_mcp_'+index+'_'+tool,label:'project_mcp_'+tool,description:'Confirmed '+entry.selection.server+' '+grant.kind+' at '+grant.target+'. Choose an existing owned work; arguments must exactly match a confirmed allowed argument object. External effects are not model calls.',
             parameters:{type:'object',properties:{workId:{type:'string'},arguments:{type:'object'}},required:['workId','arguments'],additionalProperties:false},
             execute:async(id,input)=>{
@@ -227,7 +214,7 @@ export async function createProjectMcpContext({task,versioning,execution,state,i
               safeMaterial(input.arguments);if(!grant.allowedArguments.some(a=>isDeepStrictEqual(a,input.arguments)))throw problem('PROJECT_MCP_ARGUMENTS','Arguments do not match the confirmed target/parameter scope');
               busy=true;
               try {
-                await ensure(entry);if(results().length)throw problem('PROJECT_MCP_PENDING','MCP startup produced a file result; review it first');const requestId='mcp:'+id,payloadDigest=hash({tool,args:input.arguments});
+                await ensure(entry,tool);if(results().length)throw problem('PROJECT_MCP_PENDING','MCP startup produced a file result; review it first');const requestId='mcp:'+id,payloadDigest=hash({tool,args:input.arguments});
                 let trace=task.record.tools?.find(t=>t.kind==='project_mcp_call'&&t.requestId===requestId);
                 if(trace){
                   if(trace.parentActorId!==actor||trace.sourceDigest!==entry.source.digest||trace.tool!==tool||trace.payloadDigest!==payloadDigest||trace.workId!==input.workId)throw problem('PROJECT_MCP_REPLAY','Original MCP call identity belongs to different source/actor/work/parameters');

@@ -33,8 +33,8 @@ function memberExecutionInfo(body) {
   const text = typeof content === "string"
     ? content
     : content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-  const material = JSON.parse(text);
-  return { ...material.execution, reason: material.reason?.text };
+  let material;try{material=JSON.parse(text);}catch{return null;}
+  return material.execution?{ ...material.execution, reason: material.reason?.text }:null;
 
 }
 
@@ -109,8 +109,9 @@ for (const sameModel of [false, true]) test(
     const last=outputs(body).at(-1);
     if (last?.error) traces.push([body.model,last.error]);
     if(isPreparation(body)) return {text:"Verify the original output contract."};
-    const isRoot = body.tools.some(t => t.function.name === "accept_change");
-    if (!isRoot && memberExecutionInfo(body).directReports) {
+    // Role comes from host material; repair may temporarily hide acceptance tools.
+    const executionInfo=memberExecutionInfo(body),isRoot=!executionInfo;
+    if (!isRoot && executionInfo.directReports) {
       switch(++manager) {
         case 1: return tool("delegate",{staffId:"writer",model:writerModel,assignment:"Produce export version two",reason:"Writer owns export",scope:[path]});
         case 2: childId=last?.memberId; return tool("collect",{memberId:childId});
@@ -151,7 +152,8 @@ for (const sameModel of [false, true]) test(
   writeFileSync(file,JSON.stringify({goal:"Produce a readable version two export",scope:[path],budget:{maxCalls:32},steps:[step]}));
   const run=await invoke(f,["project","start","--file",file,"--json"],"",repo.project);
   const project=JSON.parse(run.stdout), done=project.steps[0];
-  assert.equal(project.status,"completed",JSON.stringify({root,manager,employee,requests:f.calls.map(c=>c.body.model),traces,blocker:project.blocker,route:done.route,attempt:done.attempts[0]?.error}));
+  const observed=readTask(f.home,done.attempts[0].taskId);
+  assert.equal(project.status,"completed",JSON.stringify({members:observed.members.map(m=>({id:m.memberId,status:m.status,error:m.error})),tools:observed.tools.filter(t=>t.status!=="completed").map(t=>({name:t.name,status:t.status,error:t.error})),root,manager,employee,requests:f.calls.map(c=>c.body.model),traces,blocker:project.blocker,route:done.route,attempt:done.attempts[0]?.error}));
   assert.equal(done.attempts.length,1);
   assert.equal(routeAtFailure?.probe?.decision,"repair");
   assert.equal(supervisorDiagnosis?.candidate,done.route.candidate);
@@ -161,7 +163,7 @@ for (const sameModel of [false, true]) test(
   assert.equal(done.route.coordination.role,"member:"+managerId);
   assert.equal(done.route.feedback.dispatchId,childId);
   assert.equal(done.route.status,"resolved");
-  assert.ok(!coordinationTools.includes("delegate") && !coordinationTools.includes("write") && coordinationTools.includes("feedback"));
+  assert.ok(!coordinationTools.includes("delegate") && !coordinationTools.includes("write") && !coordinationTools.includes("bash") && coordinationTools.includes("feedback") && coordinationTools.includes("collect"));
   assert.deepEqual(done.route.recheck.checks.map(c=>c.exitCode),[0]);
   assert.equal(readFileSync(join(done.attempts[0].resultWorkspace,path),"utf8"),'{"version":2}');
   const task=readTask(f.home,done.attempts[0].taskId);

@@ -1,9 +1,12 @@
-import { inScope, validProjectPath } from "./versioning.js";
+import {createHash} from 'node:crypto';
+import {continuedTask} from './project-continuation.js';
+import { inScope, validProjectPath, projectScopesOverlap, assertProjectPathSpellings } from "./versioning.js";
 import { problem } from "./task.js";
 
 export const fail = (message) => {
   throw problem("PROJECT_STAFF", message);
 };
+export const needs = Object.freeze(["deliverable", "review", "capability"]);
 export const active = (position) => position?.status === "active";
 export const assignments = (state) => Object.values(state.staffAssignments ?? {});
 export const position = (state, id) => state.staff.find((p) => p.id === id) ?? fail("Unknown project position: " + id);
@@ -15,7 +18,7 @@ export function scopeList(value, bound, name) {
   if (!Array.isArray(value)) fail(name + " must be a list of repository paths.");
   for (const path of value) {
     if (!validProjectPath(path, true) || !inScope(path, bound))
-      fail(name + " exceeds authority: " + path);
+      fail(name + " exceeds authority: " + path + ". Allowed scope: " + JSON.stringify(bound));
   }
   return [...new Set(value)];
 }
@@ -126,8 +129,8 @@ export function changeProjectStaff(state, action, input = {}, actor = "root", au
     const allowed = models(input.models ?? parent?.models ?? [], chain, allowedModels);
     const responsibility = requireText(input.responsibility, "responsibility");
     if (automatic) {
-      if (!["deliverable", "review", "capability"].includes(input.need))
-        fail("Explain the independent deliverable, independent review or configured capability gap.");
+      if (!needs.includes(input.need))
+        fail("need must be one of: " + needs.join(", ") + "; explain the independent deliverable, independent review or configured capability gap.");
       requireText(input.reason, "staffing reason and existing coverage");
       const covered = state.staff.find(
         (p) =>
@@ -238,4 +241,67 @@ export function changeProjectStaff(state, action, input = {}, actor = "root", au
 // Only host-owned project steps and bounded role grants determine work identity.
 export function taskStep(state, taskId) {
   return state.steps?.find((step) => step.attempts?.some((a) => a.taskId === taskId));
+}
+
+export function authorizedPosition(state, { staffId, actor, model, taskId }) {
+  const row = position(state, staffId);
+  if (!active(row) || row.supervisorId !== actor)
+    fail("Position unavailable or outside this supervisor's authority: " + staffId);
+  const chain = supervisors(state, actor, taskId);
+  if ((row.models.length && !row.models.includes(model)) || chain.some((lead) => !lead.models.includes(model)))
+    fail("Model is outside the allowed roster: " + model);
+  return row;
+}
+export function worksOf(step) {
+  const planned = step?.works ?? (step?.deliverables ?? step?.scope ?? []).map((path) => ({
+    id: step.id + ":" + path, scope: [path],
+  }));
+  return [...planned, ...(step?.subworks ?? [])];
+}
+
+export const canonical = (paths) => [...new Set(paths ?? [])].sort();
+
+export function sameMaterials(a, b) {
+  return ["staffId", "actor", "actorRole", "supervisorMemberId", "model", "identity", "assignment", "implementationAdvice",
+    "readOnly", "reviewOf", "reviewKind"].every((key) => (a[key] ?? null) === (b[key] ?? null)) &&
+    ["scope", "readScope", "dependsOn"].every((key) => JSON.stringify(canonical(a[key])) === JSON.stringify(canonical(b[key])));
+}
+
+export function completedHandoff(state, a) {
+  return a.status === "disposed" && a.outcome === "abandoned" &&
+    (position(state, a.staffId).transitions?.length ?? 0) > (a.grantEpoch ?? 0);
+}
+export function registerSubwork(state, taskId, actor, input, proofs) {
+  const step = taskStep(state, taskId);
+  if (state.paused || state.status === "paused" || !step || step.attempts.at(-1)?.taskId !== taskId)
+    fail("Registration needs a current project step.");
+  const manager = actor === "root" ? null : supervisors(state, actor, taskId)[0];
+  const scope = canonical(scopeList(input.scope, manager?.scope ?? step.scope, "subwork scope"));
+  if (!scope.length) fail("Subwork needs a nonempty, bounded delivery scope.");
+  scopeList(scope, step.scope, "step scope");
+  const boundary = scope.filter((p) => !scope.some((other) => other !== p && inScope(p, [other])));
+  const historical = [
+    ...state.steps.flatMap((s) => [...(s.scope ?? []), ...worksOf(s).flatMap((w) => w.scope)]),
+    ...state.staff.flatMap((p) => [...(p.scope ?? []), ...(p.readScope ?? [])]),
+    ...assignments(state).flatMap((a) => [...(a.scope ?? []), ...(a.readScope ?? [])]),
+  ];
+  assertProjectPathSpellings([...historical, ...boundary]);
+  const matches = worksOf(step).filter((w) => projectScopesOverlap(w.scope, boundary));
+  const exact = matches.find((w) => JSON.stringify(canonical(w.scope)) === JSON.stringify(boundary));
+  if (exact) return exact;
+  if (matches.some((w) => !boundary.every((p) => inScope(p, w.scope)) || w.effect || w.independentReview || w.parentWorkId) ||
+      matches.length > 1 || step.independentReview)
+    fail("Subwork must be disjoint from siblings and preserve the original frozen checks and effects.");
+  if (assignments(state).some((a) => a.outcome !== "not_sent" && !a.readOnly &&
+    !(a.status==='disposed'&&['accepted','completed'].includes(a.outcome))&&!completedHandoff(state,a)&&
+    !continuedTask(state,taskId,a.taskId,proofs)&&projectScopesOverlap(a.scope ?? [], boundary)) ||
+    (state.rootWorkClaims ?? []).some((c) => !c.abandoned&&!c.accepted&&taskStep(state,c.taskId)?.status!=='completed'&&
+      !continuedTask(state,taskId,c.taskId,proofs)&&projectScopesOverlap(c.scope,boundary)))
+    fail("This boundary already belongs to a claimed work.");
+  const hash = createHash("sha256").update(JSON.stringify(boundary)).digest("hex");
+  const work = {id: step.id + ":sub:" + hash, scope: boundary,
+    ...(matches[0] ? {parentWorkId: matches[0].id} : {})};
+  if (worksOf(step).some((w) => w.id === work.id)) fail("Registered work ID collision.");
+  (step.subworks ??= []).push(work);
+  return work;
 }

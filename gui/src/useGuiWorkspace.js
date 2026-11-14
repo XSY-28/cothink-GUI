@@ -1,3 +1,4 @@
+import {createGuiFileCommands} from "./features/files/fileCommands.js";
 import {useEditorPersistence} from "./useEditorPersistence.js";
 import {defaultTurnOptions,editorTurnInput,GUI_INPUT_VERSION,retiredReviewOption} from "../../src/gui-turn-options.js";
 import {materialType} from "../../src/gui-material-types.js";
@@ -234,7 +235,7 @@ export function useGuiWorkspace(api) {
     const current=book.current.snapshot(homeEditorId(sessionId)).text || "";
     setDraft(sessionId,current ? `${current}\n${command}` : command);
   }
-  async function selectTask(taskId, sessionId = selected.current) {
+  const selectTask = useCallback(async (taskId, sessionId = selected.current) => {
     if (sessionId !== selected.current) return null;
     const request = ++taskRequest.current;
     selectedTask.current = taskId;
@@ -251,7 +252,7 @@ export function useGuiWorkspace(api) {
       if (selected.current === sessionId && request === taskRequest.current) setError(e.message);
       return null;
     }
-  }
+  }, [api]);
   function readingFactSaved(view, field, wanted) {
     if (!view) return false;
     if (field === "opened") return !!view.lastOpenedAt && view.lastOpenedAt !== wanted;
@@ -536,9 +537,6 @@ export function useGuiWorkspace(api) {
             setTask(value);
             setTasksById(current => ({...current, [value.id]: value}));
           }
-        }),
-        b.active?.taskId && b.active.status !== "preparing" && b.active.taskId !== taskId && api.read("task", {id:b.active.taskId}).then(value => {
-          if (mounted.current) setTasksById(current => ({...current,[value.id]:value}));
         }),
       ]);
     } catch (e) { if (mounted.current && observedSelection === selectionRequest.current) setError(e.message); }
@@ -1142,15 +1140,9 @@ export function useGuiWorkspace(api) {
       submissionError.current = {sessionId:association.sessionId,submissionId:association.submissionId,errorRevision:errorRevision.current};
     }
   }
-  async function confirmWork(turn) {
-    if(bootstrap.active||pendingRef.current||submissionBusy.current)return;
-    submissionBusy.current=true;setSubmitting(true);
-    const association={sessionId:session.id,submissionId:crypto.randomUUID(),proposalRef:turn.proposalRef,kind:'confirmation'};
-    storePending(association);
-    try{const result=await api.action('task.confirmWork',{sessionId:session.id,submissionId:association.submissionId,proposalRef:turn.proposalRef,protocolVersion:1});storePending(null);await selectTask(result.taskId,session.id);await refresh();return result;}
-    catch(error){if(!error.unknown)storePending(null);setError(error.message);}
-    finally{submissionBusy.current=false;setSubmitting(false);}
-  }
+  const {confirmWork,inspectFileContinuation,continueFileWork,exportDraft}=createGuiFileCommands({
+    api,bootstrap,session,pendingRef,submissionBusy,setSubmitting,storePending,selectTask,refresh,setError,
+  });
   async function cancelTask() {
     const taskId=bootstrap.active?.taskId;
     if (!taskId) return;
@@ -1228,11 +1220,12 @@ export function useGuiWorkspace(api) {
       bindWorkspace: (workspace,path) => manageWorkspace("workspace.rebind",{workspaceId:workspace.id,expectedRevision:workspace.revision,path,operationId:crypto.randomUUID()}),
       queryWorkspaceRebind: args => api.action("workspace.rebind.query",args),
       queryWorkspaceCreation: async id => (await readWorkspaces()).find(row=>row.id===id),
-      clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, recoverCreation, transferHome, showHome, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, recoverSubmission, abandonSubmission,
+      clearNavigationNotice: () => setNavigationNotice(null), openSession, createSession, recoverCreation, transferHome, showHome, forkSession, setDraft, insertCommand, resolveDraft, submit, organizeContext, confirmWork, inspectFileContinuation, continueFileWork, recoverSubmission, abandonSubmission,
       selectTask, changeSession, recoverThinkingSettings:options=>recoverThinkingSettings({sessionId:selected.current,...options}), recordView, refresh, cancelTask, acknowledgeNotes, setWorkRequest,setTurnOptions, refreshTeams,
       saveTeam: args => manageTeam("team.save", args),
       removeTeam: args => manageTeam("team.remove", args),
       saveProvider: args => manageTeam("provider.save", args),
+      inspectProviderMetadata: args => api.action("provider.inspectMetadata",args),
       saveWorkSettings: args => manageTeam("settings.work", args),
       getCapabilities,listSkills,chooseSkill,removeSkill,
       addMaterials,removeMaterial,resumeMaterial,queryMaterial,previewMaterial,resolveImage,listProjectMaterials,previewProjectMaterial,importProjectMaterials,
@@ -1269,6 +1262,7 @@ export function useGuiWorkspace(api) {
       readFileDiff: ref => api.read("file-diff",ref),
       downloadPatch: taskId => api.read("patch",{id:taskId}),
       revealTask: taskId => api.action("task.reveal",{taskId}),
+      exportDraft,
       setError},
   };
 }

@@ -1,10 +1,12 @@
 import {normalizeThinkingPreference,DEFAULT_THINKING_LEVEL} from "./thinking.js";
 import { createGuiMaterialActions } from "./gui-material-actions.js";
+import {createGuiFileActions} from "./gui-file-actions.js";
 import {contextToolNames,contextDigest,contextSnapshot,contextState,readContextDisk,compactContext,contextOperationView} from './context-management.js';
 import {GUI_INPUT_VERSION,validateEditorTurnOptions,editorTurnInput,retiredReviewOption,guiTurnIntent} from "./gui-turn-options.js";
 import {resolveBuiltinSkills,validateBuiltinSkills,builtinSkillNames,capabilitySnapshot} from './builtin-skills.js';
 import {freezeAnswerSkills} from './context.js';
 import {createGuiMaterialStore,GUI_MATERIAL_CAPABILITIES} from './gui-materials.js';
+import {projectMcpSummary} from "./project-mcp-work.js";
 import {taskSkillDirectory} from './skill-resources.js';
 import {resolvePackageResources} from './packages.js';
 import {
@@ -31,9 +33,9 @@ import {
   selectedResources,
   secretValues,
 } from "./pi-runtime.js";
-import {runProjectTurn,unifiedProtocol,normalizeConstraints,normalizeRootBudget,loadPreparedContinuation,freezeReadAuthorization,checkedProposal,reserveConfirmation,confirmationState,executeConfirmed,resolveOwnedTasks,rootUsage,assertRootOwner,createRootOwner,workConfirmationBlocker} from "./project-turn.js";
+import {runProjectTurn,unifiedProtocol,normalizeConstraints,normalizeRootBudget,loadPreparedContinuation,freezeReadAuthorization,executeConfirmed,resolveOwnedTasks,rootUsage,assertRootOwner,createRootOwner,workConfirmationBlocker} from "./project-turn.js";
 import { cothinkExtension, mainSystemPrompt } from "./extensions/cothink.js";
-import { createTask,readTask, readRequests, taskDisplayStatus } from "./task.js";
+import { createTask,readTask, readRequest, readRequests, taskDisplayStatus } from "./task.js";
 import {
   acquireSessionWriter,
   sessionWriterBusy,
@@ -77,8 +79,8 @@ import {
   inspectGuiProject,
   inspectGuiDirectory,
   inspectWorkspaceProject, browseProjectFolders, makeProjectFolder,
-  savedDirectoryAvailable, fileWorkStatus, requireFileWork, requireGuiFileTask, workspaceDirectoryFacts,
-  createConversationFolder, discardEmptyConversationFolder, beforeGuiFileWork, requireGuiExecution, directoryIdentity, conversationDirectoryAvailable, inspectTeamFolder, requireTeamFolder, savedProjectAvailable,
+  savedDirectoryAvailable, fileWorkStatus, requireGuiFileTask, workspaceDirectoryFacts,
+  createConversationFolder, discardEmptyConversationFolder, beforeGuiFileWork, directoryIdentity, conversationDirectoryAvailable, inspectTeamFolder, requireTeamFolder, savedProjectAvailable,
   guiDiff,
   guiOutput,
   guiArtifact,
@@ -95,7 +97,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   let active = null,
     closed = false,
     shuttingDown = false, drainPromise, shutdownError = null,
-    management = false, executionInspection=null, pendingProbeCleanup=null;
+    management = false, executionInspection=null, metadataInspection=null, pendingProbeCleanup=null;
   // Serialize only selection acceptance and metadata writes, never task execution.
   let selectionWrite = Promise.resolve();
   function writeSelection(operation) {
@@ -193,7 +195,17 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
   const checkForUpdates=()=>installation === "desktop" ? Promise.resolve(updateSnapshot()) : updates.check();
   // Disposable summaries: stat every dependency, parse only changed durable bytes.
   const taskCache = new Map(), sessionCache = new Map(), fileListCache = new Map();
-  const hasFileWork = record => !!(record.work || record.deliveryRef || record.projectOperation?.childTaskIds?.length);
+  const {confirmWork,inspectContinuation,continueFileWork,continuePrepared,exportDraft}=createGuiFileActions({
+    home,reader,workspaceFacts,projectMembership,writeSelection,owner,assertWorkspaceWritable,assertSessionUnarchived,
+    live,taskCache,inspectExecution,submit,emit,oauthBusy,rawTask,
+    getActive:()=>active,isManaging:()=>management,setManaging:value=>{management=value;},isShuttingDown:()=>shuttingDown,
+  });
+  const hasFileWork = record => !!(record.work || record.deliveryRef || record.projectOperation?.childTaskIds?.length || record.projectOperation?.continuation?.draft);
+  function fileResultRevision(record,text) {
+    let children=[];
+    try {children=resolveOwnedTasks(home,record,()=>{});} catch { /* Unverified sources remain unavailable. */ }
+    return guiResultRevision(record,text,children);
+  }
   async function files(id) {
     const record=rawTask(id).record;
     if(record.flow==="unified" || record.project)return guiFiles(home,record);
@@ -208,6 +220,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     try { const s = statSync(path); return `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`; }
     catch (e) { return e.code === "ENOENT" ? "missing" : "unreadable"; }
   };
+  const finalRequests = record => record.requestIds.filter(id=>id===record.finalCallId)
+    .map(id=>readRequest(home,record.id,id));
   function taskIndex() {
     let files;
     try { files = readdirSync(join(home, "tasks")).filter(n => n.endsWith(".json")); }
@@ -219,19 +233,22 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       const stamp = signature(path);
       const dependencies = ids => ids.map(r => [r, signature(join(home, "requests", r + ".json")),
         signature(join(home, "requests", r + ".events.jsonl"))]);
-      if (!cached || cached.value?.flow==="unified" || cached.stamp !== stamp || JSON.stringify(dependencies(cached.requestIds)) !== cached.dependencies) {
+      if (!cached || cached.verifyDelivery || cached.stamp !== stamp || JSON.stringify(dependencies(cached.requestIds)) !== cached.dependencies) {
         cached = {stamp, requestIds: [], dependencies: "[]"};
         try {
           const record = readTask(home, id);
           if (!Array.isArray(record.requestIds) || record.requestIds.some(r=>typeof r !== "string" || !/^[0-9a-f-]{36}$/.test(r)) || typeof record.input !== "string" || typeof record.createdAt !== "string") throw Error("task summary");
-          cached.requestIds = record.requestIds;
+          // An overview needs its final reply, not every execution payload and
+          // streaming journal. Delivery-backed answers still verify their sources.
+          cached.requestIds = record.requestIds.filter(id=>id===record.finalCallId);
+          cached.verifyDelivery = !!record.deliveryRef;
           const delivery=guiDeliverySummary(home,record);
           cached.value = {id: record.id, sessionId: record.sessionId, submissionId: record.submissionId, editorEditId:record.editorEditId,
             createdAt: record.createdAt, cancelSettledAt: record.cancelSettledAt ?? null, input: record.input, status: delivery.status, error:delivery.error,
-            origin:record.origin,sourceLeaf:record.sourceLeaf,sourceSnapshot:record.sourceSnapshot,contextResult:record.contextResult,singleModel: record.singleModel, flow:record.flow, proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,confirmationBlocker:workConfirmationBlocker(record),projectPreparationBlocked:record.projectPreparationBlocked,continuationSource:record.continuationSource,materials:record.materials,inputDigest:record.inputDigest,hasWork:hasFileWork(record), finalText: ""};
+            origin:record.origin,sourceLeaf:record.sourceLeaf,sourceSnapshot:record.sourceSnapshot,contextResult:record.contextResult,singleModel: record.singleModel, flow:record.flow, proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,fileContinuationIntent:record.fileContinuationIntent,fileContinuationError:record.fileContinuationError,confirmationBlocker:workConfirmationBlocker(record),projectPreparationBlocked:record.projectPreparationBlocked,continuationSource:record.continuationSource,materials:record.materials,inputDigest:record.inputDigest,hasWork:hasFileWork(record), finalText: ""};
           try {
-            cached.value.finalText = finalGuiText(record, readRequests(home, record),home);
-            cached.value.resultRevision = guiResultRevision({...record,status:delivery.status,error:delivery.error},cached.value.finalText);
+            cached.value.finalText = finalGuiText(record, finalRequests(record),home);
+            cached.value.resultRevision = fileResultRevision({...record,status:delivery.status,error:delivery.error},cached.value.finalText);
             cached.value.endedAt = record.endedAt ?? null;
           } catch { cached.value.historyError = "任务请求记录损坏、缺失或不可用；原文件保留。"; }
         } catch { cached.error = "任务记录损坏或版本不支持；原文件保留，未知提交不自动重发。"; }
@@ -547,11 +564,11 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         const current = active?.taskId === taskId ? live.get(taskId) : null,
           record = current?.record ?? records.find((t) => t.id === taskId);
         if (!record || record.historyError) throw Error("分支引用的任务记录缺失或损坏。");
-        const finalText = current ? finalGuiText(record,current.requests(),home) : record.finalText;
+        const finalText = current ? finalGuiText(record,finalRequests(record),home) : record.finalText;
         const result = current ? guiDeliverySummary(home,record) : record;
         return {
           taskId: record.id,
-          flow:record.flow,proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,
+          flow:record.flow,proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,fileContinuationIntent:record.fileContinuationIntent,fileContinuationError:record.fileContinuationError,
           confirmationBlocker:current?workConfirmationBlocker(record):record.confirmationBlocker,
           projectPreparationBlocked:record.projectPreparationBlocked??null,continuationSource:record.continuationSource??null,
           createdAt: record.createdAt ?? null,
@@ -565,7 +582,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           hasWork: current ? hasFileWork(record) : !!record.hasWork,
           mode: record.singleModel ? "one" : "cothink",
           finalText,
-          resultRevision: current ? guiResultRevision({...record,status:result.status,error:result.error},finalText) : record.resultRevision,
+          resultRevision: current ? fileResultRevision({...record,status:result.status,error:result.error},finalText) : record.resultRevision,
           canFork: result.status === "completed" && !!finalText && branch.some(entry =>
             entry.type === "custom_message" && entry.customType === "cothink-task-status" && entry.details?.taskId === taskId),
         };
@@ -660,7 +677,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       const finalText = finalGuiText(record,task.requests(),home);
       const delivery=guiDeliverySummary(home,record);
       byTask.set(record.id,{...record,status:delivery.status,finalText,hasWork:hasFileWork(record),
-        resultRevision:guiResultRevision({...record,status:delivery.status,error:delivery.error},finalText)});
+        resultRevision:fileResultRevision({...record,status:delivery.status,error:delivery.error},finalText)});
     }
     const rows = [], workspaceRows = new Map();
     const needle = query.trim().toLocaleLowerCase();
@@ -898,7 +915,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     })));
     return safe({
       version: notes.version,
-      protocol:{unified:unifiedProtocol,capabilities:1,guiInput:Number(GUI_INPUT_VERSION)},
+      protocol:{unified:unifiedProtocol,capabilities:1,fileContinuation:1,guiInput:Number(GUI_INPUT_VERSION)},
       ...homeDraftSnapshot(),
       materialCapabilities:GUI_MATERIAL_CAPABILITIES,oauthOperations:oauth.snapshot(),localSkillPaths:config?.piResources?.skills??[],executionConfigDigest:guiExecutionConfigDigest(config?.work),
       builtinSkills:{disabled:validateBuiltinSkills(config),names:builtinSkillNames},
@@ -962,7 +979,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     try {const cwd=resources.resourceCwd,manual=resources.options,packages=await resolvePackageResources({home,cwd,manual:{skills:manual.additionalSkillPaths,prompts:manual.additionalPromptTemplatePaths,themes:manual.additionalThemePaths}});
       skills=freezeAnswerSkills({cwd,home,paths:[...builtins.skills.map(s=>s.path),...manual.additionalSkillPaths,...packages.skills],project:true,includeRestricted:true}).map(s=>({...s,sourceKind:builtins.skills.some(b=>b.path===s.path)?'builtin':'selected'}));
     }catch {diagnostics.push({code:'SKILL_DISCOVERY',message:'选定技能存在缺失、同名冲突或包状态错误；新任务会在请求前拒绝，请核对资源选择。'});}
-    return capabilitySnapshot({skills,tools:[...contextToolNames,'read_skill','get_capabilities',...(resources.projectAvailable?['start_work','read_project_context']:[])],hasProject:resources.projectAvailable,executionConfigured:!!config?.work?.execution,diagnostics,context:manager?contextState(manager):null});
+    return capabilitySnapshot({mcp:projectMcpSummary(home),skills,tools:[...contextToolNames,'read_skill','get_capabilities',...(resources.projectAvailable?['start_work','read_project_context']:[])],hasProject:resources.projectAvailable,executionConfigured:!!config?.work?.execution,diagnostics,context:manager?contextState(manager):null});
   }
   async function readContextOperation(operationId) {
     const task=rawTask(operationId),record=task.record;
@@ -1037,7 +1054,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     const upgrade=()=>sessionStateError("GUI_INPUT_UPGRADE","需要新版 CoThink 界面。请重新打开应用；已保存草稿和历史保留。");
     if(receiptOnly && args.protocolVersion!==unifiedProtocol)throw upgrade();
     if(!confirmation && (args.protocolVersion!==unifiedProtocol||Object.keys(args).some(k=>!["sessionId","input","submissionId","protocolVersion","constraints","readAuthorization","budget","editorEditId","materials"].includes(k))))throw Error("统一会话协议不匹配，请重新打开新版界面。");
-    const constraints=normalizeConstraints(confirmation?.source.proposal.constraints??continuation?.source.constraints??args.constraints);
+    const constraints=normalizeConstraints(confirmation?.reservation.proposal?.constraints??confirmation?.source.proposal.constraints??continuation?.source.constraints??args.constraints);
     const budget=normalizeRootBudget(confirmation?.reservation.budgetSource.remaining??continuation?.remainingBudget??args.budget);
     const { sessionId, input, submissionId } = args;
     const refs=normalizeConversationEditor({materials:args.materials}).materials.map(({id,sha256})=>({id,sha256}));
@@ -1196,7 +1213,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           taskId: state.taskId,
           submissionId,editorEditId:args.editorEditId,
           signal: state.abort.signal,
-          onTaskCreated:task=>{task.record.inputDigest=inputDigest;task.save();if(confirmation){const sourceTask=live.get(confirmation.source.id);const source=sourceTask?.record??confirmation.source;source.confirmationIntent.status="consumed";source.confirmationIntent.consumedByTaskId=task.record.id;if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",source.id+".json"),source,rt.assertOwned);taskCache.delete(source.id);}},
+          onTaskCreated:task=>{task.record.inputDigest=inputDigest;task.save();if(confirmation){const sourceTask=live.get(confirmation.source.id);const source=sourceTask?.record??confirmation.source;const intent=confirmation.reservation.continuation?source.fileContinuationIntent:source.confirmationIntent;intent.status="consumed";intent.consumedByTaskId=task.record.id;if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",source.id+".json"),source,rt.assertOwned);taskCache.delete(source.id);}},
           onProgress: (event) => {
             live.set(event.task.record.id, event.task);
             resolveReady({ taskId: event.task.record.id, sessionId });
@@ -1218,70 +1235,31 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         cancelExtensionPrompts(sessionId);
         clearInterval(state.timer);
         emit();
+        // The old root has drained and released the ordinary submit seat. A
+        // visible, frozen one-use choice may now enter that same submit path.
+        if(!closed&&!shuttingDown&&!state.abort.signal.aborted){
+          const source=live.get(state.taskId)?.record;
+          if(source?.constraints?.allowFileContinuation===true&&source.projectOperation&&
+            source.operationAuthorization?.kind!=='file_continuation'&&!source.cancelRequestedAt&&
+            source.status==='outcome_unknown'){
+            try{
+              const facts=await inspectContinuation({sessionId,sourceRootTaskId:source.id});
+              if(facts.eligible)await continueFileWork({sessionId,sourceRootTaskId:source.id,draft:facts.draft,
+                submissionId:source.fileContinuationIntent?.submissionId??randomUUID(),protocolVersion:unifiedProtocol,
+                expectedRevision:facts.revision,expectedFormalVersion:facts.formalVersion},'preauthorized_once');
+            }catch(error){
+              source.fileContinuationError=error.message;
+              try{live.get(source.id)?.save();taskCache.delete(source.id);}catch{}
+              emit();
+            }
+          }
+        }
       }
     })();
     state.timer = setInterval(emit, 250);
     state.timer.unref();
     return ready;
   }
-  async function confirmWork(args) {
-    if(!args||Object.keys(args).some(k=>!["sessionId","submissionId","proposalRef","protocolVersion"].includes(k))||args.protocolVersion!==unifiedProtocol||typeof args.submissionId!=="string"||!args.submissionId||args.submissionId.length>200)throw Error("确认参数或协议无效。");
-    const {sessionId,proposalRef,submissionId}=args, id=proposalRef?.sourceTaskId;
-    const assertProposalBranch=manager=>{
-      if(!conversationTaskIds(manager).includes(id))throw Error("提议不属于当前可见分支。");
-    };
-    const prepared=await writeSelection(async()=>{
-      const manager=await reader(sessionId);
-      assertProposalBranch(manager);
-      const saved=readTask(home,id);
-      if(saved.confirmationIntent){
-        const facts=workspaceFacts(manager);
-        const membership=projectMembership(facts,readGuiWorkspaces(home));
-        if(membership.workspaceError||saved.workspace?.project!==facts.project)
-          throw workspaceError("WORKSPACE_UNAVAILABLE",membership.workspaceError??"提议的目录归属无法确认。");
-        checkedProposal(home,saved,proposalRef,{sessionId,workspaceId:membership.workspaceId});
-        const found=await confirmationState({home,source:saved,reservation:saved.confirmationIntent,receiptOnly:true});
-        if(found.task)return {found};
-        if(active?.taskId===saved.confirmationIntent.taskId&&active.sessionId===sessionId)return {joining:active.ready};
-      }
-      if(active||management)throw Error("当前任务或设置尚未结束，请先等待。");
-      management=true;
-      try {
-        assertSessionUnarchived(sessionId);
-        const holder=await owner(sessionId,{mutating:true});
-        const membership=await assertWorkspaceWritable(holder.sessionManager,{forExecution:true,requireTeam:true});
-        assertProposalBranch(holder.sessionManager);
-        const sourceTask=live.get(id),source=sourceTask?.record??readTask(home,id);
-        if (source.workspace?.directoryIdentity!==undefined)
-          await requireFileWork(home,source.workspace.project,source.workspace.directoryIdentity);
-        const save=()=>{holder.assertOwned();if(sourceTask)sourceTask.save();else writePrivateJson(join(home,"tasks",id+".json"),source,holder.assertOwned);taskCache.delete(id);};
-        checkedProposal(home,source,proposalRef,{sessionId,workspaceId:membership.workspaceId});
-        const blocker=workConfirmationBlocker(source);
-        if(blocker)throw workspaceError("PROPOSAL_BLOCKED",blocker);
-        if(!source.proposal.reuseCompletedDelivery)await requireGuiExecution(source.frozenConfig.work,inspectExecution);
-        if(shuttingDown)throw Error("宿主正在关闭，任务未发送。");
-        const reservation=await reserveConfirmation({home,source,proposalRef,sessionId,workspaceId:membership.workspaceId,submissionId,save});
-        const found=await confirmationState({home,source,reservation});
-        return {source,reservation,found};
-      } finally {management=false;emit();}
-    });
-    if(prepared.joining)return prepared.joining;
-    if(prepared.found.task)return {taskId:prepared.found.task.id,sessionId:args.sessionId};
-    return submit({sessionId:args.sessionId,input:prepared.source.input,submissionId:prepared.reservation.submissionId},prepared);
-  }
-  async function continuePrepared(args) {
-    if (!args || Object.keys(args).length!==4 || !isWorkspaceId(args.sessionId) || !isWorkspaceId(args.sourceTaskId) ||
-        !isWorkspaceId(args.submissionId) || args.protocolVersion!==unifiedProtocol) throw Error("工作续作参数无效。");
-    const manager=await reader(args.sessionId);
-    const continuation=loadPreparedContinuation({home,manager,sourceTaskId:args.sourceTaskId});
-    if (continuation.remainingBudget.maxCost!==null)
-      throw Error("原工作费用上限无法核实剩余金额，续作尚未发送。");
-    if (continuation.remainingBudget.maxCalls===0)
-      throw Error("原任务的调用额度已经用完。");
-    return submit({sessionId:args.sessionId,input:continuation.source.input,submissionId:args.submissionId,
-      protocolVersion:unifiedProtocol},null,continuation);
-  }
-
   async function usableRoster(id,config=loadConfig(home),getCatalog=()=>createModelRuntime(home),requireAll=true) {
     const roster=config?.teams?.find(t=>t.id===id);
     if(!roster)return null;
@@ -1394,6 +1372,17 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       if(!url)throw Error("授权链接已经失效。");
       return {url};
     }
+    if(name==="provider.inspectMetadata"){
+      if(!args||Object.keys(args).some(key=>key!=='providerId')||typeof args.providerId!=='string')throw Error('模型能力核对参数无效。');
+      if(active||management||oauthBusy())throw Error('当前任务或设置尚未结束，请先等待。');
+      management=true;
+      const operation={abort:new AbortController(),promise:null};metadataInspection=operation;
+      operation.promise=(async()=>{
+        const {inspectProviderMetadata}=await import('./pi-model-runtime.js');
+        return inspectProviderMetadata({home,providerId:args.providerId,signal:operation.abort.signal});
+      })().finally(()=>{metadataInspection=null;management=false;emit();});
+      return operation.promise;
+    }
     if(name==="settings.inspectExecution"){
       if(active||management)throw Error("当前任务或设置尚未结束，请先等待。");
       management=true;
@@ -1465,6 +1454,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     }
     if (name === "task.submit") return submit(args,null,null,{receiptOnly});
     if (name === "task.confirmWork") return confirmWork(args);
+    if (name === "task.inspectContinuation") return inspectContinuation(args);
+    if (name === "task.continueWork") return continueFileWork(args);
     if (name === "task.continuePrepared") return continuePrepared(args);
     if (name === "session.mode") throw Error("统一会话已移除模式切换；旧 CLI 会话保留原模式。");
     if (name === "task.cancel") {
@@ -1477,6 +1468,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       emit();
       return { taskId: args.taskId };
     }
+    if (name === "work.exportDraft") return exportDraft(args);
     if (name === "task.reveal")
       return revealGuiTask(home,rawTask(args.taskId).record);
     if (name === "project.inspect") {
@@ -1860,9 +1852,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     if(active && !taskRefs.includes(active.taskId)) taskRefs.push(active.taskId);
     const authPending=oauthBusy();
     return {requested:shuttingDown, settled:shuttingDown && !drainPromise && !shutdownError && !management &&
-      !authPending && !executionInspection && !pendingProbeCleanup && !extensionCommand && !uploads.size && !taskRefs.length,
+      !authPending && !executionInspection && !metadataInspection && !pendingProbeCleanup && !extensionCommand && !uploads.size && !taskRefs.length,
       reason:shutdownError || (taskRefs.length ? "任务停止尚未确认，请核对已保存状态。" :
-        authPending ? "认证操作仍在收尾。" : executionInspection ? "执行检查仍在收尾。" :
+        authPending ? "认证操作仍在收尾。" : executionInspection ? "执行检查仍在收尾。" : metadataInspection ? "模型能力核对仍在收尾。" :
         pendingProbeCleanup ? "执行探针清理尚未确认。" : management ? "设置仍在保存。" : null), taskRefs};
   }
   function beginShutdown() {
@@ -1871,7 +1863,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     shutdownError = null;
     const state=active, command=extensionCommand;
     state?.abort.abort(); command?.abort.abort(); cancelExtensionPrompts();
-    const settingsDrain=Promise.allSettled([oauth.close(),executionInspection]);
+    metadataInspection?.abort.abort();
+    const settingsDrain=Promise.allSettled([oauth.close(),executionInspection,metadataInspection?.promise]);
     for(const request of uploads)request.abort.abort();
     drainPromise=(async()=>{
       try {
@@ -1957,8 +1950,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           return [];
         }
       });
-      const p = projectGuiTask(t.record, t.requests(), entries, {liveRequests:!!t.rootOwner});
-      p.finalText=finalGuiText(t.record,t.requests(),home);p.proposal=t.record.proposal;p.proposalRef=t.record.proposalRef;p.flow=t.record.flow;
+      const requests=t.requests(),p = projectGuiTask(t.record, requests, entries, {liveRequests:!!t.rootOwner});
+      p.finalText=finalGuiText(t.record,requests,home);p.proposal=t.record.proposal;p.proposalRef=t.record.proposalRef;p.flow=t.record.flow;
       if(t.record.flow==='unified'){
         const delivery=guiDeliverySummary(home,t.record);
         p.status=delivery.status;p.error=delivery.error;
@@ -1969,7 +1962,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           const projected=projectGuiTask(visual,requests,[],{deliveryVersion:t.record.deliveryRef?.version});
           p.deliveryVisual={id:visual.id,work:projected.work};
         }
-        p.resultRevision=guiResultRevision({...t.record,status:p.status,error:p.error},p.finalText);
+        p.resultRevision=fileResultRevision({...t.record,status:p.status,error:p.error},p.finalText);
         let owned=[];
         const unavailable=error=>{p.executionError="执行来源尚不能核验："+error.message;};
         try {owned=resolveOwnedTasks(home,t.record,unavailable);} catch(error){unavailable(error);}

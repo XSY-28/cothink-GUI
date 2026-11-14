@@ -75,7 +75,7 @@ export async function adoptManagerFinal(task,delivery) {
         if(call){reusedFrom=previous.managerFinal?.reusedFrom??previous.id;break;}
       } catch { /* Unverified historical reports cannot be adopted. */ }
     }
-    if(!call)throw problem('MANAGER_FINAL','The saved delivery has no verifiable manager report to reuse');
+    if(!call&&!record.projectOperation.continuation)throw problem('MANAGER_FINAL','The saved delivery has no verifiable manager report to reuse');
   } else call=canonicalStepFinal(record,delivery);
   if(!call){
     if(record.budget.maxCalls!==null&&record.rootRequests.filter(claim=>!claim.notSent).length>=record.budget.maxCalls)
