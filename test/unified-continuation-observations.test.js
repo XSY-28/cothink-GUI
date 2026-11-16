@@ -22,7 +22,7 @@ test('completed command observations bind candidate, check definitions, environm
  const {source,v}=setup(),before=JSON.stringify(source);
  const result=await continuationObservations(v,source,{version:'restored',baseVersion:'base',changeId:'saved'},checks);
  assert.equal(result.commands.length,1);assert.equal(result.fixedChecksRequired,true);
- assert.deepEqual(result.commands[0],{requestId:'command-1',recordedCommand:'node optional-browser.cjs',observedVersion:'observed',candidate:'restored',outputRef:'command-1',exitCode:0,checks,execution});
+ assert.deepEqual(result.commands[0],{requestId:'command-1',recordedCommand:'node optional-browser.cjs',observedVersion:'observed',candidate:'restored',sourceOutputAccess:'not_granted',exitCode:0,checks,execution});
  assert.equal(JSON.stringify(source),before);
 });
 for(const [name,mutate] of [

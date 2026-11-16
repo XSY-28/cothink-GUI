@@ -1,3 +1,5 @@
+import {coveringProcessCheck, coverRestoredWorkers, restoredAssignment} from './project-restored-process-check.js';
+export {coveringProcessCheck} from './project-restored-process-check.js';
 import {continuationSources} from './project-continuation.js';
 import { createHash } from 'node:crypto';
 import { problem, readRequest, readRequests, readTask } from './task.js';
@@ -153,6 +155,11 @@ export async function formalCompletionFeedback(task,leader,result,checker,source
     return [{record:readTask(task.home,attempt.taskId),stepId:step.id,
       relation:attempt.rootTaskId===root.record.id?"owned":"inherited"}];
   });
+  const restoredReports=await coverRestoredWorkers(task,checker,source,
+    formalCollaborationCandidates(root,state,sources,true).filter(item=>!item.checkRequestId||item.restorePending));
+  if(restoredReports.length)return leader.prompt(JSON.stringify({
+    source:'Host-bound process reports for restored employees',processReports:restoredReports,
+    instruction:'Handle these restored employee observations within current authority. Do not redispatch completed employees merely to count their contribution. Explain unresolved issues honestly.'}));
   // Future scoped steps remain their own managers' responsibility. Global
   // commitments count earlier steps instead of re-staffing every step.
   const due=requirements.filter(requirement=>!requirement.stepIds||requirement.stepIds.includes(current.id));
@@ -211,7 +218,7 @@ function receivedWorkerResult(member,child,calls) {
     })));
 }
 
-export function formalCollaborationCandidates(task,state,sources) {
+export function formalCollaborationCandidates(task,state,sources,includeUncovered=false) {
   const facts=[];
   const {inputs,inheritedRoots}=continuationSources(task,state,sources);
   for (const {record:child,stepId,relation} of inputs) {
@@ -243,7 +250,8 @@ export function formalCollaborationCandidates(task,state,sources) {
       if (supervisor) continue;
       const assignment=state.staffAssignments?.[member.memberId];
       if (assignment?.taskId!==child.id||assignment.staffId!==member.staffId||
-          assignment.status!=="disposed"||assignment.outcome!==member.status||
+          (!(assignment.status==="disposed"&&assignment.outcome===member.status)&&
+          !restoredAssignment(task.record,child,member,assignment,continued,includeUncovered,task.home))||
           assignment.workId!==member.workId||
           ![...step.works,...(step.subworks??[])].some(work=>work.id===(assignment.targetWorkId??assignment.workId)))
         continue;
@@ -258,40 +266,15 @@ export function formalCollaborationCandidates(task,state,sources) {
       const sessionId=result?.projectSend?.sessionId;
       if (!sessionId||sessionId===child.sessionId||sessionId===root.sessionId) continue;
       const attemptCalls=workerCalls.filter(call=>call.projectSend.feedback===result.projectSend.feedback);
-      const checkRequestId=coveringProcessCheck(task.home,root,child,member,result.projectSend.feedback,attemptCalls);
-      if (!checkRequestId) continue;
+      const checkRequestId=coveringProcessCheck(task.home,root,child,member,result.projectSend.feedback,attemptCalls)??
+        (continued?coveringProcessCheck(task.home,task.record,child,member,result.projectSend.feedback,attemptCalls):null);
+      if (!checkRequestId&&!(includeUncovered&&continued)) continue;
       const intervals=executionCalls.filter(call=>call.projectSend.feedback===result.projectSend.feedback)
         .map(({transport})=>({start:transport.dispatchedAt,end:transport.lastBodyAt??transport.headersAt}))
         .filter(({start,end})=>start&&end&&start<end);
       facts.push({taskId:child.id,memberId:member.memberId,workId:member.workId,stepId,sessionId,
-        resultRequestId:result.id,checkRequestId,identity:assignment.identity,intervals,...(reusedRequirements?{reusedRequirements}:{})});
+        resultRequestId:result.id,checkRequestId,restorePending:continued&&assignment.status==="result"&&!restoredAssignment(task.record,child,member,assignment,true,false,task.home),identity:assignment.identity,intervals,...(reusedRequirements?{reusedRequirements}:{})});
     }
   }
   return facts;
-}
-
-export function coveringProcessCheck(home,root,child,member,attempt,calls) {
-  const requestIds=new Set(calls.map(call=>call.id));
-  for (const observation of root.processCheck?.observations??[]) {
-    if (observation.status!=="completed"||observation.commandId!==(root.projectOperation?.commandId??null)||!observation.covered?.some(item=>
-      item.taskId===child.id&&item.memberId===member.memberId&&item.attempt===attempt&&
-      item.evidenceIds?.some(id=>requestIds.has(id)))) continue;
-    try {
-      const owner=observation.taskId===child.id?child:readTask(home,observation.taskId);
-      const call=readRequest(home,owner.id,observation.requestId);
-      const last=call.context?.messages?.at(-1);
-      const text=typeof last?.content==="string"?last.content:last?.content?.[0]?.text;
-      const formal=owner.rootTaskId===root.id&&root.projectOperation?.childTaskIds.includes(owner.id)&&
-        call.projectSend?.cause==="observe:"+observation.id&&call.projectSend?.sessionId===observation.sessionId;
-      const claim=root.rootRequests?.find(claim=>claim.requestId===call.id);
-      const readonly=owner.id===root.id&&claim?.cause==="observe:"+observation.id&&claim.sessionId===observation.sessionId;
-      if ((formal||readonly)&&call.role==="process-check"&&call.stageId===observation.stageId&&
-          last?.role==="user"&&typeof text==="string"&&createHash('sha256').update(text).digest('hex')===observation.snapshotDigest&&
-          ownedPhysicalRequest(root,owner,call))
-        return call.id;
-    } catch {
-      // Missing or corrupt receipts cannot satisfy the promise.
-    }
-  }
-  return null;
 }

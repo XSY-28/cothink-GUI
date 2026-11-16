@@ -13,7 +13,7 @@ import { readTask, readRequests } from "../src/task.js";
 const product = "answer.json";
 const owner = "gpt-4o";
 const reviewer = "claude-sonnet-4-5";
-const secondReviewer = "deepseek-v4.1-flash-1017";
+const secondReviewer = "deepseek-flash";
 const modelProviders = {[owner]:"test-openai", [reviewer]:"test-anthropic", [secondReviewer]:"test-deepseek"};
 const providerOrigins = {[owner]:"https://api.openai.com", [reviewer]:"https://api.anthropic.com", [secondReviewer]:"https://api.deepseek.com"};
 const preload = fileURLToPath(new URL("./helpers/project-review-transport.mjs", import.meta.url));
@@ -44,10 +44,18 @@ for (const scenario of ["pass", "missing", "stale", "denied", "counterexample", 
       trace.push([body.model, isRoot ? next : "employee", last?.error?.message]);
       if (!isRoot) {
         const material = body.messages.findLast(message => message.role === "user").content;
-        if (JSON.stringify(material).includes("Independent task preparation"))
+        if (JSON.stringify(material).includes("Independent task preparation")) {
+          const prepared=JSON.parse(typeof material==='string'?material:material.map(p=>p.text??'').join('\n'));
+          assert.match(prepared.instruction,/Preparation only/);
+          assert.equal(prepared.assignment,undefined);assert.equal(prepared.implementationAdvice,undefined);
           return {text:"Check the original requirement against the frozen candidate."};
+        }
         const text = typeof material === "string" ? material : material.map(p => p.text ?? "").join("\n");
         const context = JSON.parse(text);
+        assert.match(context.instruction,/complete independent review/);
+        assert.equal(context.assignment.text,'Review the exact candidate against the original task.');
+        assert.equal(context.implementationAdvice.text,'','independent review never receives leader advice');
+        assert.ok(body.messages.some(m=>m.role==='assistant'&&JSON.stringify(m.content).includes('Check the original requirement against the frozen candidate.')),'formal review reuses same-session preparation');
         reviewerGrant = names;
         reviewedArtifact = context.execution.reviewArtifact;
         if (scenario === "counterexample" && body.model === reviewer)
@@ -206,6 +214,9 @@ for (const scenario of ["pass", "missing", "stale", "denied", "counterexample", 
         const call = readRequests(f.home, task).find(call => call.id === receipt.requestId);
         assert.ok(call?.sent && call.status === "completed", evidence);
         assert.equal(call.role, "member:" + dispatchId);
+        const preparedCall=readRequests(f.home,task).find(r=>r.role===call.role&&r.phase==='worker-prepare');
+        assert.ok(preparedCall?.status==='completed');
+        assert.equal(preparedCall.projectSend.sessionId,call.projectSend.sessionId,'same reviewer session preserves preparation');
         assert.equal(call.transport.requestOrigin, origins[reviewer]);
         assert.equal(call.transport.responseOrigin, origins[reviewer]);
         assert.equal(receipt.candidateVersion, reviewedArtifact.version);

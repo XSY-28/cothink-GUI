@@ -1,3 +1,4 @@
+import {revisedFailureRoute} from './project-route-revision.js';
 export {completedContinuationEvidence} from './project-review-evidence.js';
 import {restorationPaths} from './work-changes.js';
 import {inspectRepairVerification,inspectUnspentRepair} from './project-route.js';
@@ -27,7 +28,8 @@ export async function checkedRouteAcceptance(versioning,step,row) {
 }
 
 /** Reclassify only scope observations with verifiable original authority. */
-export async function recoverContinuationRoute({home,state,source,step,versioning,formalVersion,draft}) {
+export async function recoverContinuationRoute({home,state,source,step,versioning,formalVersion,draft,routeRevision}) {
+  if(routeRevision!==undefined)return revisedFailureRoute({home,state,source,step,versioning,draft,routeRevision});
   if(step.route?.status==='blocked'&&draft&&await inspectUnspentRepair({home,versioning,route:step.route,step,record:readTask(home,step.route.taskId),draft}))return {...structuredClone(step.route),status:'repair'};
   const inputOnlyFailure=await incompleteInput({home,state,source,step,versioning,formalVersion});
   if(inputOnlyFailure)return {status:'resolved',inputOnlyFailure};
@@ -132,7 +134,7 @@ export async function admitContinuationRestore({home,host,binding,input,versioni
     throw problem('CONTINUATION_AUTH','恢复输入不属于原保存版本与本次授权');
   if(restored.conflicts.length||!isDeepStrictEqual(input.scope,restored.paths))
     throw problem('RESTORE_CONFLICT','恢复路径或正式文件已变化');
-  const route=await recoverContinuationRoute({home,state,source:readTask(home,ref.sourceRootTaskId),step,versioning,formalVersion:binding.startVersion,draft:ref.draft})??step.route;
+  const route=await recoverContinuationRoute({home,state,source:readTask(home,ref.sourceRootTaskId),step,versioning,formalVersion:binding.startVersion,draft:ref.draft,routeRevision:ref.routeRevision})??step.route;
   if((route?.scopeRestoration||route?.inputOnlyFailure)&&root.operationAuthorization.mode!=='user')throw problem('CONTINUATION_AUTH','旧判断须明确手动继续');
   const verification=route?.status==='repair'?await inspectRepairVerification({versioning,route,step,
     record:readTask(home,route.taskId),draft:ref.draft}):null;
@@ -143,7 +145,7 @@ export async function admitContinuationRestore({home,host,binding,input,versioni
 }
 export async function bindContinuationRoute({home,host,binding,change,versioning}) {
   const state=host.read(),{ref,root,step}=restorationAuthority(home,state,binding),storedRoute=step.route;
-  const recovered=await recoverContinuationRoute({home,state,source:readTask(home,ref.sourceRootTaskId),step,versioning,formalVersion:binding.startVersion,draft:ref.draft});
+  const recovered=await recoverContinuationRoute({home,state,source:readTask(home,ref.sourceRootTaskId),step,versioning,formalVersion:binding.startVersion,draft:ref.draft,routeRevision:ref.routeRevision});
   const route=recovered??storedRoute;
   if(recovered?.scopeRestoration||recovered?.inputOnlyFailure) {
     if(root.operationAuthorization.mode!=='user')throw problem('CONTINUATION_AUTH','旧恢复范围判断须明确手动继续');
@@ -234,7 +236,7 @@ export async function continuationObservations(versioning,source,draft,checks,ho
         reject('candidate_changed');continue;
       }
       result.commands.push({requestId:tool.requestId,recordedCommand:tool.kernelInput.command,
-        observedVersion:receipt.privateVersion,candidate:draft.version,outputRef:receipt.outputRef,
+        observedVersion:receipt.privateVersion,candidate:draft.version,sourceOutputAccess:'not_granted',
         exitCode:0,checks:structuredClone(checks),execution:structuredClone(environment(current.execution))});
     } catch {reject('evidence_unavailable');}
   }

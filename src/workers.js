@@ -1,3 +1,4 @@
+import {reviewInstruction} from './project-review-retraction.js';
 import {restorationPaths} from "./project-continuation.js";
 import { formalProcessSource } from "./process-check.js";
 import { formalCompletionFeedback } from "./project-collaboration-evidence.js";
@@ -573,7 +574,7 @@ export async function runWork({
           ...(unified?{turnConstraints:task.record.project.constraints}:{}),
           ...(m.effectMaterial && !preparation ? {effectMaterial:m.effectMaterial} : {}),
           ...(m.reviewArtifact ? {reviewArtifact:m.reviewArtifact, reviewKind:m.record.reviewKind,
-            ...(!preparation ? {reviewInstruction:"Finish with a JSON object containing verdict (pass/reject/uncertain) and observation (specific candidate evidence or counterexample). No prose outside JSON. For rejection solely on the absence of an exact literal, specify counterexample:{kind:'missing_text',path,text}. To refute it, include refutesRequestId and evidence:{path,quote} showing that exact literal on this candidate. Other objections require repair and re-review."} : {})} : {}),
+            ...(!preparation ? {reviewInstruction} : {})} : {}),
           ...(!preparation && m.routeEvidence ? {diagnosis:m.routeEvidence} : {}),
           ...(!preparation && m.groupTools ? {directReports:directReports(m), registeredWork:staff.works(task.record.id,m.binding.role),
             ...(unified?{modelRoutes:[...projectRoutes.values()].filter(fact=>staff.list().find(position=>position.id===m.record.staffId)?.models.includes(fact.identity)),budget:projectRoutingBudget(task,m.binding.role)}:{}),

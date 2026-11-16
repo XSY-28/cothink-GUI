@@ -247,7 +247,7 @@ export function createProjectRouteRequests({host,binding,issuedSends,checkBindin
     if(!judge)routeError('The bound read-only judgment tool is unavailable; preserve the paused route');
     const facts={projectId:state.id,stepId:step.id,revision:step.revision,kind:route.kind,
       candidate:route.candidate,privateVersion:route.privateVersion,changeId:route.changeId,
-      evidence:route.evidence,allowedRepairScope:step.scope,goal:state.goal,stepGoal:step.goal,
+      evidence:route.evidence,routeRevision:route.routeRevision,allowedRepairScope:step.scope,goal:state.goal,stepGoal:step.goal,
       originalRequest:owned.task.record.input};
     const instruction='You are the bound one-use read-only route judge for this paused project route. Preserve the original user goal and constraints in the conversation. Respond in the user’s language. '+
       'This single request can only call project_route_judge, which records a discriminator and runs the existing host read-only experiment on the exact frozen candidate. '+

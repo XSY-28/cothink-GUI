@@ -347,3 +347,44 @@ test("a subgroup may submit its own candidate for review but cannot look up a si
     "author",
   );
 });
+
+async function retractionFixture() {
+ const s=setup(),session='review-session',dispatch='same-reviewer';
+ const old=await s.review(dispatch,'claude-sonnet-4-5',undefined,{verdict:'reject',observation:'A claimed reachable input state violates the contract.'},
+  {projectSend:{sessionId:session,dispatchId:dispatch,workId:'review-fixed',feedback:0}});
+ const prior=s.calls.find(c=>c.id===old.requestId),call=structuredClone(prior);
+ Object.assign(call,{id:'explicit-retraction',phase:'worker-feedback',text:JSON.stringify({verdict:'pass',observation:'The earlier state is unreachable under the verified input gate.',retractsRequestId:old.requestId,retractionReason:'My prior behavioral objection required an unreachable input state.'})});
+ call.projectSend.feedback=1;s.calls.push(call);s.state.callIntents.push({id:call.id,taskId:'task',role:call.role});
+ const finish=()=>completeProjectReview(s.host,{memberId:dispatch,callId:call.id,readOnly:true,reviewVersion:'fixed',status:'completed'},s.task,s.v);
+ return {...s,old,prior,call,finish};
+}
+test('same reviewer explicitly withdraws its own same-candidate rejection after completed feedback without deleting it',async()=>{
+ const s=await retractionFixture(),before=structuredClone(s.old),r=await s.finish();
+ assert.equal(r.retractsRequestId,s.old.requestId);assert.equal(r.retractionEvidence.sessionId,'review-session');
+ assert.deepEqual(s.old,before);assert.equal(s.verify().length,2);
+});
+for(const [name,mutate]of[
+ ['plain pass',s=>{const v=JSON.parse(s.call.text);delete v.retractsRequestId;s.call.text=JSON.stringify(v);}],
+ ['no explicit reason',s=>{const v=JSON.parse(s.call.text);delete v.retractionReason;s.call.text=JSON.stringify(v);}],
+ ['different referenced rejection',s=>{const v=JSON.parse(s.call.text);v.retractsRequestId='another-reject';s.call.text=JSON.stringify(v);}],
+ ['different session',s=>s.call.projectSend.sessionId='other'],
+ ['different reviewer dispatch',s=>s.call.projectSend.dispatchId='other'],
+ ['different work',s=>s.call.projectSend.workId='other'],
+ ['no new feedback',s=>s.call.projectSend.feedback=0],
+ ['ordinary worker not feedback',s=>s.call.phase='worker'],
+ ['older request order',s=>{s.calls.splice(s.calls.indexOf(s.call),1);s.calls.unshift(s.call);}],
+ ['unknown old rejection',s=>s.prior.status='outcome_unknown'],
+ ['unsent old rejection',s=>s.prior.sent=false],
+ ['truncated old rejection',s=>s.prior.response.stopReason='length'],
+ ['tampered old candidate material',s=>s.prior.payload={messages:[]}],
+ ['tampered old observation',s=>s.prior.text=JSON.stringify({verdict:'reject',observation:'different'})],
+ ['different exact candidate receipt',s=>s.old.candidateVersion='another'],
+ ['different reviewer receipt',s=>s.old.reviewer='another'],
+])test('retraction cannot clear rejection: '+name,async()=>{
+ const s=await retractionFixture();mutate(s);const r=await s.finish();assert.equal(r.retractsRequestId,undefined);
+ // Candidate receipt corruption cannot be used as a successful retraction either.
+ if(name!=='different exact candidate receipt')assert.throws(()=>s.verify(),/未处理的评审反例/);
+});
+for(const [name,patch]of[['unknown',{status:'outcome_unknown'}],['unsent',{sent:false}],['length',{response:{stopReason:'length'}}],['changed model',{actualModel:{provider:'fixture',modelId:'other'}}]])test('incomplete or changed reviewer never records retraction: '+name,async()=>{
+ const s=await retractionFixture();Object.assign(s.call,patch);await assert.rejects(s.finish(),/completed candidate/);assert.throws(()=>s.verify(),/未处理的评审反例/);
+});

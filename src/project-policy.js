@@ -1,3 +1,4 @@
+import {createSettledRequestFacts} from './settled-request-facts.js';
 import {checkedRouteAcceptance,restoredScopeGrant} from './project-completed-continuation.js';
 import {assertProjectRouteScope as ranges,assertProjectLiveStep as live,recordRouteObservation,runProjectRoute,createProjectRouteRequests,inspectRepairVerification} from './project-route.js';
 export {recordRouteObservation,runProjectRoute} from './project-route.js';
@@ -29,7 +30,7 @@ function checkBinding(state, binding) {
 
 
 export function createProjectPolicy({ host, binding, staff, home }) {
-  const pendingEffects = new Map();
+  const pendingEffects = new Map(), settledFacts = createSettledRequestFacts(home);
   const issuedSends = new WeakMap();
   const {boundJudgment,projectRequestContext,admitToolCall,authorizeProjection,routeNeedsDecision}=createProjectRouteRequests({host,binding,issuedSends,checkBinding});
   const processStages = new WeakMap();
@@ -472,8 +473,7 @@ export function createProjectPolicy({ host, binding, staff, home }) {
     return assignment;
   }
 
-  // The cause comes from the host-created stage or the recorded provider response
-  // whose tool results Pi is now consuming. A new transport UUID is never a new turn.
+  // Causes bind original host stages/responses, never a new transport UUID.
   function assertProcessBudget(needed, state = host.read()) {
     host.assertOwned();
     checkBinding(state, binding);
@@ -705,13 +705,12 @@ export function createProjectPolicy({ host, binding, staff, home }) {
       if(runningPeer&&native&&prior.role===native.creatorRole)continue;
       if (workId && detail.workId && workId !== detail.workId &&
           (runningPeer || (oldAssignment?.readOnly && current?.readOnly))) continue;
-      // Known, separate modern roles may coordinate an unknown worker without
-      // claiming its work. Legacy actions with no provable target remain held.
+      // Separate roles still require a provable work scope.
       const oldWork = workId && oldStep?.works?.find((w) => w.id === workId);
       const oldScope = prior.scope?.length?prior.scope:oldAssignment?.scope?.length ? oldAssignment.scope : oldWork?.scope ?? oldStep?.scope;
       const scope = native?.scope?.length?native.scope:current?.scope?.length ? current.scope : currentWork?.scope ?? step.scope;
       if (oldScope?.length && scope?.length && !projectScopesOverlap(oldScope, scope)) continue;
-      const original = localCalls.get(prior.id) ?? originalRequest(prior);
+      const original = localCalls.get(prior.id) ?? settledFacts(prior);
       if (!original?.sent || ["in_flight", "preparing", "outcome_unknown"].includes(original.status))
         fail("PROJECT_IDENTITY_HELD", "Prior unresolved project request " + prior.id + "; inspect it without replay");
     }

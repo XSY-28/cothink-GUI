@@ -1,3 +1,5 @@
+import {prepareFinalVisualParticipation,finalVisualCandidates} from './project-final-visual-participation.js';
+import {isContinuationReservation,assertContinuationIntents,assertConfirmedProjectState} from './project-continuation-reservation.js';
 import { loadInputMaterials } from "./context.js";
 import {guiTurnIntent} from "./gui-turn-options.js";
 import { randomUUID } from 'node:crypto';
@@ -34,12 +36,7 @@ export function completedDelivery(state) {
     state.delivery.version===state.version&&state.delivery.revision===state.revision;
 }
 
-export function assertConfirmedProjectState(proposal,{repo,version,state,expectedRevision}) {
-  if(proposal.canonicalRepo!==repo||proposal.version!==version||(state?.revision??null)!==(expectedRevision??null))
-    throw problem("PROPOSAL_STALE","Confirmed project version/revision changed before dispatch");
-  if(proposal.reuseCompletedDelivery&&!completedDelivery(state))
-    throw problem("PROPOSAL_STALE","已交付状态已变化，无法只沿用已有成果。请重新核对。");
-}
+export {assertConfirmedProjectState} from './project-continuation-reservation.js';
 
 export function workConfirmationBlocker(source) {
   const {proposal,frozenConfig}=source;
@@ -135,6 +132,7 @@ export async function executeConfirmed(task,source,reservation) {
     frozenConfigRef:{taskId:task.record.id,field:'frozenConfig',sha256:digest(task.record.frozenConfig)},
     contextRef:{taskId:task.record.id,field:'handoffContext',sha256:digest(task.record.handoffContext)},status:'intent',childTaskIds:[]};
   task.save();
+  const finalVisual=await prepareFinalVisualParticipation(task,source,reservation);
   const control=new AbortController();let resolveSettled;
   const settled=new Promise(resolve=>{resolveSettled=resolve;});
   task.rootOwner.registerExecution({commandId:reservation.commandId,cancel:()=>control.abort(),settled});
@@ -162,7 +160,7 @@ export async function executeConfirmed(task,source,reservation) {
         task.finish("partial","正式交付来源尚不能核验："+error.message);
         return task;
       }
-      if (p.collaboration?.length) collaborationCandidates=formalCollaborationCandidates(task,result.state,delivery.sources);
+      if (p.collaboration?.length) collaborationCandidates=finalVisual?finalVisualCandidates(finalVisual,result.state):formalCollaborationCandidates(task,result.state,delivery.sources);
       if(delivery.visualError){
         task.finish("partial",delivery.visualError);
         return task;
@@ -202,27 +200,31 @@ export async function executeConfirmed(task,source,reservation) {
   }finally{try { await task.rootOwner.processCheck.close(); } finally { resolveSettled(); }}
 }
 
-/** Explicit host/user authorization, separate from a model's checkedProposal. */
-export async function reserveFileContinuation({home,sessionId,sourceRootTaskId,draft,submissionId,
+/** Host/user authorization, never model authority. */
+export async function reserveFileContinuation({home,sessionId,sourceRootTaskId,draft,routeRevision,visualRevision,submissionId,
   authorizationSource,expectedRevision,expectedFormalVersion,source:liveSource,save}) {
   const source=liveSource??readTask(home,sourceRootTaskId);
   if(source.id!==sourceRootTaskId||source.sessionId!==sessionId||source.flow!=='unified')
     throw problem('CONTINUATION_SOURCE','原任务不在当前会话');
-  if(source.fileContinuationIntent)return source.fileContinuationIntent;
+  if(source.fileContinuationIntent){
+    assertContinuationIntents(source,{routeRevision,visualRevision});
+    return source.fileContinuationIntent;
+  }
   if(authorizationSource?.kind!=='file_continuation'||authorizationSource.sourceTaskId!==source.id||
     !['user','preauthorized_once'].includes(authorizationSource.mode))throw problem('CONTINUATION_AUTH','缺少明确继续授权');
   if(authorizationSource.mode==='preauthorized_once'&&(!source.constraints.allowFileContinuation||source.operationAuthorization?.kind==='file_continuation'))
     throw problem('CONTINUATION_AUTH','单次预授权不存在或已经消费');
+  if((routeRevision!==undefined||visualRevision!==undefined)&&authorizationSource.mode!=='user')throw problem('CONTINUATION_AUTH','New diagnosis requires explicit user authorization');
   const {inspectFileContinuation}=await import('./project-continuation.js');
-  const checked=await inspectFileContinuation({home,sourceRootTaskId,draft});
+  const checked=await inspectFileContinuation({home,sourceRootTaskId,draft,routeRevision,visualRevision});
   if(checked.requiresManual&&authorizationSource.mode==='preauthorized_once')throw problem('CONTINUATION_AUTH','暂停路线须明确手动继续');
   if(!checked.eligible)throw Object.assign(problem('CONTINUATION_BLOCKED',checked.blockers.map(b=>b.message+' ['+b.sourceId+']').join('\n')),{blockers:checked.blockers});
   if(expectedRevision!==checked.revision||expectedFormalVersion!==checked.formalVersion)
     throw problem('PROPOSAL_STALE','继续确认后的项目修订或正式版本已变化');
-  const continuation={sourceRootTaskId,stepId:checked.stepId,requestIds:checked.requestIds,draft:checked.draft};
+  const continuation={sourceRootTaskId,stepId:checked.stepId,requestIds:checked.requestIds,draft:checked.draft,...(visualRevision===undefined?{}:{visualRevision:structuredClone(visualRevision)}),...(routeRevision===undefined?{}:{routeRevision:structuredClone(routeRevision)})};
   const proposal={...structuredClone(source.proposal),action:checked.stepId?'revise':'resume',
     projectId:checked.projectId,expectedRevision:checked.revision,version:checked.formalVersion,
-    reuseCompletedDelivery:checked.stepId===null};
+    reuseCompletedDelivery:checked.stepId===null&&!checked.visualOnly};
   const reservation={taskId:randomUUID(),commandId:randomUUID(),submissionId,continuation,
     authorizationSource:structuredClone(authorizationSource),proposal,
     budgetSource:{sourceTaskId:source.id,consumed:(source.rootRequests??[]).filter(r=>!r.notSent).length,
@@ -252,21 +254,10 @@ export async function fileContinuationState({home,source,reservation,receiptOnly
   await recheckFileContinuation(home,source,reservation);
   return {task:null,mayCreate:true};
 }
-function reservationIdentity(value) {
-  if(!value)return null;
-  const {status,consumedByTaskId,...identity}=value;return identity;
-}
-function isContinuationReservation(source,reservation) {
-  return reservation?.continuation?.sourceRootTaskId===source.id&&
-    ['reserved','consumed'].includes(reservation.status)&&
-    /^[\da-f-]{36}$/.test(reservation.taskId)&&/^[\da-f-]{36}$/.test(reservation.commandId)&&
-    (!source.fileContinuationIntent?.consumedByTaskId||source.fileContinuationIntent.consumedByTaskId===reservation.taskId)&&
-    digest(reservationIdentity(source.fileContinuationIntent))===digest(reservationIdentity(reservation));
-}
 export async function recheckFileContinuation(home,source,reservation) {
   if(!isContinuationReservation(source,reservation))throw problem('CONTINUATION_AUTH','缺少原继续预留');
   const {inspectFileContinuation}=await import('./project-continuation.js');
-  const checked=await inspectFileContinuation({home,sourceRootTaskId:source.id,draft:reservation.continuation.draft});
+  const checked=await inspectFileContinuation({home,sourceRootTaskId:source.id,draft:reservation.continuation.draft,routeRevision:reservation.continuation.routeRevision,visualRevision:reservation.continuation.visualRevision});
   if(!checked.eligible||checked.revision!==reservation.proposal.expectedRevision||
     checked.formalVersion!==reservation.proposal.version||digest(checked.requestIds)!==digest(reservation.continuation.requestIds)||
     checked.stepId!==reservation.continuation.stepId)
