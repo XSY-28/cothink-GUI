@@ -72,9 +72,9 @@ import {projectChatState} from '../src/project.js';
 test('explicit continuation restores saved bytes and accepts with original unknown untouched',async t=>{
  const plan={goal:'Change a.txt',scope:['a.txt'],readScope:['a.txt'],deliverables:['a.txt'],checks:[{command:'node',args:['-e',"if(require('fs').readFileSync('a.txt','utf8')!=='changed A\\n')process.exit(1)"]}]};
  const tool=(name,args)=>({toolCalls:[{name,args}]});
- const replies=[tool('start_work',{action:'start',reason:'edit',plan}),tool('read',{path:'a.txt'}),tool('edit',{path:'a.txt',edits:[{oldText:'base A',newText:'changed A'}]}),null,
+ const replies=[tool('start_work',{action:'start',reason:'edit',plan}),tool('read',{path:'a.txt'}),tool('edit',{path:'a.txt',edits:[{oldText:'base A',newText:'changed A'}]}),tool('bash',{command:"node -e \"if(!require('fs').readFileSync('a.txt','utf8').includes('changed A'))process.exit(1)\""}),null,
    tool('read',{path:'a.txt'}),tool('accept_change',{}),tool('accept_change',{}),{text:'Changed A'},{text:'Delivered'}];
- const f=await fixture(t,(_,n,req,res)=>{if(n===4){res.destroy();return null;}return replies[n-1]??{text:'Delivered'};});
+ const f=await fixture(t,(_,n,req,res)=>{if(n===5){res.destroy();return null;}return replies[n-1]??{text:'Delivered'};});
  const repo=repository(t),base=await projectSession(t,repo,f);
  const proposal=await runProjectTurn({...base,input:'Change a.txt.',budget:{maxCalls:15}}),source=await confirmProject(base,proposal);
  assert.equal(source.record.status,'outcome_unknown',source.record.error);
@@ -95,10 +95,17 @@ test('explicit continuation restores saved bytes and accepts with original unkno
    },
    budget:reservation.budgetSource.remaining,confirmedOperation:{source:saved,reservation,execute:task=>executeConfirmed(task,saved,reservation)}});
  assert.equal(root.record.status,'completed',root.record.error);
+ const continuedChild=readTask(f.home,root.record.projectOperation.childTaskIds[0]);
+ const observations=continuedChild.project.continuationEvidence.observations;
+ assert.equal(observations.commands.length,1,JSON.stringify(observations));
+ assert.equal(observations.fixedChecksRequired,true);
+ assert.equal(continuedChild.tools.filter(t=>t.name==='bash').length,0,'fixture consumes evidence without optional command replay');
+ assert.equal(continuedChild.work.finalCheck.status,'passed','new formal combination check is still required');
+ assert.match(JSON.stringify(f.calls[5].body),/observations/,'first resumed request receives candidate-bound evidence');
  assert.equal((await creationReceipt).task.id,reservation.taskId,'consumed receipt resolves before execute initializes the operation');
  for(const claim of original)assert.equal(readRequests(f.home,readTask(f.home,claim.taskId)).find(r=>r.id===claim.requestId).status,'outcome_unknown');
- assert.equal(f.calls.length,8);
- assert.match(JSON.stringify(f.calls[5].body.messages),/changed A/);
+ assert.equal(f.calls.length,9);
+ assert.match(JSON.stringify(f.calls[6].body.messages),/changed A/);
  const v=await createVersioning({home:f.home,project:repo.project,readOnly:true});
  try {const current=(await v.inspect()).version;assert.equal(Buffer.from((await v.read({version:current,path:'a.txt'})).contentBase64,'base64').toString(),'changed A\n');}finally{await v.close();}
  const state=(await projectChatState(f.home,repo.project)).state;

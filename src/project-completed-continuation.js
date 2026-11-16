@@ -1,9 +1,10 @@
+import {revisedFailureRoute} from './project-route-revision.js';
 export {completedContinuationEvidence} from './project-review-evidence.js';
 import {restorationPaths} from './work-changes.js';
 import {inspectRepairVerification,inspectUnspentRepair} from './project-route.js';
 import {isDeepStrictEqual} from 'node:util';
 import {readTask,readRequest,problem} from './task.js';
-import {projectScopesOverlap,inScope} from './versioning.js';
+import {createVersioning,projectScopesOverlap,inScope} from './versioning.js';
 import {continuationLineage,confirmedContinuation,continuedTask} from './project-continuation.js';
 
 export function completedContinuationCovers(state,currentTaskId,proofs,{taskId,requestId}) {
@@ -27,7 +28,8 @@ export async function checkedRouteAcceptance(versioning,step,row) {
 }
 
 /** Reclassify only scope observations with verifiable original authority. */
-export async function recoverContinuationRoute({home,state,source,step,versioning,formalVersion,draft}) {
+export async function recoverContinuationRoute({home,state,source,step,versioning,formalVersion,draft,routeRevision}) {
+  if(routeRevision!==undefined)return revisedFailureRoute({home,state,source,step,versioning,draft,routeRevision});
   if(step.route?.status==='blocked'&&draft&&await inspectUnspentRepair({home,versioning,route:step.route,step,record:readTask(home,step.route.taskId),draft}))return {...structuredClone(step.route),status:'repair'};
   const inputOnlyFailure=await incompleteInput({home,state,source,step,versioning,formalVersion});
   if(inputOnlyFailure)return {status:'resolved',inputOnlyFailure};
@@ -132,7 +134,7 @@ export async function admitContinuationRestore({home,host,binding,input,versioni
     throw problem('CONTINUATION_AUTH','恢复输入不属于原保存版本与本次授权');
   if(restored.conflicts.length||!isDeepStrictEqual(input.scope,restored.paths))
     throw problem('RESTORE_CONFLICT','恢复路径或正式文件已变化');
-  const route=await recoverContinuationRoute({home,state,source:readTask(home,ref.sourceRootTaskId),step,versioning,formalVersion:binding.startVersion,draft:ref.draft})??step.route;
+  const route=await recoverContinuationRoute({home,state,source:readTask(home,ref.sourceRootTaskId),step,versioning,formalVersion:binding.startVersion,draft:ref.draft,routeRevision:ref.routeRevision})??step.route;
   if((route?.scopeRestoration||route?.inputOnlyFailure)&&root.operationAuthorization.mode!=='user')throw problem('CONTINUATION_AUTH','旧判断须明确手动继续');
   const verification=route?.status==='repair'?await inspectRepairVerification({versioning,route,step,
     record:readTask(home,route.taskId),draft:ref.draft}):null;
@@ -143,7 +145,7 @@ export async function admitContinuationRestore({home,host,binding,input,versioni
 }
 export async function bindContinuationRoute({home,host,binding,change,versioning}) {
   const state=host.read(),{ref,root,step}=restorationAuthority(home,state,binding),storedRoute=step.route;
-  const recovered=await recoverContinuationRoute({home,state,source:readTask(home,ref.sourceRootTaskId),step,versioning,formalVersion:binding.startVersion,draft:ref.draft});
+  const recovered=await recoverContinuationRoute({home,state,source:readTask(home,ref.sourceRootTaskId),step,versioning,formalVersion:binding.startVersion,draft:ref.draft,routeRevision:ref.routeRevision});
   const route=recovered??storedRoute;
   if(recovered?.scopeRestoration||recovered?.inputOnlyFailure) {
     if(root.operationAuthorization.mode!=='user')throw problem('CONTINUATION_AUTH','旧恢复范围判断须明确手动继续');
@@ -197,4 +199,61 @@ export async function bindContinuationRoute({home,host,binding,change,versioning
     delete active.judgmentCall;
     return structuredClone(active);
   });
+}
+
+/** Observations only: never authorizes skipping a current fixed check or review. */
+export async function continuationObservations(versioning,source,draft,checks,home,execution) {
+  const owned=!versioning;
+  versioning??=await createVersioning({home,project:source.work.root,readOnly:true,execution});
+  try {
+  const result={candidate:draft.version,commands:[],invalidated:[],fixedChecksRequired:true};
+  const current=await versioning.inspect();
+  const environment=({workContainers,checkContainers,...config}={})=>config;
+  const conditions=!!draft.baseVersion&&current.version===draft.baseVersion&&isDeepStrictEqual(source.project?.checks,checks)&&
+    source.work?.execution?.network==='none'&&isDeepStrictEqual(environment(source.work.execution),environment(current.execution));
+  for(const tool of source.tools??[]) {
+    if(tool.name!=='bash'||!tool.requestId)continue;
+    const reject=reason=>result.invalidated.push({requestId:tool.requestId,reason});
+    if(!conditions){reject('checks_or_environment_changed');continue;}
+    if(tool.status!=='completed'||tool.kernelDispatched!==true||tool.exitCode!==0||
+      !tool.kernelInput?.expectedVersion||typeof tool.kernelInput.command!=='string'){
+      reject('not_a_completed_observation');continue;
+    }
+    try {
+      const start=source.work.operations?.find(op=>op.action==='command_start'&&op.requestId===tool.requestId);
+      const owner=source.work.changes?.find(c=>c.changeId===start?.changeId);
+      if(!owner||owner.changeId!==draft.changeId){reject('command_source_unbound');continue;}
+      const change=await versioning.inspect({changeId:owner.changeId});
+      if(change.actor!==owner.actor||change.privateVersion!==draft.version){reject('command_source_changed');continue;}
+      const receipt=await versioning.inspect({requestId:tool.requestId});
+      if(receipt.status!=='completed'||receipt.requestId!==tool.requestId||receipt.exitCode!==0||
+        !receipt.privateVersion||!Array.isArray(receipt.changedFiles)||receipt.changedFiles.length){
+        reject('receipt_not_successful_or_changed_source');continue;
+      }
+      const before=await versioning.inspect({fromVersion:tool.kernelInput.expectedVersion,toVersion:receipt.privateVersion});
+      const restored=await versioning.inspect({fromVersion:receipt.privateVersion,toVersion:draft.version});
+      if(!Array.isArray(before.files)||before.files.length||!Array.isArray(restored.files)||restored.files.length){
+        reject('candidate_changed');continue;
+      }
+      result.commands.push({requestId:tool.requestId,recordedCommand:tool.kernelInput.command,
+        observedVersion:receipt.privateVersion,candidate:draft.version,sourceOutputAccess:'not_granted',
+        exitCode:0,checks:structuredClone(checks),execution:structuredClone(environment(current.execution))});
+    } catch {reject('evidence_unavailable');}
+  }
+  return result;
+  } finally {if(owned)await versioning.close();}
+}
+
+export function continuationToolHistory(source) {
+  return (source.tools??[]).map(({snapshot,tools,kernelInput,...tool})=>({
+        ...tool,
+        // Runtime sources and tool registrations already belong to the frozen
+        // runtime. Restored files are read from their public version, not copied
+        // into a new prompt as internal snapshots or edit payloads.
+        ...(kernelInput?.command?{command:kernelInput.command,args:kernelInput.args??[]}:{}),
+        ...(tool.name==='resource_exec'&&tool.result?{result:{...tool.result,
+          files:Object.keys(tool.result.files??{}),
+          edits:(tool.result.edits??[]).map(({contentBase64,...edit})=>edit),
+        }}:{}),
+      }));
 }

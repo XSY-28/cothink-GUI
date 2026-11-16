@@ -26,14 +26,14 @@ test('saved single-use continuation choice is explicit, frozen and never inferre
 test('continuation dialog reads eligibility before explicit execution and exposes blockers',async()=>{
  for(const eligible of [false,true])for(const inputOnly of [false,true]) await modalEnvironment(async({root,container,FileContinuation})=>{
   let reads=0,writes=0;const draft={taskId:'saved',changeId:'change',baseVersion:'base',version:'fixed'};
-  const facts={eligible,inputOnly,remainingRepair:inputOnly?undefined:["a.txt","b.txt"],draft,revision:2,formalVersion:'formal',remainingBudget:{maxCalls:4},
+  const facts={eligible,inputOnly,creditExhausted:true,remainingRepair:inputOnly?undefined:["a.txt","b.txt"],draft,revision:2,formalVersion:'formal',remainingBudget:{maxCalls:4},
     blockers:eligible?[]:[{code:'PENDING_EFFECT',sourceId:'original-command',message:'外部写入尚未结清'}],models:['fixture/main · max']};
   await act(()=>root.render(React.createElement(FileContinuation,{turn:{taskId:'root'},
     onInspect:async()=>{reads++;return facts;},onContinue:async(t,f)=>{assert.deepEqual(f,facts);writes++;return {taskId:'next'};}})));
   await act(async()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='从保存成果继续').click());
   assert.equal(reads,1);assert.equal(writes,0);
   const dialog=container.querySelector('[role="dialog"]');assert.ok(dialog);
-  assert.match(dialog.textContent,/未知费用/);assert.match(dialog.textContent,inputOnly?/已保存输入版本/:/未验收草稿/);
+  assert.match(dialog.textContent,/未知费用/);assert.match(dialog.textContent,/先恢复 API 额度/);assert.match(dialog.textContent,inputOnly?/已保存输入版本/:/未验收草稿/);
   if(!inputOnly)assert.match(dialog.textContent,/仍剩 1 次修复写入。允许路径：a.txt、b.txt/);
   const confirm=[...dialog.querySelectorAll('button')].find(b=>b.textContent==='确认并继续一次');
   assert.equal(confirm.disabled,!eligible);

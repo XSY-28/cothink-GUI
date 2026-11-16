@@ -110,7 +110,9 @@ export function buildMemberTaskMaterial({ originalTask, project, assignment, imp
     ...(!reuseAssignment ? {answerSkills} : {}),
     ...(preparation ? {
       phase: "Independent task preparation",
-      instruction: execution.reviewArtifact
+      instruction: execution.reviewArtifact && execution.reviewKind !== "ordinary"
+        ? "Preparation only: briefly confirm the original user goal, current subgoal, exact candidate/base versions, read-only authority and a focused evidence plan. Do not perform the full review, enumerate defects or give a verdict yet. The supplied candidate diff identifies the scope; use reads only if essential to clarify that scope. Keep independent analysis and necessary code/test reads for the next review phase in this same session. Do not request or rely on the leader's prior conclusions."
+        : execution.reviewArtifact
         ? "Inspect the supplied candidate against the original task. Record your own observations, counterexamples and uncertainties before receiving any prior opinion. Use read for evidence from this exact version."
         : "Before receiving any assignment or advice, briefly explain the original goal, key relationships and explicit constraints, and any uncertainty about the file scope. Do not guess your assignment. Only read/search tools are available. Do not implement yet.",
     } : {
@@ -121,6 +123,8 @@ export function buildMemberTaskMaterial({ originalTask, project, assignment, imp
       } : {}),
       instruction: reuseAssignment
         ? "Continue the same assignment and frozen sources from this session. Keep the original user requirements. Apply the current authority and specific correction."
+        : execution.reviewArtifact && execution.reviewKind !== "ordinary"
+        ? "Now perform the complete independent review against the original user requirements and current subgoal. Start from the supplied exact candidate diff, inspect necessary related code/tests and preserve uncertainty; do not omit required validation. Reuse observations already established in this session rather than repeating unchanged reads. Keep the exact reviewInstruction output contract. Report task conflicts before continuing."
         : execution.reviewKind === "ordinary"
         ? "Compare your recorded observations with the proposed interpretation, preserving any disagreement. Base your judgment on the original task and the exact candidate."
         : "Compare the assignment and advice with your independent understanding and the original task. Report conflicts using report_task_conflict before continuing. Do not silently accept a changed task.",

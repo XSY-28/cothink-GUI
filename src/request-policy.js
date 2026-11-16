@@ -1,3 +1,4 @@
+import {quiesceRequest} from './request-quiesce.js';
 import { payloadImageHashes } from "./visual-preview.js";
 import { describeError, responseHeaders, observeResponse, assertFencedModelTransport, hostToolsOnlyPayload } from "./transport-diagnostics.js";
 import { randomUUID } from "node:crypto";
@@ -343,7 +344,17 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
               call.endedAt = new Date().toISOString();
               task.writeRequest(call);
               task.save();
+              if(call.transport.firstSseError?.error?.code==='credit_balance_exhausted'&&task.rootOwner){
+                const root=task.rootOwner.rootTask;
+                root.record.providerCreditStop={requestId:call.id,taskId:task.record.id,code:'credit_balance_exhausted'};root.save();
+                void task.rootOwner.stopAndDrain({cause:'provider-credit-exhausted'}).catch(error=>{root.record.localExecutionCloseError=error.message;root.save();});
+              }
             }
+            if(event.type==='done'&&message.stopReason==='length'&&message.content?.some(p=>p.type==='toolCall')) {
+              binding.error=problem('TRUNCATED_TOOL_CALL','Output limit interrupted a tool call; saved partial text and usage, no tool executed. Use a smaller edit in a new authorized turn.');
+              output.push({type:'error',reason:'error',error:failure(binding.error)});break;
+            }
+            if(event.type==='error')await quiesceRequest(task,call);
             output.push(event);
           }
           output.end();
@@ -360,6 +371,7 @@ export function createRequestPolicy({ getBinding, getSecrets = () => [], imageAu
               /* memory remains available to host recovery */
             }
           }
+          await quiesceRequest(task,call);
           output.push({ type: "error", reason: "error", error: failure(error) });
           output.end();
         } finally {

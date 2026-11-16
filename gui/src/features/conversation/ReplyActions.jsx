@@ -91,6 +91,7 @@ export function FileContinuation({turn, disabled, onInspect, onContinue}) {
               {facts.drafts.map(d=><option key={d.changeId} value={d.changeId}>{d.changeId} · {d.version.slice(0,12)}</option>)}
             </select>
           </label>}
+          {facts.creditExhausted&&<p>服务商额度已耗尽，本轮已停止。请先恢复 API 额度，再明确确认继续；不会自动续跑。</p>}
           {!!facts.remainingRepair?.length&&<p>沿用已完成的判断，仍剩 1 次修复写入。允许路径：{facts.remainingRepair.join("、")}；原检查仍须全部通过。</p>}
           <p>剩余模型请求：{facts.remainingBudget?.maxCalls==null?'未设上限':facts.remainingBudget.maxCalls}。此次授权只消费一次。</p>
           {!!facts.models?.length&&<p>沿用阵容：{facts.models.join('；')}</p>}

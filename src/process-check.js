@@ -24,12 +24,12 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
     if (stopped || root.record.status !== "running") throw problem("PROCESS_STOPPED", "Process checking is closed");
     if (failure) throw failure;
   };
-  function room(source) {
+  function room(source, needed=2) {
     const budget = root.record.budget;
     const claims = root.record.rootRequests.filter(request => !request.notSent).length;
-    if (budget.maxCost !== null || (budget.maxCalls !== null && claims + allowances.size + 2 > budget.maxCalls))
+    if (budget.maxCost !== null || (budget.maxCalls !== null && claims + allowances.size + needed > budget.maxCalls))
       throw problem("ROOT_BUDGET", "First delegation requires two available requests for the employee and mandatory process check");
-    source.task.projectPolicy?.assertProcessBudget(allowances.size + 2);
+    source.task.projectPolicy?.assertProcessBudget(allowances.size + needed);
   }
   function arm() {
     if (stopped || failure || inflight || !sources.size || timer !== undefined) return;
@@ -86,7 +86,8 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
     for (const report of reports) {
       if (known.has(report.id)) continue;
       known.add(report.id);
-      const source = [...sources].find(item => item.task.record.id === report.taskId);
+      const source = [...sources].find(item => item.snapshot().some(fact =>
+        fact.taskId === report.taskId && fact.memberId === report.memberId && fact.attempt === report.attempt));
       report.status = source?.isCurrent(report) ? "pending" : "stale";
       record().reports.push(report);
     }
@@ -198,7 +199,7 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
     return inflight;
   }
   return {
-    admit(source) {
+    admit(source, {restored=false} = {}) {
       guard();
       if (model) return {
         commit() {
@@ -211,7 +212,7 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
         release() {},
       };
       try {
-        room(source);
+        room(source,restored?1:2);
         const routes = [source.config.main, ...source.config.secondary];
         model = [...routes.slice(1), routes[0]].find(ref => {
           if (!source.task.projectRoutes?.some(route => route.available && route.identity === ref.provider + "/" + ref.modelId))
@@ -229,7 +230,7 @@ export function createProcessCheck(root, { now = Date.now, set = setTimeout, cle
         commit(memberId) {
           const taskId = source.task.record.id;
           allowances.set(phase, taskId);
-          allowances.set("member:" + memberId, taskId);
+          if(!restored)allowances.set("member:" + memberId, taskId);
           firstSource = source;
           sources.add(source);
           root.record.processCheck = { interval, status: "running", model, observations: [], reports: [] };

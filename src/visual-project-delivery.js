@@ -1,4 +1,5 @@
-import { readFileSync, realpathSync, lstatSync } from "node:fs";
+import {captureSupplement,validateCapturePlan,visualVerificationLayers,closeVisualProjection} from './visual-supplement.js';
+import { readFileSync, realpathSync, lstatSync, writeFileSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import { MAX_PNG } from "../scripts/visual-preview.mjs";
@@ -20,10 +21,21 @@ export function checkedCombinedVisual(home, record, receipt) {
       JSON.stringify(evidence.viewport) !== JSON.stringify(basis.input.viewport) ||
       JSON.stringify(evidence.frameTimesMs) !== JSON.stringify(basis.input.frameTimesMs) ||
       JSON.stringify(evidence.actions) !== JSON.stringify(basis.input.actions) ||
+      (basis.visualRevision && evidence.supplemental?.length !== basis.visualRevision.capturePlan.length) ||
       !evidence.visibility?.scope?.length || !evidence.visibility.scope.every(path=>inScope(path,basis.visibility.scope)) ||
       !basis.visibility.scope.every(path=>inScope(path,evidence.visibility.scope)) ||
       JSON.stringify(evidence.visibility.artifactPaths) !== JSON.stringify(basis.visibility.artifactPaths))
     return false;
+  if(basis.visualRevision){
+    const extra=evidence.supplemental,base=basis.input.frameTimesMs.length;
+    if(evidence.images.length!==base+extra.length||extra.some((item,i)=>{
+      const trace=evidence.captureRequests?.find(r=>r.requestId===item.requestId),fact=trace?.receipt;
+      return item.sourceVersion!==basis.version||item.label!==basis.visualRevision.capturePlan[i].label||
+        evidence.images[base+i]?.sha256!==item.sha256||evidence.images[base+i]?.supplementalRequestId!==item.requestId||
+        trace?.status!=='completed'||fact?.status!=='completed'||fact.exitCode!==0||
+        fact.requestId!==item.requestId||fact.privateVersion!==item.privateVersion||fact.changedFiles?.length!==0;
+    }))return false;
+  }
   const call = readRequest(home, record.id, requestId);
   const claim = record.rootRequests?.find(item => item.requestId === requestId && item.taskId === record.id &&
     item.stageId === stage.id && item.sessionId === stage.sessionId && item.status === "completed" && !item.notSent);
@@ -43,7 +55,11 @@ export async function verifyProjectVisual(host, state, previous, signal) {
   const { delivery } = state, model = task.record.frozenConfig.main;
   const input = projectVisualInput(state.workRequest, delivery.artifacts.map(item => item.path));
   const execution = state.steps[0].attempts.at(-1).execution;
+  const visualRevision=host.unified.continuation?.visualRevision;
+  const capturePlan=visualRevision?validateCapturePlan(visualRevision.capturePlan):null;
   const basis = {
+    ...(visualRevision?{visualRevision:structuredClone(visualRevision)}:{}),
+    nonvisualVerification:visualVerificationLayers(state),
     projectId: state.id, revision: state.revision, version: delivery.version,
     integrationRef: state.integrationRef, input, execution,
     approvedGoal: state.goal, originalTask: state.visualContract?.originalTask ?? state.originalGoal,
@@ -83,8 +99,12 @@ export async function verifyProjectVisual(host, state, previous, signal) {
   const toolCallId = "combined-visual-" + randomUUID();
   const receipt = { taskId: task.record.id, commandId: host.unified.commandId, basis, basisDigest,
     toolCallId, outputRef: null, requestId: null, error: null };
+  if(visualRevision&&previous)host.update(s=>{
+    const history=s.delivery.visualHistory??=[];
+    if(!history.some(r=>r.requestId===previous.requestId))history.push(structuredClone(previous));
+  });
   saveVisual(receipt);
-  let versioning, stage;
+  let versioning, stage,change;
   try {
     await task.preflightVisual({projectCwd:state.repo});
     guard();
@@ -94,7 +114,7 @@ export async function verifyProjectVisual(host, state, previous, signal) {
         current.execution?.image !== execution.image || current.execution?.network !== "none")
       throw problem("STALE_VISUAL", "正式版本或离线渲染环境在视觉验收前改变。");
     const readScope = [...new Set([...state.scope, ...(state.readScope ?? state.scope)])];
-    const change = await versioning.beginChange({requestId:randomUUID(), actor:"combined-visual",
+    change = await versioning.beginChange({requestId:randomUUID(), actor:"combined-visual",
       scope:[input.entry], readScope, intent:"Verify the final combined visual artifact", wait:false}, {signal});
     if (change.status !== "open" || change.baseVersion !== basis.version || change.privateVersion !== basis.version)
       throw problem("STALE_VISUAL", "无法在同一正式版本打开独立预览授权。");
@@ -106,9 +126,27 @@ export async function verifyProjectVisual(host, state, previous, signal) {
     const diff = await versioning.inspect({fromVersion:basis.version,toVersion:evidence.privateVersion});
     if (diff.files.length || diff.text || diff.binaryFiles.length)
       throw problem("VISUAL_SOURCE_CHANGED", "预览源码与正式版本不一致。");
-    const abandoned = await versioning.abandonChange(change.changeId, {requestId:randomUUID()});
-    if (abandoned.status !== "abandoned")
-      throw problem("STALE_VISUAL", "无法确认关闭仅用于截图的授权。");
+    if(capturePlan){
+      change.privateVersion=evidence.privateVersion;
+      const supplemental=await captureSupplement({versioning,change,plan:capturePlan,version:basis.version,
+        scope:readScope,signal,guard,record(row){
+          const rows=evidence.captureRequests??=[];const i=rows.findIndex(r=>r.requestId===row.requestId);
+          if(i<0)rows.push(row);else rows[i]=row;
+          const traces=task.record.tools??=[];let trace=traces.find(t=>t.requestId===row.requestId);
+          if(!trace){trace={name:'visual_capture',toolCallId:'capture-'+row.requestId,stageId:stage.id,requestId:row.requestId,
+            outputRef:row.requestId,changeId:row.changeId,kernelDispatched:true,kernelInput:row.input};traces.push(trace);}
+          Object.assign(trace,{status:row.status,exitCode:row.receipt?.exitCode??null,error:row.error??null});task.save();
+        }});
+      evidence.supplemental=supplemental.map(({data,...row})=>row);
+      for(const image of supplemental){
+        const path=join(task.home,'artifacts',task.record.id,evidence.outputRef,`${evidence.images.length}.png`);
+        writeFileSync(path,Buffer.from(image.data,'base64'),{mode:0o600});
+        evidence.images.push({path,sha256:image.sha256,supplementalRequestId:image.requestId});
+        material.content.push({type:'image',mimeType:'image/png',data:image.data});
+      }
+      evidence.privateVersion=change.privateVersion;task.save();
+    }
+    await closeVisualProjection(versioning,change,receipt);
     Object.assign(evidence, {integrationVersion:basis.version});
     stage.status = "completed";
     task.save();
@@ -147,6 +185,8 @@ export async function verifyProjectVisual(host, state, previous, signal) {
     task.save();
     throw problem("VISUAL_DELIVERY", receipt.error);
   } finally {
+    try { await closeVisualProjection(versioning,change,receipt); }
+    catch(error){(task.record.work.cleanupErrors??=[]).push(error.message);task.save();}
     try { saveVisual(receipt); }
     finally { if (!host.kernel) await versioning?.close(); }
   }

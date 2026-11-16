@@ -1,3 +1,6 @@
+import {inspectVisualRevision} from './project-visual-revision.js';
+import {savedInput} from './project-saved-input.js';
+import {stoppedMemberDraft} from './project-stopped-member-draft.js';
 import {restorationPaths} from './work-changes.js';
 export {restorationPaths} from './work-changes.js';
 export {admitContinuationRestore,bindContinuationRoute} from './project-completed-continuation.js';
@@ -71,26 +74,12 @@ export function continuedRequest(state,currentTaskId,requestId,proofs) {
   return completedContinuationCovers(state,currentTaskId,proofs,{requestId})||confirmedContinuation(state,currentTaskId)?.requestIds.includes(requestId)===true;
 }
 
-async function savedInput(state,step,record,v,version,changeId) {
-  const attempt=step.attempts.find(a=>a.taskId===record.id),work=record.work;
-  if(!attempt||record.rootTaskId!==attempt.rootTaskId||record.submissionId!==attempt.submissionId||
-    record.project?.id!==state.id||record.project.stepId!==step.id||record.project.commandId!==attempt.commandId||
-    work?.root!==state.repo||work.integrationRef!==state.integrationRef||work.startVersion!==attempt.startVersion||
-    !Array.isArray(work.changes)||work.changes.some(c=>!c.readOnly)||
-    !isDeepStrictEqual(record.project.scope,step.scope)||!isDeepStrictEqual(record.project.checks,step.checks))return null;
-  const saved=work.changes.findLast(c=>(!changeId||c.changeId===changeId)&&c.readOnly&&
-    (c.actor==='main'||c.actor==='result'&&c.changeId===work.resultChangeId)&&c.baseVersion===version&&c.privateVersion===version);
-  if(!saved)return null;
-  const fact=await v.inspect({changeId:saved.changeId});
-  if(!fact.readOnly||fact.actor!==saved.actor||fact.baseVersion!==version||fact.privateVersion!==version)return null;
-  return {taskId:record.id,changeId:saved.changeId,baseVersion:version,version};
-}
 
 
-export async function inspectFileContinuation({home,sourceRootTaskId,draft}) {
+export async function inspectFileContinuation({home,sourceRootTaskId,draft,routeRevision,visualRevision}) {
   const source=readTask(home,sourceRootTaskId),blockers=[];
   const add=(code,sourceId,message)=>blockers.push({code,sourceId,message});
-  const result={eligible:false,blockers,requestIds:[],stepId:null,draft:null,projectId:null,revision:null,formalVersion:null};
+  const result={eligible:false,requiresManual:!!source.providerCreditStop,creditExhausted:!!source.providerCreditStop,blockers,requestIds:[],stepId:null,draft:null,projectId:null,revision:null,formalVersion:null};
   if(source.flow!=='unified'||!source.projectOperation||!source.proposal?.canonicalRepo) {
     add('CONTINUATION_SOURCE',source.id,'原任务没有可核对的项目执行来源');return result;
   }
@@ -123,7 +112,7 @@ export async function inspectFileContinuation({home,sourceRootTaskId,draft}) {
     }catch(error){add(error.code??'CONTINUATION_SOURCE',id,error.message);}
   }
   result.requestIds=unknown.map(r=>r.id);
-  if(!unknown.length)add('NO_UNKNOWN_MODEL',source.id,'原任务及已确认继续链不存在可接续的未知模型响应');
+  if(!unknown.length&&visualRevision===undefined)add('NO_UNKNOWN_MODEL',source.id,'原任务及已确认继续链不存在可接续的未知模型响应');
   for(const request of unknown) {
     if(!hostOnlyRequest(request))add('SERVER_EXECUTION_UNKNOWN',request.id,'无法核实该模型请求仅使用宿主执行工具');
     if(request.phase==='project-effect')add('EFFECT_UNKNOWN',request.id,'原生成效果尚未确认，不能以继续重做');
@@ -139,7 +128,9 @@ export async function inspectFileContinuation({home,sourceRootTaskId,draft}) {
     v=await createVersioning({home,project:state.repo,backend:'agent-sync',readOnly:true});
     const formal=await v.inspect();result.formalVersion=formal.version;
     if(formal.integrationRef!==state.integrationRef)add('FORMAL_REF_CHANGED',state.id,'正式 ref 已变化');
-    const finalOnly=state.status==='completed'&&source.deliveryRef;
+    const visualOnly=inspectVisualRevision({home,state,source,formalVersion:formal.version,visualRevision});
+    if(visualOnly){result.visualOnly=true;result.requiresManual=true;}
+    const finalOnly=visualOnly||state.status==='completed'&&source.deliveryRef;
     if(finalOnly) {
       try { resolveDeliveryEvidence(home,source);if(state.delivery?.version!==formal.version)throw Error('正式交付版本已变化'); }
       catch(error){add('DELIVERY_SOURCE',source.id,error.message);}
@@ -147,12 +138,16 @@ export async function inspectFileContinuation({home,sourceRootTaskId,draft}) {
     } else {
       const {resolveTaskDraft}=await import('./gui-work.js');
       const candidates=[];
-      for(const {step,attempt} of ownAttempts) {
+      for(const {step,attempt} of ownAttempts.filter(x=>x.step.status!=='completed')) {
         const record=records.find(r=>r.id===attempt.taskId);
         for(const change of record?.work?.changes??[]) {
           if(change.readOnly)continue;
           try {const ref=await resolveTaskDraft({home,record,changeId:change.changeId});if(ref)candidates.push({step,ref});}catch{}
         }
+      }
+      if(draft&&!candidates.some(c=>isDeepStrictEqual(c.ref,draft)))for(const {step,attempt} of ownAttempts){
+        const record=records.find(r=>r.id===attempt.taskId);
+        if(await stoppedMemberDraft({source,record,state,step,attempt,draft,v}))candidates.push({step,ref:draft,manual:true});
       }
       if(!candidates.length)for(const {step,attempt} of ownAttempts.filter(x=>x.step.status!=='completed')) {
         const record=records.find(r=>r.id===attempt.taskId);
@@ -178,12 +173,12 @@ export async function inspectFileContinuation({home,sourceRootTaskId,draft}) {
       const chosen=draft===undefined?(candidates.length===1?candidates[0]:null):candidates.find(c=>isDeepStrictEqual(c.ref,draft));
       if(!chosen)add('DRAFT_REQUIRED',source.id,draft===null?'空草稿引用仅允许核实交付后的终稿接续':candidates.length>1?'请选择确切保存草稿':'没有可核实的保存草稿');
       else {
-        result.draft=chosen.ref;result.stepId=chosen.step.id;
+        result.draft=chosen.ref;result.stepId=chosen.step.id;result.requiresManual||=!!chosen.manual;
         result.inputOnly=!!chosen.inputOnly;
-        const recovered=await recoverContinuationRoute({home,state,source,step:chosen.step,versioning:v,formalVersion:formal.version,draft:chosen.ref});
+        const recovered=await recoverContinuationRoute({home,state,source,step:chosen.step,versioning:v,formalVersion:formal.version,draft:chosen.ref,routeRevision});
         const route=recovered??chosen.step.route;
         if(recovered)result.recoveredRoute=recovered;
-        result.requiresManual=result.inputOnly||!!recovered?.scopeRestoration||!!recovered?.inputOnlyFailure||!!route&&route.status!=='resolved';
+        result.requiresManual=result.requiresManual||result.inputOnly||!!recovered?.scopeRestoration||!!recovered?.inputOnlyFailure||!!route&&route.status!=='resolved';
         const verification=route?.status==='repair'?await inspectRepairVerification({versioning:v,route,step:chosen.step,
           record:readTask(home,route.taskId),draft:chosen.ref}):null;
         const unspent=route?.status==='repair'&&await inspectUnspentRepair({home,versioning:v,route,step:chosen.step,record:readTask(home,route.taskId),draft:chosen.ref});

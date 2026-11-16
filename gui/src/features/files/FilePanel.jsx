@@ -25,6 +25,8 @@ export function FilePanel({task,sessionId,selection,commands,onSelection,onRecor
   const callbacks=useRef({onSelection});callbacks.current={onSelection};
   const selected=useRef(selection);selected.current=selection;
   const downloads=useRef(new Set());
+  const exportGeneration=useRef(0);
+  useEffect(()=>{setExported(null);setExporting(false);exportGeneration.current++;return()=>{exportGeneration.current++;};},[task?.id,key(selection?.fileRef)]);
   const sources=task?.executionTasks??(task?.work?[task]:[]);
   const visual=task?.deliveryVisual;
   const fileState=JSON.stringify(sources.map(({id,work})=>[id,work?.version,work?.changes,work?.resultWorkspace,work?.acceptance?.map(r=>[r.requestId,r.status,r.acceptedVersion])]));
@@ -76,10 +78,11 @@ export function FilePanel({task,sessionId,selection,commands,onSelection,onRecor
   }
   async function exportDraft() {
     if(!item?.ref.draft)return;
+    const generation=exportGeneration.current;
     setExporting(true);setError('');setExported(null);
-    try {setExported(await current.current.exportDraft({taskId:item.ref.taskId,version:item.ref.version,...item.ref.draft}));}
-    catch(e){setError(e.message);}
-    finally{setExporting(false);}
+    try {const result=await current.current.exportDraft({taskId:item.ref.taskId,version:item.ref.version,...item.ref.draft});if(generation===exportGeneration.current)setExported(result);}
+    catch(e){if(generation===exportGeneration.current)setError(e.message);}
+    finally{if(generation===exportGeneration.current)setExporting(false);}
   }
   async function patch() {try{downloadBlob(new Blob([await current.current.downloadPatch(patchTaskId)],{type:'text/x-diff'}),`cothink-${patchTaskId}.patch`);}catch(e){setError(e.message);}}
   const visualSources=visual?[visual,...sources]:sources;

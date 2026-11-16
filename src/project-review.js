@@ -1,3 +1,4 @@
+import {reviewerRetraction} from './project-review-retraction.js';
 import { createHash } from "node:crypto";
 import { inScope } from "./versioning.js";
 import { problem, readRequests, readTask } from "./task.js";
@@ -15,13 +16,20 @@ const directModelFamilies = {
   "api.openai.com":
     /^(?:gpt-(?:4o|[4-6](?:\.\d+)?)(?:-(?:mini|nano|turbo|pro|sol|astra|luna|terra|codex))?|o[134](?:-(?:mini|pro))?)$/,
   "api.anthropic.com": /^claude-(?:opus|sonnet|haiku)-\d(?:-\d)?$/,
-  "api.deepseek.com": /^deepseek-v\d(?:\.\d+)?-(?:flash|pro)(?:-1017)?$/,
+  "api.deepseek.com": /^deepseek-(?:flash|v\d(?:\.\d+)?-(?:flash|pro)(?:-1017)?)$/,
   "api.moonshot.cn": /^kimi-k\d(?:\.\d+)?(?:-pro)?$/,
   "api.moonshot.ai": /^kimi-k\d(?:\.\d+)?(?:-pro)?$/,
 };
 export function reviewFamily(id) {
   if (typeof id !== "string" || !id) return null;
   // A datestamped snapshot and its floating selector can resolve to one model.
+  // Official routing evidence checked 2026-11-16:
+  // https://api-docs.deepseek.com/updates/ (2026-09-10, 2026-10-17)
+  // https://api-docs.deepseek.com/api/list-models/
+  // Group current and retired Flash selectors conservatively for independence;
+  // this is a family, not a claim that old requests used today's snapshot.
+  if (/^deepseek-(?:flash|v4-flash(?:-vision-exp)?|v4\.1-flash(?:-1017)?)$/.test(canonical(id)))
+    return "deepseek-flash";
   return canonical(id)
     .replace(/-(?:20\d\d-\d\d-\d\d|20\d{6})$/, "")
     .replace(/^(claude-(?:opus|sonnet|haiku)-\d)\.(\d)$/, "$1-$2")
@@ -348,6 +356,10 @@ export async function completeProjectReview(host, member, task, v) {
     basisRevision: source.basisRevision,
     evidenceKey: "candidate:" + source.changeId + ":" + source.privateVersion + ":" + source.basisRevision,
   };
+  const prior=a.reviewReceipts?.find(r=>r.requestId===verdict.retractsRequestId);
+  const previous=calls.find(c=>c.id===prior?.requestId);
+  const retraction=previous&&receivedArtifact(previous,source)?reviewerRetraction({verdict,receipt,prior,call,previous,calls}):null;
+  if(retraction){receipt.retractsRequestId=prior.requestId;receipt.retractionEvidence=retraction;}
   const objection = verdict.counterexample;
   if (
     verdict.verdict === "reject" &&
@@ -436,7 +448,10 @@ export function assertProjectWorkReviewed(
         r.verdict === "reject" &&
         !receipts.some(
           (response) =>
-            response.verdict === "pass" && response.refutesRequestId === r.requestId && response.fileEvidence,
+            response.verdict === "pass" && ((response.refutesRequestId === r.requestId && response.fileEvidence)||
+              (response.retractsRequestId===r.requestId&&response.retractionEvidence?.priorRequestId===r.requestId&&
+               response.retractionEvidence.requestId===response.requestId&&response.dispatchId===r.dispatchId&&
+               response.reviewTaskId===r.reviewTaskId&&response.reviewer===r.reviewer&&response.model===r.model)),
         ),
     );
     if (pending) reject("未处理的评审反例 " + pending.requestId + "：" + pending.observation);

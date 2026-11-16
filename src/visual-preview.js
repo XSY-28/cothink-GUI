@@ -280,6 +280,8 @@ export async function runVisualReview({
       entry: evidence.entry, viewport: evidence.viewport,
       frames: evidence.images.map(({ sha256, requestedAtMs, capturedAtMs }) => ({ sha256, requestedAtMs, capturedAtMs })),
       actions: evidence.actions ?? [], diagnostics: evidence.diagnostics,
+      supplemental: evidence.supplemental??[],
+      evidenceLimits: "Supplemental images are outputs of explicitly authorized offline project scripts on this exact source version, not host certification of their captions or test completeness. Infer only what is visible. Development process and nonvisual functionality are evaluated separately; do not claim screenshots prove them.",
     };
     const result = await runtime.prompt([
       { type: "text", text: JSON.stringify(fact) },
