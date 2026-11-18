@@ -66,6 +66,7 @@ import {
   rememberRecentTeam,
   conversationTaskIds,
 } from "./conversation.js";
+import { hasFileWork, taskSummaryRequests } from "./gui-process-projection.js";
 import { publicTeam, projectGuiTask, projectGuiExecutions, projectGuiProcessCheck, finalGuiText, guiResultRevision, guiDeliverySummary } from "./gui-projection.js";
 import {
   saveGuiTeam,
@@ -200,7 +201,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     live,taskCache,inspectExecution,submit,emit,oauthBusy,rawTask,
     getActive:()=>active,isManaging:()=>management,setManaging:value=>{management=value;},isShuttingDown:()=>shuttingDown,
   });
-  const hasFileWork = record => !!(record.work || record.deliveryRef || record.projectOperation?.childTaskIds?.length || record.projectOperation?.continuation?.draft);
   function fileResultRevision(record,text) {
     let children=[];
     try {children=resolveOwnedTasks(home,record,()=>{});} catch { /* Unverified sources remain unavailable. */ }
@@ -238,14 +238,14 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         try {
           const record = readTask(home, id);
           if (!Array.isArray(record.requestIds) || record.requestIds.some(r=>typeof r !== "string" || !/^[0-9a-f-]{36}$/.test(r)) || typeof record.input !== "string" || typeof record.createdAt !== "string") throw Error("task summary");
-          // An overview needs its final reply, not every execution payload and
-          // streaming journal. Delivery-backed answers still verify their sources.
-          cached.requestIds = record.requestIds.filter(id=>id===record.finalCallId);
           cached.verifyDelivery = !!record.deliveryRef;
           const delivery=guiDeliverySummary(home,record);
           cached.value = {id: record.id, sessionId: record.sessionId, submissionId: record.submissionId, editorEditId:record.editorEditId,
             createdAt: record.createdAt, cancelSettledAt: record.cancelSettledAt ?? null, input: record.input, status: delivery.status, error:delivery.error,
             origin:record.origin,sourceLeaf:record.sourceLeaf,sourceSnapshot:record.sourceSnapshot,contextResult:record.contextResult,singleModel: record.singleModel, flow:record.flow, proposal:record.proposal,proposalRef:record.proposalRef,confirmationIntent:record.confirmationIntent,fileContinuationIntent:record.fileContinuationIntent,fileContinuationError:record.fileContinuationError,confirmationBlocker:workConfirmationBlocker(record),projectPreparationBlocked:record.projectPreparationBlocked,continuationSource:record.continuationSource,materials:record.materials,inputDigest:record.inputDigest,hasWork:hasFileWork(record), finalText: ""};
+          const {requestIds,failedModel}=taskSummaryRequests(home,record,cached.value);
+          cached.requestIds=requestIds;
+          cached.value.failedModel=failedModel;
           try {
             cached.value.finalText = finalGuiText(record, finalRequests(record),home);
             cached.value.resultRevision = fileResultRevision({...record,status:delivery.status,error:delivery.error},cached.value.finalText);
@@ -579,6 +579,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           materials:(record.materials??[]).map(({ownerId,...ref})=>ref),
           status: result.status,
           error: result.error,
+          ...(record.failedModel && {failedModel:record.failedModel}),
           hasWork: current ? hasFileWork(record) : !!record.hasWork,
           mode: record.singleModel ? "one" : "cothink",
           finalText,

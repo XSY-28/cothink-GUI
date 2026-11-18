@@ -3,25 +3,13 @@ import {useEditorPersistence} from "./useEditorPersistence.js";
 import {defaultTurnOptions,editorTurnInput,GUI_INPUT_VERSION,retiredReviewOption} from "../../src/gui-turn-options.js";
 import {materialType} from "../../src/gui-material-types.js";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createDraftBook, readGuiStorage, writeGuiStorage } from "./view.js";
+import { createDraftBook, readPending, readCreations, writeGuiStorage } from "./view.js";
 import { saveWorkspaceChange } from "./api.js";
 import { useSessionSearch } from "./features/navigation/useSessionSearch.js";
 
 const HOME = "@home";
 const inputVersion = Number(GUI_INPUT_VERSION);
 const emptyBootstrap = { teams: [], models: [], providers: [], sessions: [], work: {}, active: null };
-function readPending() {
-  const value = readGuiStorage("cothink.pending");
-  return typeof value?.sessionId === "string" && typeof value?.submissionId === "string" ? value : null;
-}
-
-function readCreations() {
-  try {
-    const rows=JSON.parse(sessionStorage.getItem("cothink.creations")||"[]");
-    return new Map(rows.filter(([key,row])=>typeof key==="string"&&typeof row?.sessionId==="string"));
-  }catch{return new Map();}
-}
-
 /** One owner for host snapshots, draft persistence and once-only mutations.
  * Display choices and feature-local forms intentionally live outside this hook.
  */
@@ -434,12 +422,13 @@ export function useGuiWorkspace(api) {
       const value={recentSessionId:null,...prior,...saved};
       return {...current,workspaces:prior ? current.workspaces.map(row=>row.id===id ? value : row) : [...current.workspaces,value]};
     });
+    let firstSession;
     if (open && request === selectionRequest.current) {
       try {
         if (!selected.current && workspaceRef.current===null && book.current.snapshot(HOME).editId)
-          await transferHome({workspaceId:id});
+          firstSession = await transferHome({workspaceId:id});
         else
-          await createSession({workspaceId:id});
+          firstSession = await createSession({workspaceId:id});
       } catch (error) {
         const message = `Team 已保存。第一条对话未能确认：${error.message}`;
         setError(message);
@@ -448,7 +437,8 @@ export function useGuiWorkspace(api) {
       }
     }
     await refresh();
-    return saved;
+    return firstSession && firstSession.workspaceId === id && selected.current === firstSession.id
+      ? {...saved,openedSessionId:firstSession.id} : saved;
   }
   async function readWorkspaces() {
     const current=await readBootstrap();
@@ -1255,6 +1245,7 @@ export function useGuiWorkspace(api) {
       mkdirProject: args => api.action("project.mkdir",args),
       readOutput: args => api.read("output", args),
       readImage: args => api.image(args),
+      readSession: id => api.read("session",{id}),
       selectTeam: ({sessionId, teamId}) => changeSession("session.team", {teamId}, sessionId),
       renameSession: ({sessionId, title}) => changeSession("session.name", {title}, sessionId),
       loadFiles: taskId => api.read("files",{id:taskId}),

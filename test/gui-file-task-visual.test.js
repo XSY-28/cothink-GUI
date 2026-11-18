@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "playwright";
-import { chooseRailCreation } from "./helpers/gui-rail.js";
+import { chooseRailCreation, finishFirstRoster } from "./helpers/gui-rail.js";
 import { fixture } from "./helpers/pi-fixture.js";
 import { execution } from "./helpers/agent-sync-fixture.js";
 
@@ -95,9 +95,9 @@ test("a Team file request uses its own folder and opens the checked, accepted HT
   await create.getByLabel("项目绝对路径", { exact: true }).fill(project);
   await create.getByRole("button", { name: "只读检查目录", exact: true }).click();
   await create.getByText("可以使用这个文件夹。",{exact:true}).waitFor();
-  await create.getByRole("combobox",{name:"默认阵容",exact:true}).selectOption(rosterId);
   await create.getByRole("button", { name: "创建", exact: true }).click();
   await create.waitFor({ state: "hidden" });
+  await finishFirstRoster(page,"文件任务验证阵容");
   await page.getByRole("heading",{name:"这次想完成什么？",exact:true}).waitFor();
   const folders=readdirSync(project,{withFileTypes:true}).filter(entry=>entry.isDirectory());
   assert.equal(folders.length,1,"creating the Team also creates its first conversation folder");

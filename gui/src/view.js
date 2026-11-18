@@ -233,3 +233,15 @@ export function outputReferences(value) {
   visit(value);
   return [...refs];
 }
+
+export function readPending() {
+  const value = readGuiStorage("cothink.pending");
+  return typeof value?.sessionId === "string" && typeof value?.submissionId === "string" ? value : null;
+}
+
+export function readCreations() {
+  try {
+    const rows=JSON.parse(sessionStorage.getItem("cothink.creations")||"[]");
+    return new Map(rows.filter(([key,row])=>typeof key==="string"&&typeof row?.sessionId==="string"));
+  }catch{return new Map();}
+}

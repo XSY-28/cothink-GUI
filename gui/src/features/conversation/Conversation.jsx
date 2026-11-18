@@ -12,7 +12,7 @@ import styles from "./Conversation.module.css";
 
 export function Conversation({state, workspace, commands, inert, showNotes, onHideNotes,
   onSettings, onPlugins, onToggleNavigation, onWorkspaceMenu, onConversations, onRoster, onAttention, onFork, onOpenFile, onOpenDetails, onNotes, onCopy, onLocalCommand, onConversationMenu, onChooseProjectFiles,
-  onChooseSkill, onPreviewMaterial, onRetryMaterial, onOpenTurnLimits, conversationMenuTrigger, onCreateTeam}) {
+  onChooseSkill, onPreviewMaterial, onRetryMaterial, onOpenTurnLimits, conversationMenuTrigger, firstRun, onCreateTeam}) {
   const {bootstrap: boot, task, draft, ready, submitting, pending, pendingStatus} = state;
   const session = workspace?.archived && state.session ? {...state.session,workspaceArchived:true,readOnly:true} : state.session;
   const replyTeamId = session?.workspaceId && !session.workspaceError &&
@@ -155,7 +155,11 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
           <div className={styles.conversationContent}>
             {!session ? (
               <section className={styles.emptyState}>
-                {!ready || state.navigationLoading ? <p>正在读取…</p> : error ? <p>请先核对上方提示，已保存的 Team 和历史会保留。</p> : state.workspaceId === undefined ? <p>Team 归属暂时无法确认。请从左侧选择 Team，或搜索已保存的对话。</p> : <>
+                {!ready || state.navigationLoading ? <p>正在读取…</p> : error ? <p>请先核对上方提示，已保存的 Team 和历史会保留。</p> : state.workspaceId === undefined ? <p>Team 归属暂时无法确认。请从左侧选择 Team，或搜索已保存的对话。</p> : firstRun ? <>
+                  <h2>从一件想做的事开始</h2>
+                  <p>一个 Team 对应一个项目，可以在里面开多条对话。</p>
+                  <button type="button" className="primary" onClick={onCreateTeam}>创建我的第一个 Team</button>
+                </> : <>
                   <h2>{workspace ? "继续这个 Team 的工作" : "从一件想做的事开始"}</h2>
                   <p>{workspace ? "这个 Team 还没有可打开的对话。从‘对话’中新建，或查找已归档对话。" : "直接输入即可开始，也可搜索已保存的对话。"}</p>
                   <button onClick={onConversations}>打开对话</button>
@@ -165,6 +169,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
               session.turns.map((turn) => {
                 const inProgress = ["running", "preparing", "cancelling"].includes(turn.status);
                 const canStop = (inProgress || state.stopping?.status === "stop_unknown") && boot.active?.status !== "preparing" && boot.active?.taskId === turn.taskId;
+                const failedModel = session.turns.length===1 && !session.readOnly ? turn.failedModel : null;
                 return (
                 <section
                   className={styles.turn}
@@ -181,6 +186,13 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     </ReplyHeading>
                     {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。请核对已保存的执行记录。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。" : turn.status === "cancelled" ? "已停止。已完成的内容保留，停止不等于回滚；可查看此条执行记录后继续说明下一步。" : "本次未完整完成。请核对已有内容和执行记录；若有成果，文件入口会列在下方。"}</p>}
                     {!turn.proposalRef&&!inProgress&&(turn.error || (task?.id===turn.taskId && task.error))&&<p className="error-text">{turn.error || task.error}</p>}
+                    {failedModel && <div className={styles.incompleteAnswer}>
+                      <p>请求失败的模型 <strong>{failedModel.provider} / {failedModel.modelId}</strong></p>
+                      <div className={styles.answerActions}>
+                        <button type="button" onClick={()=>onSettings("providers")}>检查模型与认证</button>
+                        <button type="button" onClick={onRoster}>更换阵容</button>
+                      </div>
+                    </div>}
                     {turn.proposalRef ? <WorkProposal turn={turn} disabled={!!boot.active||!!pending||session.readOnly}
                       onConfirm={()=>safely(commands.confirmWork(turn))} /> : turn.finalText ? (
                       <div className="prose">

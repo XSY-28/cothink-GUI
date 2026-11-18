@@ -71,6 +71,9 @@ test("choosing a Team folder once creates independent conversation folders", asy
   await dialog.getByRole("button",{name:"创建",exact:true}).click();
   const first=await (await firstCreation).json();
   await dialog.waitFor({state:"hidden"});
+  const rosterSetup=page.getByRole("dialog",{name:"配置阵容",exact:true});
+  await rosterSetup.getByRole("button",{name:"关闭配置阵容",exact:true}).click();
+  await rosterSetup.waitFor({state:"hidden"});
   await page.getByRole("heading",{name:"这次想完成什么？",exact:true}).waitFor();
   assert.equal(dirname(first.project),parent);
   const firstFile=join(first.project,"first.txt");
