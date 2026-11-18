@@ -12,54 +12,7 @@ import { ProjectDialog } from "./ProjectDialog.jsx";
 import { TeamPanel } from "./features/teams/TeamPanel.jsx";
 import { Modal } from "./Modal.jsx";
 import { MaterialPicker, MaterialPreview } from "./MaterialPicker.jsx";
-
-function ExtensionPrompt({prompt, onAnswer}) {
-  const [value, setValue] = useState(""), [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!prompt.expiresAt) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [prompt.expiresAt]);
-  const cancel = () => onAnswer(undefined, true);
-  const selecting = prompt.kind === "select";
-  return <Modal title={prompt.title} onClose={cancel}>
-    <p>已安装插件的请求</p>
-    {prompt.expiresAt && <p>将在 {Math.max(0, Math.ceil((prompt.expiresAt - now) / 1000))} 秒后关闭</p>}
-    {prompt.kind === "confirm" ? <>
-      <p>{prompt.message}</p>
-      <div className="form-actions"><button onClick={() => onAnswer(true)}>确认</button><button onClick={cancel}>取消</button></div>
-    </> : <form onSubmit={e => {e.preventDefault(); onAnswer(value);}}>
-      {selecting ? <label>选择<select aria-label="插件选项" value={value} onChange={e => setValue(e.target.value)}>
-        <option value="" disabled>请选择</option>
-        {prompt.options.map((option, i) => <option key={i} value={option}>{option}</option>)}
-      </select></label> : <label>输入<input aria-label="插件输入" value={value} placeholder={prompt.placeholder} onChange={e => setValue(e.target.value)} /></label>}
-      <div className="form-actions">
-        <button type="submit" disabled={selecting && !value}>继续</button>
-        <button type="button" onClick={cancel}>取消</button>
-      </div>
-    </form>}
-  </Modal>;
-}
-
-function SkillChoices({items,onChoose,onSettings}) {
-  const [query,setQuery]=useState("");
-  const needle=query.trim().toLocaleLowerCase();
-  const matches=items?.filter(item=>`${item.name} ${item.description??""}`.toLocaleLowerCase().includes(needle));
-  if(!items)return <p role="status">正在读取此处可用的技能…</p>;
-  if(!items.length)return <><p>当前没有可选技能。</p><button onClick={onSettings}>打开技能设置</button></>;
-  const source={builtin:"内置",selected:"本地来源",package:"已安装包",project:"项目"};
-  return <>
-    <label>搜索技能<input value={query} onChange={event=>setQuery(event.target.value)} placeholder="名称或用途"/></label>
-    <p className="field-note">只为当前输入显式选择一个技能；不会启用脚本或扩大文件权限。</p>
-    <div className="material-skill-list">{matches.map(item=>
-      <button type="button" key={item.name} onClick={()=>onChoose(item.name)}>
-        <strong>{item.name}</strong> · {source[item.sourceKind]??"当前资源"}{item.explicitOnly?" · 仅手动使用":""}
-        {item.description&&<small>{item.description}</small>}
-      </button>)}
-      {!matches.length&&<p>没有匹配的技能。</p>}
-    </div>
-  </>;
-}
+import {ExtensionPrompt, SkillChoices} from "./ExtensionDialogs.jsx";
 
 export function App() {
   const [api] = useState(() => createApi(consumeToken()));
@@ -109,6 +62,9 @@ export function App() {
   const modalOpen = !!(overlay || prompt);
   const overlayRef = useRef(overlay); overlayRef.current = overlay;
   const workspace = boot.workspaces?.find(row=>row.id === state.workspaceId);
+  const firstRun = state.homeReady && state.connection === "connected" &&
+    boot.workspaces?.length === 0 && !boot.sessions?.length && !boot.historyErrors?.length &&
+    !boot.workspaceErrors?.length && !state.navigationError && !state.creationNotice && !state.homeDraft?.pendingCreateSessionId;
   const projects = boot.projects ?? [];
   const safely = operation => Promise.resolve(operation).catch(e => commands.setError(e.message));
   const setOverlay = value => {
@@ -121,9 +77,30 @@ export function App() {
   const closeOverlay = () => {
     if (overlayRef.current !== overlay || overlay?.busy) return;
     if (overlay?.kind === "team") teamPanel.current?.requestClose();
+    else if (overlay?.returnToRoster === session?.id && overlay?.returnToRoster)
+      setOverlay({kind:"team",onboardingSessionId:session.id});
     else setOverlay(null);
   };
   const openTeam = () => setOverlay({kind:"team"});
+  const openCreateTeam = () => setOverlay({kind:"create-team", firstRun});
+  const onboardingRoster = overlay?.kind === "team" && !!overlay.onboardingSessionId;
+  const inOnboardingSession = onboardingRoster && session?.id === overlay.onboardingSessionId &&
+    workspace && workspace.id === session.workspaceId && !workspace.archived && !session.readOnly;
+  function focusComposer() {
+    requestAnimationFrame(() => {
+      if (!overlayRef.current) document.querySelector("#message-input")?.focus();
+    });
+  }
+  function projectSaved(saved) {
+    if (overlayRef.current !== overlay) return;
+    if (overlay.firstRun && saved.openedSessionId)
+      setOverlay({kind:"team",onboardingSessionId:saved.openedSessionId});
+    else setOverlay(null);
+  }
+  useEffect(() => {
+    if (onboardingRoster && !inOnboardingSession && overlayRef.current === overlay)
+      setOverlay(null);
+  }, [overlay, onboardingRoster, inOnboardingSession]);
   const conversationActions = useConversationActions(state, workspace, setOverlay);
   function openPicker(scope) {
     commands.searchSessions({scope,query:"",includeArchived:false});
@@ -192,7 +169,8 @@ export function App() {
     closeNavigation();
     const row=boot.workspaces?.find(item=>item.id===workspaceId&&!item.archived);
     if (!row?.project) {
-      setOverlay({kind:row?"bind-team":"create-team"});
+      if (row) setOverlay({kind:"bind-team"});
+      else openCreateTeam();
       return;
     }
     await safely(commands.createSession({workspaceId}));
@@ -299,7 +277,7 @@ export function App() {
     {commands.resumeMaterial&&<input type="file" hidden ref={resumeInput} onChange={onResumeFile} onCancel={()=>{resumeChoice.current=null;document.querySelector("#message-input")?.focus();}}/>}
     {navOpen && <button className="nav-scrim" aria-label="关闭导航" onClick={dismissNavigation} />}
     <Navigation workspaces={boot.workspaces} workspaceId={state.workspaceId} ready={state.ready} mobileOpen={navOpen}
-      onOpenWorkspace={openWorkspace} onNewConversation={createConversation} onSearch={()=>openPicker("all")} onCreate={()=>setOverlay({kind:"create-team"})}
+      onOpenWorkspace={openWorkspace} onNewConversation={createConversation} onSearch={()=>openPicker("all")} onCreate={openCreateTeam}
       onSettings={()=>setOverlay({kind:"settings"})} connection={state.connection}
       updateLabel={boot.updates?.status === "available" ? "有新版本" : boot.releaseNotes?.unread ? "更新记录未读" : null}
       inert={modalOpen || (mobile && !navOpen) || (compact && detailOpen && !navOpen)} />
@@ -311,7 +289,7 @@ export function App() {
       onToggleNavigation={() => dispatch({type:"navigation",change:{mobileOpen:!navOpen}})}
       onPlugins={session?.pluginCommands?.length&&!session.readOnly&&!boot.active ? ()=>showPlugins(session.id):undefined}
       onLocalCommand={openLocal}
-      onCreateTeam={()=>setOverlay({kind:"create-team"})}
+      firstRun={firstRun} onCreateTeam={openCreateTeam}
       {...conversationActions.controls}
       onChooseProjectFiles={commands.listProjectMaterials&&session?.projectDirectoryAvailable!==false?()=>setOverlay({kind:"project-materials",sessionId:session?.id}):undefined}
       onChooseSkill={boot.protocol?.capabilities===1&&commands.listSkills?showSkills:undefined}
@@ -350,9 +328,15 @@ export function App() {
     </Modal>}
     {overlay?.kind === "settings" && <Settings boot={boot} initialTab={overlay.section}
       session={session} theme={theme} onTheme={setTheme} showNotes={overlay.showNotes} commands={{...navigationCommands, openSession:async (id,taskId,fileRef,field)=>{await openSession(id,taskId,fileRef,field);closeOverlay();}, openWorkspace:async row=>{closeOverlay();await openWorkspace(row);}}} onOpenTeam={openTeam} onClose={closeOverlay} />}
-    {overlay?.kind === "team" && <Modal title="阵容" wide className="team-modal" onClose={closeOverlay}>
+    {overlay?.kind === "team" && (!onboardingRoster || inOnboardingSession) &&
+      <Modal title={onboardingRoster ? "配置阵容" : "阵容"} wide className="team-modal" onClose={closeOverlay}>
       <TeamPanel ref={teamPanel} session={session} workspace={workspace} teams={boot.teams} models={boot.models} providers={boot.providers}
-        busy={!!(state.submitting || boot.active || boot.extensionUI?.command)} commands={commands} onClose={()=>{if(overlayRef.current === overlay)setOverlay(null);}} />
+        busy={!!(state.submitting || boot.active || boot.extensionUI?.command)}
+        onboarding={onboardingRoster} commands={commands}
+        onProviderSettings={()=>{if(overlayRef.current === overlay)
+          setOverlay({kind:"settings",section:"providers",returnToRoster:overlay.onboardingSessionId});}}
+        onClose={()=>{if(overlayRef.current === overlay)setOverlay(null);}}
+        onStart={()=>{if(overlayRef.current === overlay){setOverlay(null);focusComposer();}}} />
     </Modal>}
     <ConversationActionDialogs state={state} overlay={overlay} actions={conversationActions} setOverlay={setOverlay}
       onRename={navigationCommands.requestRename} onClose={closeOverlay}
@@ -397,10 +381,10 @@ export function App() {
         }} />
       {overlay.error && <p className="error-text" role="alert">{overlay.error}</p>}
     </Modal>}
-    {["create-team","bind-team"].includes(overlay?.kind) && <ProjectDialog key={overlay.kind}
+    {["create-team","bind-team"].includes(overlay?.kind) && <ProjectDialog key={overlay.kind} firstRun={overlay.firstRun}
       commands={commands} projects={projects} rosters={boot.teams} recentRosterId={boot.currentTeamId} workspace={overlay.kind === "bind-team" ? workspace : null}
       onOpenExisting={row=>{setOverlay(null);openWorkspace(boot.workspaces?.find(item=>item.id === row.id) ?? row);}}
-      onSaved={closeOverlay}
+      onSaved={projectSaved}
       onClose={closeOverlay} />}
     {overlay?.kind === "workspace" && <Modal title={workspace?.name || (state.workspaceId === null ? "未分组对话" : "归属待核对")} onClose={closeOverlay}>
       {!workspace ? <p>{state.workspaceId === null ? "这里保存不属于项目的历史和随手提问。" :

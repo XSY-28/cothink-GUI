@@ -7,7 +7,7 @@ import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
 import { repository } from "./helpers/git-fixture.js";
 import { teamId } from "./helpers/gui-controller-fixture.js";
-import { chooseRailCreation } from "./helpers/gui-rail.js";
+import { chooseRailCreation, finishFirstRoster } from "./helpers/gui-rail.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
 const packageRoot=resolve(process.env.COTHINK_TEST_PACKAGE_ROOT??fileURLToPath(new URL("..",import.meta.url)));
 const load=path=>import(pathToFileURL(join(packageRoot,path)));
@@ -18,18 +18,19 @@ const {GUI_INPUT_VERSION}=await load("src/gui-turn-options.js");
 import { execution } from "./helpers/agent-sync-fixture.js";
 const tool = (name, args = {}) => ({ toolCalls: [{ name, args }] });
 
-async function saveTeam(page, name, path) {
+async function saveTeam(page, name, path, firstRosterName) {
   const dialog=page.getByRole("dialog",{name:"新建 Team",exact:true});
   await dialog.getByLabel("名称",{exact:true}).fill(name);
   await dialog.getByText("手动输入路径",{exact:true}).click();
   await dialog.getByLabel("项目绝对路径").fill(path);
   await dialog.getByRole("button",{name:"只读检查目录",exact:true}).click();
   await dialog.getByText("可以使用这个文件夹。",{exact:true}).waitFor();
+  if(!firstRosterName)await dialog.getByRole("combobox",{name:"默认阵容",exact:true}).selectOption(teamId);
   const child=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==="/api/action"&&
     response.request().method()==="POST"&&response.request().postDataJSON()?.action==="session.create");
-  await dialog.getByRole("combobox",{name:"默认阵容",exact:true}).selectOption(teamId);
   await dialog.getByRole("button",{name:"创建",exact:true}).click();
   await dialog.waitFor({state:"hidden"});
+  if(firstRosterName)await finishFirstRoster(page,firstRosterName);
   return (await child).json();
 }
 
@@ -125,7 +126,7 @@ test(
     );
     assert.equal(f.calls.length, 0);
     await page.getByRole("button",{name:"发送",exact:true}).click();
-    const session=await saveTeam(page,"Visual project",repo.project);
+    const session=await saveTeam(page,"Visual project",repo.project,"Visual fixture");
     assert.equal(session.project,join(realpathSync(repo.project),"对话-"+session.id));
     assert.equal(await editor.inputValue(),"Keep my draft");
     assert.equal(f.calls.length,0,"Team creation preserves the draft without sending");
@@ -295,6 +296,7 @@ test('actual browser preserves startup draft and refuses unmanaged native comman
   try {
     await input.waitFor();
     assert.equal(await page.getByRole('dialog',{name:'设置',exact:true}).count(),0,'unknown configuration must not trigger onboarding');
+    assert.equal(await page.getByRole('button',{name:'创建我的第一个 Team',exact:true}).count(),0);
     const initialResponse=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/bootstrap');
     initialBootstrap.resolve();
     await (await initialResponse).finished();
@@ -304,7 +306,7 @@ test('actual browser preserves startup draft and refuses unmanaged native comman
     await page.unrouteAll({behavior:'wait'});
   }
   await chooseRailCreation(page,"新建 Team");
-  const team=await saveTeam(page,"插件测试 Team",repository(t).project);
+  const team=await saveTeam(page,"插件测试 Team",repository(t).project,"Plugin fixture");
   assert.equal(await input.inputValue(),startupDraft);
   assert.ok(team.project.endsWith("对话-"+team.id));
   await page.getByRole('button',{name:'添加本次操作'}).click();

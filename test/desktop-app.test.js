@@ -15,15 +15,22 @@ import {verifyPackagedThinking} from './helpers/desktop-thinking.js';
 import {verifyPackagedTeamPortraits} from './helpers/desktop-team-portrait.js';
 async function fixture(t) {
  const {home,app,page,appProcess}=await launchCandidate(t);
- await page.getByRole('navigation',{name:'工作导航'}).getByRole('button',{name:'新建',exact:true}).click();
- await page.getByRole('button',{name:'新建 Team',exact:true}).click();
- const creating=page.getByRole('dialog',{name:'新建 Team',exact:true});
- await creating.getByLabel('名称',{exact:true}).fill('Lifecycle');
  const folder=mkdtempSync(join(tmpdir(),'cothink-app-team-'));
  t.after(()=>rmSync(folder,{recursive:true,force:true}));
- await creating.getByText('手动输入路径').click();
- await creating.getByLabel('项目绝对路径').fill(folder);
- await creating.getByRole('button',{name:'只读检查目录'}).click();
+ // Exercise the real main/preload/renderer bridge without a human selecting the folder.
+ await app.evaluate(({dialog},selected)=>{
+  const original=dialog.showOpenDialog;
+  dialog.showOpenDialog=async (_window,options)=>{
+   dialog.showOpenDialog=original;
+   if(!options.properties.includes("openDirectory"))throw Error("Expected the native directory picker");
+   return {canceled:false,filePaths:[selected]};
+  };
+ },folder);
+ await page.getByRole('button',{name:'创建我的第一个 Team',exact:true}).click();
+ const creating=page.getByRole('dialog',{name:'新建 Team',exact:true});
+ await creating.getByRole('button',{name:'选择或新建文件夹…',exact:true}).click();
+ await creating.getByText('可以使用这个文件夹。',{exact:true}).waitFor();
+ await creating.getByLabel('名称',{exact:true}).fill('Lifecycle');
  const actionReceipt=(name,matches=()=>true)=>page.waitForResponse(response=>{
   if(!response.url().endsWith('/api/action')||!response.ok())return false;
   const body=response.request().postDataJSON();
@@ -33,6 +40,9 @@ async function fixture(t) {
  await creating.getByRole('button',{name:'创建',exact:true}).click();
  await creating.waitFor({state:'hidden'});
  const createdSession=await (await created).json();
+ const rosterSetup=page.getByRole('dialog',{name:'配置阵容',exact:true});
+ await rosterSetup.getByRole('button',{name:'关闭配置阵容',exact:true}).click();
+ await rosterSetup.waitFor({state:'hidden'});
  const editor=page.getByLabel('输入问题',{exact:true});
  await editor.waitFor({state:'visible'});
  assert.equal(await editor.evaluate(node=>!!node.closest('[inert]')),false);

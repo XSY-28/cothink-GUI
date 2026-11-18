@@ -1,7 +1,7 @@
 import React, {useEffect, useRef, useState} from "react";
 import {Modal} from "./Modal.jsx";
 
-export function ProjectDialog({commands, workspace, projects = [], rosters = [], recentRosterId, onSaved, onOpenExisting, onClose}) {
+export function ProjectDialog({commands, workspace, projects = [], rosters = [], recentRosterId, firstRun, onSaved, onOpenExisting, onClose}) {
   const binding = !!workspace;
   const title = workspace?.project ? "更换项目目录" : binding ? "关联项目目录" : "新建 Team";
   const [name, setName] = useState(""), [path, setPath] = useState("");
@@ -129,7 +129,8 @@ export function ProjectDialog({commands, workspace, projects = [], rosters = [],
   const saveLabel = binding ? "保存目录" : "创建";
   return <Modal title={title} onClose={()=>{if (!saveBusy.current) onClose();}}>
     <form onSubmit={save}>
-      <p>选一个 Team 文件夹。每个新对话会在其中创建自己的子文件夹。</p>
+      <p>{firstRun ? "为这个项目选一个文件夹。每条对话的文件成果会放进各自的子文件夹。" :
+        "选一个 Team 文件夹。每个新对话会在其中创建自己的子文件夹。"}</p>
       {!binding && <label>名称<input autoComplete="off" required value={name} disabled={saving || !!uncertain}
         placeholder="例如：个人网站" onChange={event=>setName(event.target.value)}/></label>}
       {!binding && name.trim() && !validName && <p className="error-text" role="alert">Team 名称须为 1—80 个字符。</p>}
@@ -162,7 +163,7 @@ export function ProjectDialog({commands, workspace, projects = [], rosters = [],
         <datalist id="recent-projects">{projects.map(project=><option key={project} value={project}/>)}</datalist>
         {path.trim() && <button type="button" disabled={busy || saving || !!uncertain} onClick={()=>inspect()}>{busy ? "正在检查…" : "只读检查目录"}</button>}
       </details>
-      {!binding && <label>默认阵容<select value={defaultRosterId} disabled={saving || !!uncertain}
+      {!binding && !firstRun && <label>默认阵容<select value={defaultRosterId} disabled={saving || !!uncertain}
         onChange={event=>setDefaultRosterId(event.target.value)}>
         <option value="">不设默认，每条对话单独选择</option>
         {rosters.map(roster=><option key={roster.id} value={roster.id}>{roster.name}{roster.id===recentRosterId?"（最近）":""}</option>)}

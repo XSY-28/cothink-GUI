@@ -6,7 +6,7 @@ import { chromium } from "playwright";
 import { fixture } from "./helpers/pi-fixture.js";
 import { fixtureConversation, teamId } from "./helpers/gui-controller-fixture.js";
 import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
-import { chooseRailCreation, railButton } from "./helpers/gui-rail.js";
+import { chooseRailCreation, finishFirstRoster, railButton } from "./helpers/gui-rail.js";
 import { createTeamConfig, load, saveConfig, startGuiServer } from "./gui-navigation.fixture.js";
 
 test("search failures and rejected renames stay actionable in their dialogs", async t => {
@@ -140,9 +140,10 @@ test('compact sidebar keeps three Teams and project conversations separate witho
     await dialog.getByText('手动输入路径',{exact:true}).click();
     await dialog.getByLabel('项目绝对路径').fill(folder);
     await dialog.getByRole('button',{name:'只读检查目录'}).click();
-    await dialog.getByRole('combobox',{name:'默认阵容',exact:true}).selectOption(teamId);
+    if(name!==names[0])await dialog.getByRole('combobox',{name:'默认阵容',exact:true}).selectOption(teamId);
     await dialog.getByRole('button',{name:'创建',exact:true}).click();
     await dialog.waitFor({state:'hidden'});
+    if(name===names[0])await finishFirstRoster(page,"UI fixture");
     await fillDraft(name+' 第一份草稿');
     await createConversation();
     await fillDraft(name+' 第二份草稿');

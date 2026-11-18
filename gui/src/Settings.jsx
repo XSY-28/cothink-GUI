@@ -422,10 +422,9 @@ export function Settings({
               }[tab]
             }
           </h3>
-          {!boot.configured && (
+          {!boot.configured && tab==="providers" && (
             <div className="inset-note onboarding">
-              首次使用：先保存认证，再选主副模型并命名
-              阵容。全部设置均不产生模型调用。
+              保存凭据后，回到阵容选择主模型和副模型。配置期间不会发送模型请求。
             </div>
           )}
           {error && (

@@ -1,4 +1,4 @@
-import { taskDisplayStatus } from "./task.js";
+import { readRequest, taskDisplayStatus } from "./task.js";
 
 export function publicModel(ref) {
   return ref &&
@@ -98,4 +98,21 @@ export function projectGuiProcessCheck(record, messages) {
     unexecuted: (saved.unexecuted ?? []).map(({taskId,memberId,status}) => ({taskId,memberId,status})),
     observations,
   };
+}
+
+export const hasFileWork = record => !!(record.work || record.deliveryRef || record.projectOperation?.childTaskIds?.length || record.projectOperation?.continuation?.draft);
+
+export function taskSummaryRequests(home,record,{status,hasWork}) {
+  // An overview reads the final reply or the failed request's actual model.
+  const requestIds=record.requestIds.filter(id=>id===record.finalCallId);
+  let failedModel;
+  if(record.flow==="unified" && status==="failed" && !hasWork && record.requestIds.length===1){
+    const [requestId]=record.requestIds;
+    if(!requestIds.includes(requestId))requestIds.push(requestId);
+    try {
+      const request=readRequest(home,record.id,requestId);
+      if(request.sent===true && request.status==="failed")failedModel=publicModel(request.actualModel);
+    } catch { /* Keep the task error visible if request identity cannot be read. */ }
+  }
+  return {requestIds,failedModel};
 }
