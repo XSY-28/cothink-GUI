@@ -94,7 +94,9 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
   const headers = {
     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob: https:; font-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    get "Content-Security-Policy"() {
+      return `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob: https:; font-src 'self'; frame-src blob: ${origin}/reply-preview.html; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`;
+    },
   };
   const send = (res, status, value, type = "application/json; charset=utf-8") => {
     res.writeHead(status, { ...headers, "Content-Type": type });
@@ -250,7 +252,11 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
       if (!inside(root, path)) throw fail(403, "资源路径不允许。");
       if (!(await stat(path)).isFile()) throw fail(404, "资源不存在。");
       const data = await readFile(path);
-      res.writeHead(200, { ...headers, "Content-Type": mime[extname(path)] ?? "application/octet-stream", "Content-Length": data.length });
+      const previewHeaders = url.pathname === "/reply-preview.html" ? {
+        "X-Frame-Options":"SAMEORIGIN", "X-DNS-Prefetch-Control":"off",
+        "Content-Security-Policy":"sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+      } : {};
+      res.writeHead(200, { ...headers, ...previewHeaders, "Content-Type": mime[extname(path)] ?? "application/octet-stream", "Content-Length": data.length });
       res.end(req.method === "HEAD" ? undefined : data);
     } catch (error) {
       if(res.destroyed)return;

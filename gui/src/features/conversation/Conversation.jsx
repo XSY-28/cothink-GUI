@@ -184,7 +184,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     <ReplyHeading turn={turn} now={now} teamId={replyTeamId}>
                       {canStop && stop}
                     </ReplyHeading>
-                    {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。请核对已保存的执行记录。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。" : turn.status === "cancelled" ? "已停止。已完成的内容保留，停止不等于回滚；可查看此条执行记录后继续说明下一步。" : "本次未完整完成。请核对已有内容和执行记录；若有成果，文件入口会列在下方。"}</p>}
+                    {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。" : turn.status === "cancelled" ? "已停止。已完成的内容保留。" : "本次未完整完成。已有成果文件会列在下方。"}</p>}
                     {!turn.proposalRef&&!inProgress&&(turn.error || (task?.id===turn.taskId && task.error))&&<p className="error-text">{turn.error || task.error}</p>}
                     {failedModel && <div className={styles.incompleteAnswer}>
                       <p>请求失败的模型 <strong>{failedModel.provider} / {failedModel.modelId}</strong></p>
@@ -196,7 +196,8 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     {turn.proposalRef ? <WorkProposal turn={turn} disabled={!!boot.active||!!pending||session.readOnly}
                       onConfirm={()=>safely(commands.confirmWork(turn))} /> : turn.finalText ? (
                       <div className="prose">
-                        <TurnMarkdown text={turn.finalText} sessionId={session.id} taskId={turn.taskId} resolveImage={commands.resolveImage} />
+                        <TurnMarkdown text={turn.finalText} sessionId={session.id} taskId={turn.taskId} resolveImage={commands.resolveImage}
+                          onPreview={(preview,event)=>onOpenDetails(turn.taskId,"reply-preview",event,preview)} />
                       </div>
                     ) : !inProgress && (
                       <div className={styles.incompleteAnswer}>
@@ -285,9 +286,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   );
 }
 
-function TurnMarkdown({text,sessionId,taskId,resolveImage}) {
+function TurnMarkdown({text,sessionId,taskId,resolveImage,onPreview}) {
   const latest=useRef(resolveImage);
   latest.current=resolveImage;
   const resolve=React.useCallback(src=>latest.current({sessionId,taskId,src}),[sessionId,taskId]);
-  return <Markdown text={text} resolveImage={resolveImage?resolve:undefined}/>;
+  return <Markdown text={text} foldCode onPreview={onPreview} resolveImage={resolveImage?resolve:undefined}/>;
 }

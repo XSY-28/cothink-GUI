@@ -14,7 +14,7 @@ const {readTask,readRequests}=await load('src/task.js');
 
 const waitFor=async read=>{for(let i=0;i<500;i++){const value=await read();if(value)return value;await new Promise(r=>setTimeout(r,10));}throw Error('waiting fixture did not reach expected state');};
 
-test('background conversation refresh loads process details only while their reader is open',async t=>{
+test('ordinary conversation refresh leaves process details unloaded',async t=>{
  const ready=Promise.withResolvers(),release=Promise.withResolvers();
  const f=await fixture(t,async()=>{ready.resolve();await release.promise;return {text:'Visible finished answer'};});
  const c=await controller(t,f),session=await fixtureConversation(t,c);let host,browser;
@@ -33,11 +33,7 @@ test('background conversation refresh loads process details only while their rea
   };
   await refresh();const closed=processReads;await refresh();
   assert.equal(processReads,closed,'a closed reader must not poll full process history');
-  await reply.getByRole('button',{name:'查看过程',exact:true}).click();
-  const panel=page.getByRole('complementary',{name:'本轮协作'});await panel.waitFor();
-  await waitFor(()=>processReads>closed);const opened=processReads;await refresh();assert.ok(processReads>opened,'visible process details keep refreshing');
-  await page.getByRole('button',{name:/返回对话/}).click();await panel.waitFor({state:'hidden'});
-  await refresh();const hidden=processReads;await refresh();assert.equal(processReads,hidden,'closing the reader stops its process queries');
+  assert.equal(await reply.getByRole('button',{name:'查看过程',exact:true}).count(),0);
   release.resolve();await complete(c,accepted.taskId);await reply.getByText('Visible finished answer',{exact:true}).waitFor();
   assert.equal(f.calls.length,1,'view changes never generate another model call');
  } finally {release.resolve();await browser?.close();await host?.close();}
@@ -67,7 +63,11 @@ test('live owned request remains observable through slow stream and manager fail
  await page.getByLabel("输入问题",{exact:true}).waitFor();
 
  const reply=page.locator(`article[data-task-id="${root.taskId}"]`);
- await reply.getByRole('button',{name:'查看过程',exact:true}).click();
+ const openWorkRecords=async()=>{
+  await reply.getByRole('button',{name:'变更与检查',exact:true}).click();
+  await page.getByRole('button',{name:'执行记录',exact:true}).click();
+ };
+ await openWorkRecords();
  const panel=page.getByRole('complementary',{name:'本轮协作'});
  const expand=async()=>{await panel.waitFor();while(await panel.locator('details:not([open]) > summary:visible').count()){await panel.locator('details:not([open]) > summary:visible').first().click();}};
  await panel.getByText(/a · 本轮实际执行/).waitFor();
@@ -91,14 +91,14 @@ test('live owned request remains observable through slow stream and manager fail
  output.end('data: '+JSON.stringify({id:'slow',object:'chat.completion.chunk',model:'main',choices:[{index:0,delta:{},finish_reason:'stop'}],usage:{prompt_tokens:12,completion_tokens:5,total_tokens:17}})+'\n\ndata: [DONE]\n\n');release.resolve();
  const partial=await complete(c,root.taskId);assert.equal(partial.status,'partial',partial.error);assert.match(partial.error,/缺少经理终稿/);assert.equal(f.calls.length,4);
  await page.reload();await reply.getByRole('button',{name:'a.txt',exact:false}).waitFor();await reply.getByRole('button',{name:'b.txt',exact:false}).waitFor();
- await reply.getByRole('button',{name:'查看过程',exact:true}).click();await panel.getByText(/a · 本轮实际执行/).waitFor();await panel.locator('.turn-timing').scrollIntoViewIfNeeded();
+ await openWorkRecords();await panel.getByText(/a · 本轮实际执行/).waitFor();await panel.locator('.turn-timing').scrollIntoViewIfNeeded();
  await page.screenshot({path:join(directory,'task-4-partial-files.png')});
  await reply.getByRole('button',{name:'b.txt',exact:false}).click();await page.getByText('base B',{exact:false}).waitFor();
  const unknown=await submitDraft(c,{sessionId:session.id,input:'Inspect a request with no confirmed response'});
  assert.equal((await complete(c,unknown.taskId)).status,'outcome_unknown');
  await page.reload();const unknownReply=page.locator(`article[data-task-id="${unknown.taskId}"]`);
- await unknownReply.getByText('请求结果未知，不会自动重发。请查看此条执行记录核对已保存内容。',{exact:true}).waitFor();
- await unknownReply.getByRole('button',{name:'查看过程',exact:true}).click();await panel.getByText(/主模型经理/).waitFor();await expand();
+ await unknownReply.getByText('请求结果未知，不会自动重发。',{exact:true}).waitFor();
+ assert.equal(await unknownReply.getByRole('button',{name:'查看过程',exact:true}).count(),0);
  await page.screenshot({path:join(directory,'task-4-unknown.png')});
  assert.equal(f.calls.length,5);assert.deepEqual(errors,[]);
  } finally {if(output&&!output.writableEnded){if(!output.headersSent)output.writeHead(200,{'Content-Type':'text/event-stream'});output.end('data: [DONE]\n\n');}release.resolve();}

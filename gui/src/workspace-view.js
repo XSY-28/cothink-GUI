@@ -15,6 +15,27 @@ export function restoreDetailFocus(preferred) {
     if (document.activeElement === node) break;
   }
 }
+export function bindDrawerKeys(node, modal, onClose) {
+  if (!node) return;
+  const items = () => [...node.querySelectorAll('button,input,select,textarea,a[href],summary,iframe,[tabindex="0"]')]
+    .filter(n => !n.disabled && !n.closest("[inert]") && n.getClientRects().length);
+  (items()[0] || node).focus();
+  const key = event => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+    }
+    if (modal && event.key === "Tab") {
+      const elements = items(), first = elements[0], last = elements.at(-1);
+      if (!elements.includes(document.activeElement)) {event.preventDefault(); (event.shiftKey ? last : first)?.focus();}
+      else if (event.shiftKey && document.activeElement === first) {event.preventDefault(); last?.focus();}
+      else if (!event.shiftKey && document.activeElement === last) {event.preventDefault(); first?.focus();}
+    }
+  };
+  node.addEventListener("keydown", key);
+  return () => node.removeEventListener("keydown", key);
+}
+
 // Only disposable presentation choices belong here. Host records never enter storage.
 export function readDisplayPreferences(storage, fallbackTheme = "light") {
   let value;

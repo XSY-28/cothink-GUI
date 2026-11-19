@@ -641,14 +641,8 @@ test("application refreshes preserve typed drafts across sessions and cancel the
     assertUngrouped();
     assert.equal(container.querySelector("textarea").value, "saved b");
 
-    // Opening and unmounting the reader keeps A's draft and sends nothing.
     await openHistory("Active chat");
-    assert.equal(container.querySelector(".detail-wrapper"), null);
-    await act(()=>container.querySelector('[aria-label="查看过程"]').click());
-    await settle();
-    assert.ok(container.querySelector(".detail-wrapper"));
-    await act(() => [...container.querySelectorAll("button")].find(n => n.textContent === "← 返回对话").click());
-    assert.equal(container.querySelector(".detail-wrapper"), null);
+    assert.equal(container.querySelector('[aria-label="查看过程"]'),null);
     assert.equal(container.querySelector("textarea").value, "new unsent a");
     assert.equal(actions.some(a => a.action === "task.submit"), false);
 

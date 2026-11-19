@@ -1,4 +1,4 @@
-import React, {createContext,useContext,useEffect,useRef,useState} from "react";
+import React, {createContext,useContext,useEffect,useId,useRef,useState} from "react";
 import ReactMarkdown, {defaultUrlTransform} from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -7,6 +7,7 @@ import {copyText} from "./api.js";
 
 const h=React.createElement;
 const ImageResolver=createContext(null);
+const ReplyPreview=createContext(null);
 const trustedTypes=new Set(["image/png","image/jpeg","image/webp"]);
 function localImageReference(src) {
   if(/^(?:cothink-)?material:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(src))return true;
@@ -52,8 +53,16 @@ function MarkdownImage({src="",alt=""}) {
       h("a",{href:remote.href,target:"_blank",rel:"noopener noreferrer"},"打开来源")));
 }
 
-function MarkdownCodeBlock({children}) {
+function MarkdownCodeBlock({children, node, foldable = false}) {
+  const onPreview=useContext(ReplyPreview);
   const block=useRef(null),[status,setStatus]=useState("");
+  const [expanded,setExpanded]=useState(false);
+  const blockId=useId();
+  const language=node.children[0]?.properties?.className?.find(name=>name.startsWith("language-"))?.slice(9);
+  const source=node.children[0]?.children?.[0]?.value??"";
+  const previewable=foldable&&onPreview&&(language
+    ? /^(html5?|svg)$/i.test(language)
+    : /^\s*(?:<!doctype\s+html\b|<html\b|<svg\b)/i.test(source));
   async function copy() {
     try {
       await copyText(block.current?.textContent??"");
@@ -61,8 +70,12 @@ function MarkdownCodeBlock({children}) {
     } catch {setStatus("复制失败，请手动选中");}
   }
   return h("div",{className:"markdown-code-block"},
-    h("button",{type:"button",onClick:copy},"复制代码"),status&&h("span",{role:"status"},status),
-    h("pre",{ref:block},children));
+    h("div",{className:"code-actions"},
+      foldable&&h("button",{type:"button",className:"code-toggle","aria-expanded":expanded,"aria-controls":blockId,
+        onClick:()=>setExpanded(!expanded)},expanded?"收起代码":"展开代码",language&&" · "+language),
+      previewable&&h("button",{type:"button",onClick:event=>onPreview({source,offset:node.position.start.offset},event)},"预览"),
+      h("button",{type:"button",onClick:copy},"复制代码"),status&&h("span",{role:"status"},status)),
+    h("pre",{id:blockId,ref:block,hidden:foldable&&!expanded},children));
 }
 
 const components={
@@ -71,12 +84,14 @@ const components={
   a:({href,children})=>h("a",{href,target:"_blank",rel:"noreferrer noopener"},children),
 };
 
-export function Markdown({text,resolveImage}) {
-  return h(ImageResolver.Provider,{value:resolveImage},h(ReactMarkdown,{
+const replyComponents={...components,pre:props=>h(MarkdownCodeBlock,{...props,foldable:true})};
+
+export function Markdown({text,resolveImage,foldCode=false,onPreview}) {
+  return h(ReplyPreview.Provider,{value:onPreview},h(ImageResolver.Provider,{value:resolveImage},h(ReactMarkdown,{
     remarkPlugins:[remarkGfm,remarkMath],
     rehypePlugins:[[rehypeKatex,{throwOnError:false,trust:false,strict:"ignore"}]],
     skipHtml:true,
     urlTransform:(url,key,node)=>key==="src"&&node.tagName==="img"&&localImageReference(url)?url:defaultUrlTransform(url),
-    components,
-  },text||""));
+    components:foldCode?replyComponents:components,
+  },text||"")));
 }

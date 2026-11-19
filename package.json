@@ -1,6 +1,6 @@
 {
   "name": "cothink-v2",
-  "version": "0.8.14-desktop.29",
+  "version": "0.8.14-desktop.32",
   "files": [
     "bin/cothink.js",
     "src/cli.js",
@@ -120,6 +120,7 @@
     "src/gui-workspace-state.js",
     "src/gui-session-persistence.js",
     "gui/dist",
+    "gui/public",
     "gui/src",
     "gui/index.html",
     "gui/vite.config.js",

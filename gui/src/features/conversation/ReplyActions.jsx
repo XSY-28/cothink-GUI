@@ -55,7 +55,6 @@ export function UserMessage({turn, onCopy}) {
 
 export function ReplyActions({turn, forkDisabled, showChanges, onDetails, onCopy, onFork}) {
   return <footer className={styles.answerActions}>
-    <ReplyAction icon="process" label="查看过程" onClick={event=>onDetails(turn.taskId,"collaboration",event)} />
     {turn.finalText && <ReplyAction icon="copy" label="复制原文" onClick={()=>onCopy(turn.finalText)} />}
     <ReplyAction icon="fork" label="从这里分支" disabled={forkDisabled}
       description="保留截至此条回复的上下文，在新对话中继续" onClick={()=>onFork(turn.taskId)} />
