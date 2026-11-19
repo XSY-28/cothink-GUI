@@ -17,9 +17,21 @@ test('unified no-directory reads frozen builtin on demand and records actual use
  const first=JSON.stringify(f.calls[0].body),second=JSON.stringify(f.calls[1]?.body);
  assert.match(first,/doc-maintenance/);assert.doesNotMatch(first,/帮助 coding agent 在现有仓库中维护/);assert.doesNotMatch(first,/\/Users\/|sourceDirectory|sourcePath/);
  assert.match(second,/帮助 coding agent 在现有仓库中维护/);assert.equal(f.calls.length,2);assert.equal(task.record.work,undefined);
- assert.deepEqual(task.record.skillResources.map(s=>s.name),['doc-maintenance','context-management']);
+ assert.deepEqual(task.record.skillResources.map(s=>s.name),['doc-maintenance','context-management','web-design-engineer']);
  assert.equal(task.record.tools.filter(x=>x.kind==='skill_resource_read').length,1);
  assert.ok(!f.calls[0].body.tools.some(x=>['read','write','bash','resource_exec'].includes(x.function.name)));
+});
+test('web design guidance and a nested style recipe are readable from a default unified task',async t=>{
+ const name='web-design-engineer',path='references/style-recipes/linear.md';
+ const f=await fixture(t,(_,n)=>n===1?{toolCalls:[{name:'read_skill',args:{name,path}}]}:{text:'Design reference received'});
+ const task=await runProjectTurn({...opts(f),input:'/skill:web-design-engineer Design a landing page'});
+ assert.equal(task.record.status,'completed',task.record.error);
+ assert.match(JSON.stringify(f.calls[0].body),/Web Design Engineer/);
+ assert.match(JSON.stringify(f.calls[1].body),/Quiet luxury for developer tools/);
+ const reads=task.record.tools.filter(x=>x.kind==='skill_resource_read' && x.resourceName===name);
+ assert.ok(reads.some(x=>x.resourcePath==='SKILL.md' && x.explicit));
+ assert.ok(reads.some(x=>x.resourcePath===path && !x.explicit));
+ assert.deepEqual(task.record.skillResources.find(s=>s.name===name).unavailable,[]);
 });
 test('read_skill accepts its advertised URI and rejects paths outside the selected frozen skill',async t=>{
  const name='frontend-design',uri='skill:frontend-design/SKILL.md';
@@ -60,8 +72,8 @@ test('explicit unified skill expansion consumes frozen body after source changes
 });
 test('legacy CLI defaults remain empty while builtin disable and external replacement are explicit',async t=>{
  const f=await fixture(t);const legacy=await runTurn({home:f.home,cwd:f.cwd,input:'answer',config:{formatVersion:2,...f.models},singleModel:true});
- assert.equal(legacy.record.status,'completed',legacy.record.error);assert.deepEqual(legacy.record.answerSkills,[]);assert.doesNotMatch(JSON.stringify(f.calls[0].body),/doc-maintenance|context-management/);
- const o=opts(f);o.frozenConfig.piResources={builtinSkills:{disabled:['doc-maintenance','context-management']}};
+ assert.equal(legacy.record.status,'completed',legacy.record.error);assert.deepEqual(legacy.record.answerSkills,[]);assert.doesNotMatch(JSON.stringify(f.calls[0].body),/doc-maintenance|context-management|web-design-engineer/);
+ const o=opts(f);o.frozenConfig.piResources={builtinSkills:{disabled:['doc-maintenance','context-management','web-design-engineer']}};
  const disabled=await runProjectTurn(o);assert.deepEqual(disabled.record.skillResources,[]);assert.equal(disabled.record.work,undefined);
  const dir=join(f.home,'replacement');mkdirSync(dir);writeFileSync(join(dir,'SKILL.md'),'---\nname: doc-maintenance\ndescription: Explicit alternative\n---\nREPLACEMENT_BODY');
  o.frozenConfig.piResources.skills=[dir];const replaced=await runProjectTurn(o);assert.equal(replaced.record.skillResources.length,1);assert.equal(replaced.record.skillResources[0].sourceKind,'selected');
@@ -80,7 +92,7 @@ test('generic restore never refreshes sources and rejects manifest conflict or c
  freezeTaskSkillResources({task:restored});assert.equal(record.work,undefined);assert.match(readTaskSkillResource(restored,'skill:doc-maintenance/SKILL.md').bytes.toString(),/Doc Maintenance/);
  assert.throws(()=>getTaskSkillResources({skillResources:null}),{code:'SKILL_CHANGED'});
  assert.throws(()=>getTaskSkillResources({skillResources:record.skillResources,work:{skillResources:[]}}),{code:'SKILL_CHANGED'});
- assert.equal(getTaskSkillResources({work:{skillResources:record.skillResources}}).length,2);
+ assert.equal(getTaskSkillResources({work:{skillResources:record.skillResources}}).length,3);
  writeFileSync(saved.path,'changed frozen bytes');assert.throws(()=>freezeTaskSkillResources({task:restored}),{code:'SKILL_CHANGED'});
  const running={...restored,record:{...record,status:'running'}};
  assert.throws(()=>readFrozenSkill(running,{name:saved.name,path:'skill:'+saved.name+'/SKILL.md'}),{code:'SKILL_CHANGED'});
@@ -89,9 +101,9 @@ test('shared settings capability DTO reports real limits and config save survive
  const {saveConfig,loadConfig}=await import('../src/config.js'),{createTeamConfig}=await import('../src/teams.js'),{createGuiController}=await import('../src/gui-controller.js');
  const f=await fixture(t);saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},'Fixture',teamId));
  const c=await createGuiController({home:f.home,cwd:f.cwd});t.after(()=>c.close());const session=await fixtureConversation(t,c);
- const capability=await c.getSessionCapabilities(session.id);assert.equal(capability.version,1);assert.equal(capability.skills.length,2);assert.equal(capability.permissions.fileWrite,false);assert.equal(capability.environment.contextToolsAvailable,true);assert.doesNotMatch(JSON.stringify(capability),new RegExp(f.home));
- await c.action('settings.builtinSkills',{builtinSkills:{disabled:['doc-maintenance']}});assert.deepEqual(loadConfig(f.home).piResources.builtinSkills,{disabled:['doc-maintenance']});
- assert.deepEqual((await c.getSessionCapabilities(session.id)).skills.map(x=>x.name),['context-management']);assert.equal(f.calls.length,0);
+ const capability=await c.getSessionCapabilities(session.id);assert.equal(capability.version,1);assert.equal(capability.skills.length,3);assert.equal(capability.permissions.fileWrite,false);assert.equal(capability.environment.contextToolsAvailable,true);assert.doesNotMatch(JSON.stringify(capability),new RegExp(f.home));
+ await c.action('settings.builtinSkills',{builtinSkills:{disabled:['web-design-engineer']}});assert.deepEqual(loadConfig(f.home).piResources.builtinSkills,{disabled:['web-design-engineer']});
+ assert.deepEqual((await c.getSessionCapabilities(session.id)).skills.map(x=>x.name),['doc-maintenance','context-management']);assert.equal(f.calls.length,0);
  await assert.rejects(c.action('settings.builtinSkills',{builtinSkills:{disabled:['Doc-maintenance']}}),/builtin|内置/);
 });
 test('model capability tool and settings read the same active host facts',async t=>{

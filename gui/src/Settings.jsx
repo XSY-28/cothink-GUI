@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Modal } from "./Modal.jsx";
+import { builtinSkillUse } from "./view.js";
 import styles from "./Settings.module.css";
 import { SessionRow } from "./features/navigation/Navigation.jsx";
 import { ExecutionCheck } from "./ExecutionCheck.jsx";
@@ -239,10 +240,6 @@ function WorkSettings({ boot, onSave, inspect }) {
     </form>
   );
 }
-const builtinSkillUse = {
-  "doc-maintenance": "随代码变更维护用法与文档，并核对说明是否准确。",
-  "context-management": "查找当前对话的上下文，并在需要时整理记要。",
-};
 const skillSourceLabels={builtin:"内置",package:"已启用的包",selected:"本地来源"};
 
 function LocalSkillSettings({paths:savedPaths,configured,commands,onSaved}) {

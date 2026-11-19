@@ -76,7 +76,9 @@ function collectSkillResources(skill,resourceRoot){
   if(root)privateDirectory(root);
   const files={},modes={},unavailable=[],selected=new Set(['SKILL.md']),roots=new Set(['references','scripts','assets','templates']);
   for(const m of skill.body.matchAll(/\]\(([^)\s]+)\)|`([^`\n\s]+)`/g)){
+    // The package manifest verifies builtin reference files. Inline code also names CSS properties and example output files.
     const candidate=(m[1]??m[2]).replace(/\/$/,'');if(candidate.includes(':')||candidate.startsWith('#'))continue;
+    if(skill.sourceKind==='builtin' && m[2] && (!safeRelative(candidate)||!existsSync(join(sourceDirectory,candidate))))continue;
     if(!safeRelative(candidate)){unavailable.push({path:candidate,reason:'Reference escapes selected skill or uses an unsupported path'});continue;}
     if(!existsSync(join(sourceDirectory,candidate))){unavailable.push({path:candidate,reason:'Referenced resource is missing'});continue;}roots.add(candidate);
   }

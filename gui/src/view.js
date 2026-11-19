@@ -1,5 +1,10 @@
 export const modelName = (model) =>
   model ? `${model.provider} / ${model.modelId}` : "来源未记录";
+export const builtinSkillUse = {
+  "web-design-engineer": "设计和改版网页界面，按需查阅布局、交互和视觉样式范例。",
+  "doc-maintenance": "随代码变更维护用法与文档，并核对说明是否准确。",
+  "context-management": "查找当前对话的上下文，并在需要时整理记要。",
+};
 export const THINKING_LEVELS = Object.freeze(["low","high","max"]);
 export function normalizeThinkingPreference(value) {
   if (value === undefined || value === null || value === '') return 'high';

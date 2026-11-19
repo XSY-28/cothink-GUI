@@ -127,6 +127,197 @@
           "mode": 420
         }
       ]
+    },
+    {
+      "name": "web-design-engineer",
+      "version": "1.3.0",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "c9be8dbd49b0b21082169b781f8deee3f078d89ece0d943c275bddc03c6da1c6",
+          "mode": 420
+        },
+        {
+          "path": "assets/LICENSE",
+          "sha256": "1126322e2cc8d165adc4c792eeb195717de2bcc7b39be1ce77959d78e87ef685",
+          "mode": 420
+        },
+        {
+          "path": "assets/source.json",
+          "sha256": "d777b1d11b64d50f2b9f6de08529abf7a79f039d40c8fbab0f7119e393451a52",
+          "mode": 420
+        },
+        {
+          "path": "references/advanced-patterns.md",
+          "sha256": "e25a37f18e9c578ce24c90ba7b95025eb28c2c75bb03df91b365af9fb8f304d8",
+          "mode": 420
+        },
+        {
+          "path": "references/block-library.md",
+          "sha256": "b24ebc20fb171c0462dfebc7a180598c3f9009d64bb692811109ae61375929c8",
+          "mode": 420
+        },
+        {
+          "path": "references/browser-acceptance.md",
+          "sha256": "59b6bd23d41f8ae1fa05b6dece2384c1195f5c3ccae7ff2c2aae94930a963751",
+          "mode": 420
+        },
+        {
+          "path": "references/critique-guide.md",
+          "sha256": "2f57cce5a9d65be8a24978080d9e99f6d0c7929279f142ca86bde0cca1c23dcb",
+          "mode": 420
+        },
+        {
+          "path": "references/design-calibration.md",
+          "sha256": "754086f26f7f880cb23559a16b446847c72673a8428087bc539da2d9137fd8e3",
+          "mode": 420
+        },
+        {
+          "path": "references/design-directions.md",
+          "sha256": "6ca039cdb5452c3ecdf95b7f846cf949c601d4cb8ea20854d0ccf0cd7fcd94d4",
+          "mode": 420
+        },
+        {
+          "path": "references/failure-patterns.md",
+          "sha256": "7c87f57f090180d1731c974f5f9a45b8704b9a134f482b883a021ab4a88ea66d",
+          "mode": 420
+        },
+        {
+          "path": "references/redesign-protocol.md",
+          "sha256": "3c79fc6fde3bed3ca046f43d99ca58be74e36e9c69b7076a7322f8140a980294",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/INDEX.md",
+          "sha256": "2eac072037914205fcf219228e68683d1882a525ff5776dcd4ecb52ce4b62435",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/active-theory.md",
+          "sha256": "3bca2379cbe0fcf1be9f84de5b0291f1a6d4aeede42fe97e4b682cb29371d170",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/aesop.md",
+          "sha256": "94a5d2f1d0613953d7390646322e907bf8139816dd7669916bb73f4ed532146d",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/apple-hig.md",
+          "sha256": "94f511fabd22f65591679b7dfa101b96973f3c2060516adbecdfbb1f4f7e36cc",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/are-na.md",
+          "sha256": "623804a342c853774bb824bb281e5df3d515dcef3cc9e77c7914ed5d6547ce94",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/balenciaga-post-2017.md",
+          "sha256": "21412888d7e6225e70bad89c8b0b2ed69da0730a7c560359f61490f293ee8b16",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/bloomberg-businessweek-turley.md",
+          "sha256": "42d3beaf6892e2299e73190e2645b14e25acd8bc89b35e9403194151c854fb37",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/bloomberg-terminal.md",
+          "sha256": "1ec2e502b3f1137ae0c85f24848f8387b95bed1428fcbbdaff1e77d5d1a84b9d",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/dieter-rams-braun.md",
+          "sha256": "ab2eb763c711877601c1c672b9e3c3a980fe3d0512197c83e05f942941f4cdd3",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/field-io.md",
+          "sha256": "c765ad82f53d440a8cda70df8dd0c8e799d194da4d6d2fd73e1839c49ccc357f",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/headspace-meditation.md",
+          "sha256": "4940e6ee8f132b7695b719b4eb894dbeef8369294e53c9434e12e49ad8197f4a",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/linear.md",
+          "sha256": "06c554638918c6ebcc0ff2d9b0841fe6d6077bccbcc71051aef5ad1f7fa576be",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/mailchimp-freddie.md",
+          "sha256": "1b06325763809c4b0656527f3ce6c25f3160c001c6fd2ab94de6af300150e3e0",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/mid-century-modern.md",
+          "sha256": "281f5acfca37d69bd02cdc37f33e3b2f5dbf3390c57a2629fb24e4ba3db0a0c9",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/monocle-magazine.md",
+          "sha256": "df9c7c4713dd84725fe544fb8335377ef841e9371359d133efbdbef3bc4075b2",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/muji-kenya-hara.md",
+          "sha256": "a447bfbea3db9ec5bea0dc55c6aa3c4426fc4d4d018f1b1f893957a1701a8a1b",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/notion-pre-ai.md",
+          "sha256": "1b85ae5aa77ee1b0a523b3557045678c022e748f6bd427248f19052d00f8cbe1",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/nyt-the-daily.md",
+          "sha256": "d7a3b8a3969b62b19a917fc1e0e0602acdfeb6f16dfdb4c9d4d6a208261c300a",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/pentagram.md",
+          "sha256": "e42a40687b0b7f06ac23ecd747cfe0fa902c60e2d6b3b553ab2ab7996fa75a7f",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/raycast.md",
+          "sha256": "b22651b5b35a67b2ec06217d1554c193912177c2eb56406fe6dafc171f3304c6",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/resn-storytelling.md",
+          "sha256": "88602c9962d8630d0c06ac4e72b732bc4dbedd8e4ef9ed4fe9cac0dbfea0ac1e",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/stripe-press.md",
+          "sha256": "f5b3863bc4f8fcd7b803eedbb8884f8b97c76a2e082c2627d635605d779a5644",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/tufte-dataink.md",
+          "sha256": "28d0503016076db52508cb1d05406939f8c765e58fe13e57806f0417b9f9bcc9",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/vercel-mesh.md",
+          "sha256": "04b8710a6ffe26619ac53804f2c5fd59c2641727b9ed8e638cbb52d75b16be5d",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/vignelli-swiss-helvetica.md",
+          "sha256": "c249bc06c32d6fa8daeee4c9e51dfb587f0a88726d6afc6679767d8e9300e203",
+          "mode": 420
+        },
+        {
+          "path": "references/style-recipes/y2k-retrofuturism.md",
+          "sha256": "0f9495838f2477ade046e092bbbedf04c83f82f48ce89505ff514546ef69ef2b",
+          "mode": 420
+        }
+      ]
     }
   ]
 }
