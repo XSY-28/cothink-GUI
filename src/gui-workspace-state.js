@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { acquireSessionWriter, writePrivateBytes, writePrivateJson } from "./storage.js";
+import avatarManifest from "../gui/src/assets/team-avatars/manifest.json" with {type:"json"};
 
 const writerId = "00000000-0000-4000-8000-000000000001";
 export const isWorkspaceId = id =>
@@ -138,11 +139,24 @@ function workspace(id, name, project, defaultRosterId) {
   return {id, revision:0, name, project, defaultRosterId, archived:false, createdAt:new Date().toISOString()};
 }
 
-export function createGuiWorkspace(home, {workspaceId, name, project, defaultRosterId}) {
+export function validateWorkspaceAction(name, args) {
+  const keys = name === "workspace.create" ? ["workspaceId","name","project","defaultRosterId"] :
+    name === "workspace.rebind" ? ["workspaceId","expectedRevision","path","operationId"] :
+    name === "workspace.bind" ? ["workspaceId","expectedRevision","path"] : ["workspaceId","expectedRevision","change"];
+  if (name === "workspace.create" && args && Object.hasOwn(args,"avatarId")) keys.push("avatarId");
+  if (!args || Object.keys(args).length !== keys.length || !keys.every(key => Object.hasOwn(args,key)) ||
+      !isWorkspaceId(args.workspaceId))
+    throw Error("项目 Team 参数无效。");
+}
+
+export function createGuiWorkspace(home, {workspaceId, name, project, defaultRosterId, avatarId}) {
+  if (avatarId !== undefined && !avatarManifest.some(avatar => avatar.id === avatarId))
+    throw Error("请选择列表中的 Team 头像。");
   return write(home, state => {
     const existing = state.workspaces.find(w => w.id === workspaceId);
     if (existing) throw workspaceError("WORKSPACE_CONFLICT", "该 Team 标识已存在；请打开已保存的 Team。", existing);
     const result = workspace(workspaceId,name,project,defaultRosterId);
+    if (avatarId !== undefined) result.avatarId = avatarId;
     assertUnique(state,result);
     state.workspaces.push(result);
     return {changed:true, result};

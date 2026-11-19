@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { chromium } from "playwright";
+import { chooseRailCreation } from "./helpers/gui-rail.js";
 import { fixture } from "./helpers/pi-fixture.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -12,7 +13,7 @@ const {saveConfig}=await load("src/config.js");
 const {createTeamConfig}=await load("src/teams.js");
 const {startGuiServer}=await load("src/gui-server.js");
 
-test("Team avatars use 巴巴祖 artwork when present and preserve navigation with placeholders", async t=>{
+test("a new Team keeps its chosen portrait in the sidebar and saved replies alongside the legacy default", async t=>{
   const f=await fixture(t);
   const rosterId="7c8094cd-3476-4bfa-8f53-055d87972896";
   saveConfig(f.home,createTeamConfig({formatVersion:2,...f.models},"Avatar fixture",rosterId));
@@ -32,13 +33,11 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
   ];
   const folders=mkdtempSync(join(tmpdir(),"cothink-avatar-unprepared-"));
   t.after(()=>rmSync(folders,{recursive:true,force:true}));
-  for(const item of teams){
-    const folder=join(folders,item.id);
-    mkdirSync(folder);
-    const workspace=await controller.action("workspace.create",{workspaceId:item.id,name:item.name,
-      project:folder,defaultRosterId:rosterId});
-    if(item===teams[0])item.project=workspace.project;
-  }
+  const [legacy,chosen]=teams;
+  const legacyFolder=join(folders,legacy.id);
+  mkdirSync(legacyFolder);
+  legacy.project=(await controller.action("workspace.create",{workspaceId:legacy.id,name:legacy.name,
+    project:legacyFolder,defaultRosterId:rosterId})).project;
   const h=await startGuiServer({controller,open:false});t.after(()=>h.close());
   const browser=await chromium.launch({headless:true});t.after(()=>browser.close());
   const page=await browser.newPage({viewport:{width:1280,height:800}});
@@ -49,6 +48,37 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
   const nav=page.getByRole("navigation",{name:"工作导航"});
   const [a,b]=teams.map(item=>nav.getByRole("button",{name:item.name,exact:true}));
   await a.waitFor();
+  await chooseRailCreation(page,"新建 Team");
+  const dialog=page.getByRole("dialog",{name:"新建 Team",exact:true});
+  const choices=dialog.getByRole("group",{name:"Team 头像"});
+  assert.equal(await choices.getByRole("radio").count(),9);
+  assert.equal(await choices.getByRole("radio",{name:"巴巴祖",exact:true}).isChecked(),true);
+  for (const name of ["巴巴爸爸","巴巴贝尔","巴巴拉拉","巴巴布莱特","巴巴祖","巴巴布拉伯","巴巴伯","巴巴妈妈","洛丽塔"]) {
+    const choice=choices.getByRole("radio",{name,exact:true});
+    await choice.check();
+    assert.equal(await choice.isChecked(),true);
+  }
+  await dialog.getByLabel("名称",{exact:true}).fill(chosen.name);
+  const chosenFolder=join(folders,chosen.name);
+  mkdirSync(chosenFolder);
+  await dialog.getByText("手动输入路径",{exact:true}).click();
+  await dialog.getByLabel("项目绝对路径",{exact:true}).fill(chosenFolder);
+  await dialog.getByRole("button",{name:"只读检查目录",exact:true}).click();
+  await dialog.getByLabel("默认阵容").selectOption(rosterId);
+  if (process.env.COTHINK_UI_SCREENSHOTS) {
+    mkdirSync(process.env.COTHINK_UI_SCREENSHOTS,{recursive:true});
+    await dialog.screenshot({path:join(process.env.COTHINK_UI_SCREENSHOTS,"team-avatar-picker.png")});
+  }
+  await dialog.getByRole("button",{name:"创建",exact:true}).click();
+  await dialog.waitFor({state:"hidden"});
+  const reopened=await createGuiController({home:f.home,suggestedProject:null});
+  t.after(()=>reopened.close());
+  const stored=(await reopened.bootstrap()).workspaces.find(w=>w.name===chosen.name);
+  assert.equal(stored.avatarId,"lolita");
+  chosen.id=stored.id;
+  await page.reload();
+  await b.waitFor();
+
   assert.equal(await nav.getByText(teams[0].name,{exact:true}).isVisible(),false,"the Team name must be hidden before hover");
   for(const item of [...teams,{id:null,name:"未分组记录",reply:"这份答复不属于项目 Team。"}]){
     const manager=SessionManager.create(f.cwd,join(f.home,"pi/sessions/main"));
@@ -103,26 +133,27 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
     assert.equal(await portrait.locator("img, canvas").count(),0,
       "the placeholder replaces missing artwork");
   }
-  async function checkReplyAvatar() {
+  async function checkReplyAvatar(expected=defaultAvatar) {
     await chat.waitFor();
-    assert.equal(await chat.getAttribute("data-team-avatar"),defaultAvatar);
-    if (!hasArtwork) {
+    assert.equal(await chat.getAttribute("data-team-avatar"),expected);
+    const file=join(artworkDir,"..",expected,"chat-static.png");
+    if (!existsSync(file)) {
       await checkPlaceholder(chat);
       return null;
     }
     const url=await chat.locator("img").evaluate(async img=>{await img.decode();return img.currentSrc;});
     const response=await page.request.get(url);
     assert.equal(response.headers()["content-type"],"image/png");
-    assert.deepEqual(await response.body(),readFileSync(join(artworkDir,"chat-static.png")));
+    assert.deepEqual(await response.body(),readFileSync(file));
     return url;
   }
-  async function checkSidebarAvatar(trigger) {
+  async function checkSidebarAvatar(trigger,expected=defaultAvatar) {
     const portrait=trigger.locator("[data-team-avatar]");
     await portrait.waitFor();
-    assert.equal(await portrait.getAttribute("data-team-avatar"),defaultAvatar);
-    if (!hasArtwork) await checkPlaceholder(portrait);
+    assert.equal(await portrait.getAttribute("data-team-avatar"),expected);
+    if (!existsSync(join(artworkDir,"..",expected,"sidebar-foreground.png"))) await checkPlaceholder(portrait);
   }
-  const chatA=await checkReplyAvatar();
+  await checkReplyAvatar();
   const chatStill=await chat.screenshot();
   assert.equal(await a.getAttribute("aria-current"),"page");
   assert.equal(await a.getAttribute("title"),null,"the native tooltip must not bypass the hover delay");
@@ -132,7 +163,7 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
   let idle;
   if (hasArtwork) {
     await canvas.waitFor();
-    await page.waitForFunction(()=>[...document.querySelectorAll("nav canvas")].every(c=>c.getContext("2d").getImageData(128,128,1,1).data[3]>0));
+    await page.waitForFunction(()=>document.querySelector('nav button[aria-current="page"] canvas')?.getContext("2d").getImageData(128,128,1,1).data[3]>0);
     idle=await canvas.evaluate(c=>c.toDataURL());
   }
   const screenshots=resolve(process.env.COTHINK_UI_SCREENSHOTS||"work/team-avatar/browser");
@@ -168,21 +199,34 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
   await page.mouse.move(450,5);
   await label.waitFor({state:"hidden"});
   if (hasArtwork) assert.equal(await canvas.evaluate(c=>c.toDataURL()),idle,"leaving restores the static foreground");
+  const dog=b.locator("[data-team-avatar-trigger]");
+  if (existsSync(join(artworkDir,"..","lolita","sidebar-motion-atlas.png"))) {
+    const dogCanvas=dog.locator("canvas");
+    const dogIdle=await dogCanvas.evaluate(c=>c.toDataURL());
+    await dog.hover();
+    await page.waitForFunction(idle=>document.querySelector('[data-team-avatar="lolita"] canvas')?.toDataURL()!==idle,dogIdle);
+    const pose=await dogCanvas.evaluate(c=>c.toDataURL());
+    await nav.getByText(chosen.name,{exact:true}).waitFor();
+    assert.equal(await dogCanvas.evaluate(c=>c.toDataURL()),pose);
+    await page.mouse.move(450,5);
+    await page.waitForFunction(idle=>document.querySelector('[data-team-avatar="lolita"] canvas')?.toDataURL()===idle,dogIdle);
+  }
   await page.emulateMedia({reducedMotion:"reduce"});
   await trigger.hover();
   const triggerB=b.locator("[data-team-avatar-trigger]");
-  await checkSidebarAvatar(triggerB);
+  await checkSidebarAvatar(triggerB,"lolita");
   const canvasB=triggerB.locator("canvas");
-  const idleB=hasArtwork?await canvasB.evaluate(c=>c.toDataURL()):null;
+  const secondArtwork=existsSync(join(artworkDir,"..","lolita","sidebar-foreground.png"));
+  const idleB=secondArtwork?await canvasB.evaluate(c=>c.toDataURL()):null;
   await triggerB.hover();
   await nav.getByText(teams[1].name,{exact:true}).waitFor({timeout:3500});
   assert.equal(await label.isVisible(),false,"moving to another Team cancels the previous reveal");
-  if (hasArtwork) assert.equal(await canvasB.evaluate(c=>c.toDataURL()),idleB,"reduced motion keeps the sidebar still but does not hide the label");
+  if (secondArtwork) assert.equal(await canvasB.evaluate(c=>c.toDataURL()),idleB,"reduced motion keeps the sidebar still but does not hide the label");
   await open(teams[1].name);
   await page.getByText(teams[1].reply,{exact:true}).waitFor();
   assert.equal(await a.getAttribute("aria-current"),null);
   assert.equal(await b.getAttribute("aria-current"),"page","opening another Team updates selection independently of its avatar");
-  assert.equal(await checkReplyAvatar(),chatA,"both Teams use the same default reply avatar");
+  await checkReplyAvatar("lolita");
   await open("未分组记录");
   await page.getByText("这份答复不属于项目 Team。",{exact:true}).waitFor();
   assert.equal(await chat.count(),0,"ungrouped replies must not borrow the preceding Team’s avatar");

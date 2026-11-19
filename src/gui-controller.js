@@ -10,7 +10,7 @@ import {projectMcpSummary} from "./project-mcp-work.js";
 import {taskSkillDirectory} from './skill-resources.js';
 import {resolvePackageResources} from './packages.js';
 import {
-  createGuiWorkspace, importGuiWorkspaceProjects, isWorkspaceId, isWorkspaceProject,
+  createGuiWorkspace, validateWorkspaceAction, importGuiWorkspaceProjects, isWorkspaceId, isWorkspaceProject,
   readGuiWorkspaces, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError, workspaceForSession,
 } from "./gui-workspace-state.js";
 import {persistNewGuiSession, assertNewGuiSessionId, scopeAfterTruncatedTail, freezeWorkspaceHistory} from "./gui-session-persistence.js";
@@ -1277,12 +1277,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       throw Error("默认阵容不存在或包含不可用的模型，请重新选择或留空。");
   }
   async function manageWorkspace(name,args) {
-    const keys = name === "workspace.create" ? ["workspaceId","name","project","defaultRosterId"] :
-      name === "workspace.rebind" ? ["workspaceId","expectedRevision","path","operationId"] :
-      name === "workspace.bind" ? ["workspaceId","expectedRevision","path"] : ["workspaceId","expectedRevision","change"];
-    if (!args || Object.keys(args).length !== keys.length || !keys.every(key => Object.hasOwn(args,key)) ||
-        !isWorkspaceId(args.workspaceId))
-      throw Error("项目 Team 参数无效。");
+    validateWorkspaceAction(name,args);
     return writeSelection(async () => {
       const infos = await summaries();
       const table = ["workspace.rebind","workspace.bind"].includes(name) ? readGuiWorkspaces(home) : discoverWorkspaces(infos);

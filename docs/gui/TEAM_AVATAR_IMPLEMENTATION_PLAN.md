@@ -1,6 +1,6 @@
 # CoThink GUI Team 头像施工文档
 
-配置本地素材后，当前 Team 默认头像是巴巴祖。角色选择、左栏尺寸、图标和名称显示位置的后续调整见[当前设计基线](../../DESIGN_BASELINE.md)。下文保留初版头像方案及验收边界。
+新建 Team 可从九个角色中选择头像，默认选中巴巴祖。小狗洛丽塔在悬停时切换为原版单帧姿势。角色选择、左栏尺寸、图标和名称显示位置的后续调整见[当前设计基线](../../DESIGN_BASELINE.md)。下文保留初版头像方案及验收边界。
 
 > **状态：2026-11-09，源码已实施，通过本机 Chromium 与桌面验收，已安装到本机正式路径。** [验证记录](../../VALIDATION.md#team-头像本机安装2026-11-09)区分源码、打包与正式安装。先读[当前设计基线](../../DESIGN_BASELINE.md)、[Team 导航修正](TEAM_NAVIGATION_REFINEMENT_PLAN.md)和[基础使用路径修复](GUI_USABILITY_REPAIR_PLAN.md)。
 
@@ -23,7 +23,7 @@
 
 本机素材包于 2026-11-09 确认。素材 README、`review/preview.png` 和渲染示例是底板、取景、手臂越框及原帧时序的参考；触发方式按第 1 节。预览示例的键盘聚焦播放和触屏指针事件不带入产品。
 
-仓库保留头像渲染代码和位置清单，图片由本地构建提供。要构建带巴巴祖头像的版本，将获准使用的三张配套 PNG 放到 `gui/src/assets/team-avatars/assets/barbidou/`，然后运行 `npm run build:gui`。缺少这些文件时，侧栏和 Team 回复使用内置占位头像。
+仓库保留头像渲染代码和位置清单，图片由本地构建提供。要构建含全部头像的版本，将获准使用的九套 PNG 按清单分别放到 `gui/src/assets/team-avatars/assets/<角色 ID>/`，然后运行 `npm run build:gui`。缺少这些文件时，侧栏和 Team 回复使用内置占位头像。
 
 | 文件 | 用途 |
 | --- | --- |

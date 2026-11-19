@@ -12,7 +12,9 @@ CoThink 想探索的是，怎样**用算力换智力**。一项任务要经过�
 
 **0.8.14-desktop.33（2026-11-19）** 折叠回复里的代码块，支持展开、复制，以及在对话旁预览 HTML 和 SVG。完整记录见 [CHANGELOG.md](CHANGELOG.md)。
 
-**0.8.14-desktop.34（当前源码）** 桌面对话内置 Web Design Engineer，可输入 `/skill:web-design-engineer` 并附上设计需求。开关在「设置 → 技能与能力」。
+**0.8.14-desktop.34** 桌面对话内置 Web Design Engineer，可输入 `/skill:web-design-engineer` 并附上设计需求。开关在「设置 → 技能与能力」。
+
+**0.8.14-desktop.35（当前源码）** 新建 Team 时可从九个角色中选头像（含小狗洛丽塔），点击“创建”保存。侧栏和该 Team 的回复都使用所选头像。旧 Team 默认使用巴巴祖。公开 npm 包使用占位图，角色名称和选择仍会保存。
 
 ## 下载
 

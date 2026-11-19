@@ -6,10 +6,10 @@ import {pathToFileURL} from 'node:url';
 
 export async function verifyPackagedTeamPortraits(t,{appPath,launchCandidate}) {
  const backend=join(appPath,'Contents/Resources/app/backend');
- const artworkDir=join(backend,'gui/src/assets/team-avatars/assets/barbidou');
+ const artworkDir=join(backend,'gui/src/assets/team-avatars/assets/barbalala');
  const artwork=['chat-static.png','sidebar-foreground.png','sidebar-motion-atlas.png'].map(name=>existsSync(join(artworkDir,name)));
  const hasArtwork=artwork[0];
- assert.ok(artwork.every(present=>present===hasArtwork),'the optional Barbidou artwork is packaged as a complete set');
+ assert.ok(artwork.every(present=>present===hasArtwork),'the optional Barbalala artwork is packaged as a complete set');
  const load=path=>import(pathToFileURL(join(backend,path)));
  const teamName='头像验收 Team';
  const replyText='这是一条预先保存的桌面头像验收回复。';
@@ -20,7 +20,7 @@ export async function verifyPackagedTeamPortraits(t,{appPath,launchCandidate}) {
    load('node_modules/@earendil-works/pi-coding-agent/dist/index.js'),
   ]);
   const workspaceId='7c8094cd-3476-4bfa-8f53-000000000001';
-  createGuiWorkspace(home,{workspaceId,name:teamName,project:null,defaultRosterId:null});
+  createGuiWorkspace(home,{workspaceId,name:teamName,project:null,defaultRosterId:null,avatarId:"barbalala"});
   const manager=SessionManager.create(home,join(home,'pi/sessions/main'));
   manager.appendCustomEntry('cothink-project',{project:null});
   manager.appendCustomEntry('cothink-gui-workspace',{workspaceId});
@@ -51,7 +51,7 @@ export async function verifyPackagedTeamPortraits(t,{appPath,launchCandidate}) {
 
  const replyBadge=page.locator('[data-reading-part="result"] header [data-team-avatar]');
  const replyAvatar=replyBadge.locator('img');
- assert.equal(await replyBadge.getAttribute('data-team-avatar'),'barbidou');
+ assert.equal(await replyBadge.getAttribute('data-team-avatar'),'barbalala');
  if(hasArtwork){
   const replyImage=await replyAvatar.evaluate(async image=>{
    await image.decode();
@@ -77,7 +77,7 @@ export async function verifyPackagedTeamPortraits(t,{appPath,launchCandidate}) {
  const trigger=team.locator('[data-team-avatar-trigger]');
  const canvas=trigger.locator('canvas');
  const sidebarBadge=trigger.locator('[data-team-avatar]');
- assert.equal(await sidebarBadge.getAttribute('data-team-avatar'),'barbidou');
+ assert.equal(await sidebarBadge.getAttribute('data-team-avatar'),'barbalala');
  const sidebarPlaceholder=sidebarBadge.locator(':scope > span');
  const hoverDiagnostics=await trigger.evaluateHandle(element=>{
   const trace=[];

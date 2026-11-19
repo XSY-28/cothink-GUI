@@ -1,10 +1,12 @@
 import React, {useEffect, useRef, useState} from "react";
+import {defaultTeamAvatarId, TeamAvatarPicker} from "./features/avatars/TeamAvatar.jsx";
 import {Modal} from "./Modal.jsx";
 
 export function ProjectDialog({commands, workspace, projects = [], rosters = [], recentRosterId, firstRun, onSaved, onOpenExisting, onClose}) {
   const binding = !!workspace;
   const title = workspace?.project ? "更换项目目录" : binding ? "关联项目目录" : "新建 Team";
   const [name, setName] = useState(""), [path, setPath] = useState("");
+  const [avatarId,setAvatarId] = useState(defaultTeamAvatarId);
   const [defaultRosterId,setDefaultRosterId]=useState("");
   const [result, setResult] = useState(null), [busy, setBusy] = useState(false), [saving, setSaving] = useState(false);
   const [error, setError] = useState(""), [existing, setExisting] = useState(null), [uncertain, setUncertain] = useState(null);
@@ -99,7 +101,7 @@ export function ProjectDialog({commands, workspace, projects = [], rosters = [],
     saveBusy.current = true; setSaving(true); setError(""); setExisting(null);
     try {
       const saved = binding ? await commands.bindWorkspace(workspace,result.canonicalPath??result.path)
-        : await commands.createWorkspace({name:name.trim(),project:result.canonicalPath??result.path,defaultRosterId:defaultRosterId||null});
+        : await commands.createWorkspace({name:name.trim(),avatarId,project:result.canonicalPath??result.path,defaultRosterId:defaultRosterId||null});
       if (saved) onSaved(saved);
     } catch (e) {
       setError(e.message);
@@ -134,6 +136,7 @@ export function ProjectDialog({commands, workspace, projects = [], rosters = [],
       {!binding && <label>名称<input autoComplete="off" required value={name} disabled={saving || !!uncertain}
         placeholder="例如：个人网站" onChange={event=>setName(event.target.value)}/></label>}
       {!binding && name.trim() && !validName && <p className="error-text" role="alert">Team 名称须为 1—80 个字符。</p>}
+      {!binding && <TeamAvatarPicker value={avatarId} onChange={setAvatarId} disabled={saving || !!uncertain} />}
       {(window.cothinkDesktop || commands.browseProject) && <>
         <button type="button" disabled={busy || saving || !!uncertain} onClick={pickDirectory}>选择或新建文件夹…</button>
         <p className="field-note">新建会立即创建文件夹，取消会保留它。{window.cothinkDesktop?.info?.platform==="darwin"
