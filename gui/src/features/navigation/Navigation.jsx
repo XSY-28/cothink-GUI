@@ -201,7 +201,7 @@ export function Navigation({workspaces, workspaceId, ready, mobileOpen, onOpenWo
             <span className={styles.avatarTrigger} aria-hidden="true" data-team-avatar-trigger=""
               onPointerEnter={event=>startHover(event,row.id)} onPointerMove={moveOverAvatar}
               onPointerLeave={leaveAvatar} onPointerCancel={leaveAvatar}>
-              <SidebarTeamAvatar avatar={teamAvatarFor(row.id)} animated={animated} />
+              <SidebarTeamAvatar avatar={teamAvatarFor(row)} animated={animated} />
             </span>
             {attention && <span className={styles.indicator} data-attention={row.attention.kind} aria-hidden="true" />}
           </button>

@@ -15,9 +15,25 @@ const avatars = new Map(manifest.map(entry => [entry.id, {
   chat: urls[assetPrefix + entry.chat],
 }]));
 
-export function teamAvatarFor(workspaceId) {
-  if (typeof workspaceId !== "string" || !workspaceId) return null;
-  return avatars.get("barbidou") ?? null;
+export const defaultTeamAvatarId = "barbidou";
+
+export function teamAvatarFor(workspace) {
+  return workspace ? avatars.get(workspace.avatarId) ?? avatars.get(defaultTeamAvatarId) : null;
+}
+
+export function TeamAvatarPicker({value, onChange, disabled}) {
+  return <fieldset className={styles.picker} disabled={disabled}>
+    <legend>Team 头像</legend>
+    <div className={styles.choices}>
+      {Array.from(avatars.values(), avatar =>
+        <label key={avatar.id} className={styles.choice}>
+          <input type="radio" name="team-avatar" value={avatar.id} checked={value === avatar.id}
+            onChange={() => onChange(avatar.id)} />
+          <ChatTeamAvatar avatar={avatar} />
+          <span>{avatar.name}</span>
+        </label>)}
+    </div>
+  </fieldset>;
 }
 
 const imageLoads = new Map();
@@ -145,8 +161,7 @@ function SidebarArt({avatar, animated}) {
     }
 
     function restoreIdle() {
-      if (nextFrame === null) return;
-      view.cancelAnimationFrame(nextFrame);
+      if (nextFrame !== null) view.cancelAnimationFrame(nextFrame);
       nextFrame = null;
       painter.idle();
     }
@@ -155,6 +170,7 @@ function SidebarArt({avatar, animated}) {
       let drawn = 0;
       const started = view.performance.now();
       painter.motion(image, drawn);
+      if (durations.length === 1) return;
 
       function tick(now) {
         if (!allowed()) {

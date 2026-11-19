@@ -15,9 +15,9 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
   onChooseSkill, onPreviewMaterial, onRetryMaterial, onOpenTurnLimits, conversationMenuTrigger, firstRun, onCreateTeam}) {
   const {bootstrap: boot, task, draft, ready, submitting, pending, pendingStatus} = state;
   const session = workspace?.archived && state.session ? {...state.session,workspaceArchived:true,readOnly:true} : state.session;
-  const replyTeamId = session?.workspaceId && !session.workspaceError &&
+  const replyWorkspace = session?.workspaceId && !session.workspaceError &&
     session.id === state.selectedSessionId && workspace?.id === session.workspaceId
-    ? session.workspaceId : null;
+    ? workspace : null;
   const [targetTeam,setTargetTeam]=useState("");
   const [now,setNow]=useState(Date.now());
   const timing = session?.turns.some(turn=>["running","preparing","cancelling"].includes(turn.status));
@@ -181,7 +181,7 @@ export function Conversation({state, workspace, commands, inert, showNotes, onHi
                     <UserMessage turn={turn} onCopy={onCopy} />
                   </div>
                   <article className={styles.answer} data-task-id={turn.taskId} data-reading-part="result" data-result-revision={turn.resultRevision || undefined} tabIndex={-1}>
-                    <ReplyHeading turn={turn} now={now} teamId={replyTeamId}>
+                    <ReplyHeading turn={turn} now={now} workspace={replyWorkspace}>
                       {canStop && stop}
                     </ReplyHeading>
                     {["partial","cancelled","failed","outcome_unknown","stop_unknown"].includes(turn.status) && <p className={styles.incompleteAnswer}>{turn.status === "stop_unknown" ? "停止结果未确认。" : turn.status === "outcome_unknown" ? "请求结果未知，不会自动重发。" : turn.status === "cancelled" ? "已停止。已完成的内容保留。" : "本次未完整完成。已有成果文件会列在下方。"}</p>}

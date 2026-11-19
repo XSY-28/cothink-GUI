@@ -3,10 +3,10 @@ import {elapsedLabel, statusLabel} from "../../view.js";
 import {ChatTeamAvatar, teamAvatarFor} from "../avatars/TeamAvatar.jsx";
 import styles from "./Conversation.module.css";
 
-export function ReplyHeading({turn, now, teamId, children}) {
+export function ReplyHeading({turn, now, workspace, children}) {
   const elapsed = elapsedLabel(turn, now);
   const running = ["running", "preparing", "cancelling"].includes(turn.status);
-  const avatar = turn.finalText && teamAvatarFor(teamId);
+  const avatar = turn.finalText && teamAvatarFor(workspace);
 
   return <header className={styles.answerHeading}>
     {avatar && <ChatTeamAvatar key={avatar.id} avatar={avatar} />}

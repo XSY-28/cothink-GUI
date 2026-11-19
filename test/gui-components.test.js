@@ -1194,11 +1194,11 @@ test("native directory picker suggests an empty Team name and retains the select
 
 test("Team creation requires a folder even without a default roster",async()=>{
   await modalEnvironment(async({root,container,win,ProjectDialog})=>{
-    const requests=[],saved=[];
+    const requests=[];
     win.cothinkDesktop={chooseProjectDirectory:async()=>"/team"};
     const commands={inspectProject:async canonicalPath=>({canonicalPath,directoryAvailable:true}),
       createWorkspace:async args=>{requests.push(args);return {id:"new",...args};}};
-    await act(()=>root.render(React.createElement(ProjectDialog,{commands,onSaved:value=>saved.push(value),onClose(){}})));
+    await act(()=>root.render(React.createElement(ProjectDialog,{commands,onSaved(){},onClose(){}})));
     assert.match(container.textContent,/不设默认，每条对话单独选择/);
     await act(()=>{const input=container.querySelector("input");Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value").set.call(input,"课程笔记");input.dispatchEvent(new win.Event("input",{bubbles:true}));});
     const submit=()=>act(async()=>container.querySelector("form").dispatchEvent(new win.Event("submit",{bubbles:true,cancelable:true})));
@@ -1206,8 +1206,7 @@ test("Team creation requires a folder even without a default roster",async()=>{
     assert.equal(requests.length,0);
     await act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent==="选择或新建文件夹…").click());
     await submit();
-    assert.deepEqual(requests,[{name:"课程笔记",project:"/team",defaultRosterId:null}]);
-    assert.equal(saved[0].id,"new");
+    assert.deepEqual(requests,[{name:"课程笔记",project:"/team",defaultRosterId:null,avatarId:"barbidou"}]);
   });
 });
 

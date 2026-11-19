@@ -437,5 +437,44 @@
         ]
       ]
     }
+  },
+  {
+    "id": "lolita",
+    "name": "洛丽塔",
+    "chat": "assets/lolita/chat-static.png",
+    "chatCrop": [
+      4,
+      20,
+      75,
+      75
+    ],
+    "durations": [
+      0
+    ],
+    "hoverKind": "pose",
+    "foreground": "assets/lolita/sidebar-foreground.png",
+    "motionAtlas": "assets/lolita/sidebar-motion-atlas.png",
+    "motionFrameSize": 256,
+    "sidebarPlacement": {
+      "x": 14.25,
+      "y": 14.166666666666686,
+      "size": 234.66666666666666,
+      "motionOutlets": [
+        [
+          [
+            162.9090909090909,
+            59.750000000000014,
+            93.0909090909091,
+            39
+          ],
+          [
+            152.41666666666666,
+            0,
+            77.5,
+            93.0909090909091
+          ]
+        ]
+      ]
+    }
   }
 ]
