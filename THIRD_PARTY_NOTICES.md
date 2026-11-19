@@ -142,3 +142,7 @@ The builtin is adapted from the explicitly selected local `agent-doc-maintenance
 The original [LICENSE](resources/builtin-skills/doc-maintenance/assets/LICENSE) and [NOTICE](resources/builtin-skills/doc-maintenance/assets/NOTICE.md) are retained. The full locked ten-package closure's license texts are in `resources/builtin-skills/doc-maintenance/assets/licenses/`: markdown-it, linkify-it, mdurl, picomatch, punycode.js and uc.micro (MIT), github-slugger and yaml (ISC), entities (BSD-2-Clause), and argparse (Python-2.0). These terms remain applicable to bundled dependency code; CoThink's root MIT license does not replace them. The build removes source comments and preserves the complete notices separately.
 
 `context-management@0.1.0` is original CoThink guidance based on the desktop unified contract, licensed under the root MIT license; it is not attributed to an unverified external skill. Context host tools remain unavailable in D5. Rolldown 1.2.15 is the existing locked development build tool, not a checker runtime dependency.
+
+## Web Design Engineer
+
+CoThink bundles the skill instructions and reference library from the locally selected Web Design Engineer 1.3.0. The bundled header adds the upstream version. The distribution manifest records the shipped file hashes. [Garden Skills source](https://github.com/ConardLi/garden-skills/tree/main/skills/web-design-engineer) · [MIT license](resources/builtin-skills/web-design-engineer/assets/LICENSE)

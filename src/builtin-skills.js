@@ -2,7 +2,7 @@ import {readFileSync,lstatSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
-export const builtinSkillNames=Object.freeze(['doc-maintenance','context-management']);
+export const builtinSkillNames=Object.freeze(['doc-maintenance','context-management','web-design-engineer']);
 const directory=fileURLToPath(new URL('../resources/builtin-skills/',import.meta.url));
 const sha=value=>createHash('sha256').update(value).digest('hex');
 export function validateBuiltinSkills(config) {
