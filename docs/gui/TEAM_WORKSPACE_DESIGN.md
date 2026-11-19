@@ -1,6 +1,6 @@
 # CoThink GUI 设计：一个项目，一支团队
 
-> **当前设计。** [设计基线](../../DESIGN_BASELINE.md)定义项目团队、对话阵容和按需组团。本文维护 GUI 中项目、对话和阵容的关系。早期界面与运行证据按日期保留，0.8.14-desktop.5 的已安装行为见 [README](../../README.md#本地浏览器界面)及 [VALIDATION](../../VALIDATION.md)。
+> **当前设计。** [设计基线](../../DESIGN_BASELINE.md)定义项目团队、对话阵容和按需组团。本文维护 GUI 中项目、对话和阵容的关系。早期界面与运行证据按日期保留，0.8.14-desktop.5 的界面约定和对话目录验证分别见[界面操作与交互约定](GUI_USABILITY_REPAIR_PLAN.md#3-用户路径与交互合同)和 [Team 对话目录验收](../../VALIDATION.md#team-对话目录0814-desktop52026-11-10)。
 
 日期：2026-11-07。用户已接受珍珠白液态玻璃原型，并授权按[施工文档](TEAM_WORKSPACE_IMPLEMENTATION_PLAN.md)实施。当前源码及本地证据见 [VALIDATION.md](../../VALIDATION.md)。
 
