@@ -18,4 +18,8 @@ CoThink 想探索的是，怎样**用算力换智力**。一项任务要经过�
 
 ## 下载
 
-公开预览包提供 macOS Apple Silicon、Windows x64 和 Windows ARM64 三个版本，需要 Node.js 22.19 或更新版本。按系统下载对应的 `.tgz`，安装或更新命令见 [GitHub 下载页](https://github.com/XSY-28/Cothink-release/releases/tag/v0.8.14-desktop.33)。
+需要 Node.js 22.19 或更新版本。
+
+- **从 npm 安装或更新**。运行 `npm install -g cothink-v2@latest`。Windows PowerShell 可用 `npm.cmd install -g cothink-v2@latest`。[npm 包页面](https://www.npmjs.com/package/cothink-v2)
+- **下载 npm 安装包**。下载 `cothink-v2-0.8.14-desktop.35.tgz` 后运行 `npm install -g ./cothink-v2-0.8.14-desktop.35.tgz`。GitHub 附件需要仓库权限，npm 下载链接可直接访问。[GitHub Release 附件](https://github.com/XSY-28/cothink-gui-workspace/releases/tag/v0.8.14-desktop.35) · [从 npm 下载 .tgz](https://registry.npmjs.org/cothink-v2/-/cothink-v2-0.8.14-desktop.35.tgz)
+- **历史分平台预览包**。可下载 macOS Apple Silicon、Windows x64 和 Windows ARM64 的 `0.8.14-desktop.34` 安装包。[历史预览包](https://github.com/XSY-28/cothink-gui-workspace/releases/tag/v0.8.14-desktop.34)
