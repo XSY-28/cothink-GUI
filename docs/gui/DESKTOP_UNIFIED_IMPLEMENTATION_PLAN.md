@@ -326,6 +326,8 @@ runProjectOperation 接收根 owner 的受控 admission/control 句柄；项目�
 
 GUI 的旧模式命令作为本地已移除入口处理，不再暗中切回 legacy；引用／粘贴材料中的文字仍只是材料。前端只有在宿主明确支持 unified 协议时启用新发送路径，旧后端／缓存前端不匹配时提示重开，不能只删按钮掩盖不兼容。
 
+旧版 CLI 项目的命令、计划示例与限制见 [0.8.14-desktop.33 的 CLI 使用说明](https://github.com/XSY-28/cothink-gui-workspace/blob/407a6c0fca351e9062f48652933d0b179c390d7b/README.md#从-cli-持续推进项目)。
+
 ## 7. 两项内置 Skill
 
 ### 7.1 固定来源、离线资源与启用规则
