@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<script>
+  // Render inside the sandbox. The parent sends no session or desktop capabilities.
+  function render(event) {
+    if (parent === window || event.source !== parent ||
+        event.origin !== location.origin || typeof event.data !== "string") return;
+    window.removeEventListener("message", render);
+    document.open();
+    document.write(event.data);
+    document.close();
+  }
+  window.addEventListener("message", render);
+</script>

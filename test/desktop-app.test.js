@@ -2,7 +2,6 @@
 // COTHINK_DESKTOP_APP=/absolute/CoThink.app npm run test:desktop-app
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {once} from 'node:events';
 import {createServer} from 'node:net';
@@ -11,6 +10,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {appPath,launchCandidate,verifyPackagedExecution} from './helpers/desktop-candidate.js';
+import {preservePasteboard} from './helpers/desktop-pasteboard.js';
 import {verifyPackagedThinking} from './helpers/desktop-thinking.js';
 import {verifyPackagedTeamPortraits} from './helpers/desktop-team-portrait.js';
 async function fixture(t) {
@@ -90,49 +90,12 @@ test('packaged Team portraits reveal the name only after hover dwell',async t=>{
  await verifyPackagedTeamPortraits(t,{appPath,launchCandidate});
 });
 
-async function preservePasteboard(marker, run) {
- // Keep every representation in memory, including images and Finder items.
- // Restore only if our unique fixture text is still on the pasteboard.
- const helper = spawn('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `
-  ObjC.import('AppKit');
-  function run(argv) {
-   const pasteboard = $.NSPasteboard.generalPasteboard;
-   const saved = $.NSMutableArray.alloc.init;
-   for (const original of pasteboard.pasteboardItems.js || []) {
-    const item = $.NSPasteboardItem.alloc.init;
-    for (const type of original.types.js) {
-     if (!item.setDataForType(original.dataForType(type), type))
-      throw Error('Cannot preserve this pasteboard representation');
-    }
-    saved.addObject(item);
-   }
-   $.NSFileHandle.fileHandleWithStandardOutput.writeData($('ready\\n').dataUsingEncoding($.NSUTF8StringEncoding));
-   $.NSFileHandle.fileHandleWithStandardInput.readDataOfLength(1);
-   if (ObjC.unwrap(pasteboard.stringForType($.NSPasteboardTypeString))?.includes(argv[0])) {
-    pasteboard.clearContents;
-    if (saved.count && !pasteboard.writeObjects(saved)) throw Error('Could not restore the pasteboard');
-   }
-  }
- `, marker], {stdio:['pipe','pipe','inherit']});
- const exited = once(helper, 'exit');
- await Promise.race([
-  once(helper.stdout, 'data'),
-  exited.then(([code]) => { throw Error(`Pasteboard preservation could not start (${code})`); }),
- ]);
- try {
-  await run();
- } finally {
-  helper.stdin.end();
-  assert.deepEqual(await exited, [0, null], 'the original pasteboard was preserved');
- }
-}
-
 test('packaged copy buttons write original text to the system clipboard', {timeout:30000}, async t=>{
  const backend = join(appPath, 'Contents/Resources/app/backend');
  const load = path => import(pathToFileURL(join(backend, path)));
  const input = `用户消息：保留空格  😀\n第二行 ${randomUUID()}`;
  const code = `const 消息 = "保留空格  😀";\n// ${randomUUID()}\n`;
- const reply = '助手回复：保留原文\n\n**第二段**\n\n```js\n' + code + '```';
+ const reply = '助手回复：保留原文\n\n**第二段**和 `index.html`\n\n```js\n' + code + '```\n\n```\n第二个代码块\n```';
  const teamName = '剪贴板验收';
  const {app,page} = await launchCandidate(t, async home=>{
   const [{createGuiWorkspace},{createTask},{SessionManager}] = await Promise.all([
@@ -161,6 +124,19 @@ test('packaged copy buttons write original text to the system clipboard', {timeo
  });
  await page.getByRole('navigation', {name:'工作导航'}).getByRole('button', {name:teamName, exact:true}).click();
  await page.locator('[data-reading-part="input"]').getByText('用户消息：保留空格').hover();
+ const answer = page.getByRole('article').filter({hasText:'助手回复：保留原文'});
+ await answer.getByText('index.html', {exact:true}).waitFor();
+ const blocks = answer.locator('pre');
+ assert.equal(await blocks.count(), 2);
+ assert.equal(await blocks.first().isVisible(), false, 'saved code starts collapsed');
+ assert.equal(await answer.getByRole('button', {name:'查看过程'}).count(), 0);
+ const toggle = answer.getByRole('button', {name:/展开代码.*js/i});
+ await toggle.focus();
+ await toggle.press('Enter');
+ assert.equal(await blocks.first().innerText(), code);
+ assert.equal(await blocks.last().isVisible(), false, 'each block opens independently');
+ await answer.getByRole('button', {name:/收起代码.*js/i}).click();
+ assert.equal(await blocks.first().isVisible(), false);
  const messages = '未能访问系统剪贴板，请手动选中文字复制。';
  const cases = [
   ['复制消息', input, '已复制原文', messages],
@@ -172,7 +148,7 @@ test('packaged copy buttons write original text to the system clipboard', {timeo
   const failed = page.getByText(failure, {exact:true});
   const marker = text.match(/[0-9a-f-]{36}/)[0];
   await preservePasteboard(marker, async ()=>{
-   await page.getByRole('button', {name,exact:true}).click();
+   await page.getByRole('button', {name,exact:true}).first().click();
    assert.equal(await copied.or(failed).textContent({timeout:4000}), success);
    const actual = await app.evaluate(async ({clipboard}, marker)=>{
     const value = await clipboard.readText();

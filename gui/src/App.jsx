@@ -1,8 +1,9 @@
 import {FilePanel} from "./features/files/FilePanel.jsx";
+import {DetailHeader, ReplyPreviewFrame} from "./features/conversation/ReplyPreviewFrame.jsx";
 import React, { useEffect, useReducer, useRef, useState } from "react";
 import { createApi, consumeToken, copyText } from "./api.js";
 import { useGuiWorkspace } from "./useGuiWorkspace.js";
-import { initialView, workspaceViewReducer, readDisplayPreferences, useDisplayTheme, restoreDetailFocus } from "./workspace-view.js";
+import { initialView, workspaceViewReducer, readDisplayPreferences, useDisplayTheme, restoreDetailFocus, bindDrawerKeys } from "./workspace-view.js";
 import { Navigation, ConversationPicker, ConversationRename } from "./features/navigation/Navigation.jsx";
 import { Conversation } from "./features/conversation/Conversation.jsx";
 import { ConversationActionDialogs, useConversationActions } from "./features/conversation/ConversationMenu.jsx";
@@ -51,10 +52,11 @@ export function App() {
   const detail = useRef(null), detailTrigger = useRef(null);
   const selection = view.detailsBySession[selectedSessionId];
   const detailOpen = !!selection?.open;
+  const preview = detailOpen && selection.tab === "reply-preview" ? selection.preview : null;
+  const detailTaskId = detailOpen && !preview ? selection.taskId : null;
   useEffect(() => {
-    const wanted = detailOpen ? selection.taskId : null;
-    if (!detailOpen || task?.id !== wanted) void commands.selectTask(wanted, selectedSessionId);
-  }, [detailOpen, selection?.taskId, selectedSessionId, task?.id, commands.selectTask]);
+    if (!detailTaskId || task?.id !== detailTaskId) void commands.selectTask(detailTaskId, selectedSessionId);
+  }, [detailTaskId, selectedSessionId, task?.id, commands.selectTask]);
   const navOpen = mobile && view.navigation.mobileOpen;
   const showNotes = !!boot.releaseNotes?.unread && !notesHidden;
   const overlay = view.overlay;
@@ -193,14 +195,14 @@ export function App() {
     return commands.openSession(id,target);
   }
   function closeDetails() {
-    dispatch({type: "details", sessionId: selectedSessionId, change: {open: false}});
+    dispatch({type: "details", sessionId: selectedSessionId, change: {open: false, preview:null}});
     requestAnimationFrame(()=>restoreDetailFocus(detailTrigger.current));
   }
   function openFile(fileRef, tab="preview", event) {
     dispatch({type:"files",sessionId:selectedSessionId,selection:{fileRef,tab}});
     openDetails(fileRef.taskId,"files",event);
   }
-  function openDetails(taskId, tab = "collaboration", event) {
+  function openDetails(taskId, tab = "collaboration", event, preview=null) {
     if(tab === "changes") {
       dispatch({type:"files",sessionId:selectedSessionId,selection:{taskId,tab:"diff"}});
       tab="files";
@@ -208,7 +210,7 @@ export function App() {
     if (!selectedSessionId || !taskId) return;
     const trigger = event?.currentTarget || document.activeElement;
     if (!detail.current?.contains(trigger)) detailTrigger.current = trigger;
-    dispatch({type: "details", sessionId: selectedSessionId, change: {taskId, tab, open: true}});
+    dispatch({type: "details", sessionId: selectedSessionId, change: {taskId, tab, open: true, preview}});
   }
   useEffect(() => {
     const media = matchMedia("(max-width: 1179px)");
@@ -234,26 +236,7 @@ export function App() {
   useEffect(() => {
     if (modalOpen || (!navOpen && !detailOpen)) return;
     const node = navOpen ? document.querySelector(".sidebar") : detail.current;
-    if (!node) return;
-    const modal = navOpen || compact;
-    const items = () => [...node.querySelectorAll('button,input,select,textarea,a[href],summary,[tabindex="0"]')]
-      .filter(n => !n.disabled && !n.closest("[inert]") && n.getClientRects().length);
-    (items()[0] || node).focus();
-    const key = event => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        if (navOpen) dismissNavigation();
-        else closeDetails();
-      }
-      if (modal && event.key === "Tab") {
-        const elements = items(), first = elements[0], last = elements.at(-1);
-        if (!elements.includes(document.activeElement)) {event.preventDefault(); (event.shiftKey ? last : first)?.focus();}
-        else if (event.shiftKey && document.activeElement === first) {event.preventDefault(); last?.focus();}
-        else if (!event.shiftKey && document.activeElement === last) {event.preventDefault(); first?.focus();}
-      }
-    };
-    node.addEventListener("keydown", key);
-    return () => node.removeEventListener("keydown", key);
+    return bindDrawerKeys(node, navOpen || compact, navOpen ? dismissNavigation : closeDetails);
   }, [navOpen, detailOpen, compact, modalOpen, selectedSessionId]);
   function currentOverlayError(error) {
     return {...overlay,busy:false,error:error.message};
@@ -273,7 +256,7 @@ export function App() {
     try { await copyText(text); setToast("已复制原文"); }
     catch { setToast("未能访问系统剪贴板，请手动选中文字复制。"); }
   }
-  return <div className={`app-shell ${detailOpen ? "detail-expanded" : ""}`} data-desktop-platform={window.cothinkDesktop?.info?.platform}>
+  return <div className={`app-shell ${detailOpen ? "detail-expanded" : ""} ${preview ? "reply-preview-open" : ""}`} data-desktop-platform={window.cothinkDesktop?.info?.platform}>
     {commands.resumeMaterial&&<input type="file" hidden ref={resumeInput} onChange={onResumeFile} onCancel={()=>{resumeChoice.current=null;document.querySelector("#message-input")?.focus();}}/>}
     {navOpen && <button className="nav-scrim" aria-label="关闭导航" onClick={dismissNavigation} />}
     <Navigation workspaces={boot.workspaces} workspaceId={state.workspaceId} ready={state.ready} mobileOpen={navOpen}
@@ -302,8 +285,8 @@ export function App() {
       <button className="detail-scrim" aria-label="关闭任务详情" onClick={closeDetails} inert={modalOpen || navOpen} />
       <aside className="detail-wrapper glass is-open" ref={detail} tabIndex={-1} inert={modalOpen || navOpen}
         role={compact ? "dialog" : "complementary"} aria-modal={compact ? true : undefined} aria-label="阅读面板">
-        <div className="detail-back"><button onClick={closeDetails}>← 返回对话</button></div>
-        {selection.tab === "files" ? <FilePanel task={state.tasksById[selection.taskId] || null} sessionId={session?.id}
+        <DetailHeader preview={preview} onClose={closeDetails}/>
+        {preview ? <ReplyPreviewFrame key={selection.taskId+":"+preview.offset} source={preview.source}/> : selection.tab === "files" ? <FilePanel task={state.tasksById[selection.taskId] || null} sessionId={session?.id}
           selection={view.filesBySession[selectedSessionId]} commands={commands}
           onRecords={()=>openDetails(selection.taskId,"collaboration")}
           onSelection={change=>dispatch({type:"files",sessionId:selectedSessionId,selection:{...view.filesBySession[selectedSessionId],...change}})}/>

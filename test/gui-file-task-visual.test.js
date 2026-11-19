@@ -125,12 +125,7 @@ test("a Team file request uses its own folder and opens the checked, accepted HT
   assert.equal(f.calls.length, 1);
   assert.equal(existsSync(childHead),false,"ordinary chat does not initialize the project");
   const chatReply = page.getByRole("article").filter({hasText:"已回答普通问题。"});
-  await chatReply.getByRole("button",{name:"查看过程"}).click();
-  const processView = page.getByRole("complementary",{name:"本轮协作"});
-  await processView.getByText(/主模型经理 · 已完成/).click();
-  await processView.getByText(/主模型回复 · 已完成 · fixture \/ main/).waitFor();
-  assert.equal(await processView.getByText(/主答初稿|过程检查 ·/).count(),0);
-  await processView.getByRole("button",{name:"收起本轮协作"}).click();
+  assert.equal(await chatReply.getByRole("button",{name:"查看过程"}).count(),0);
 
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   const copy = input.getByRole("button", { name: "复制消息", exact: true });

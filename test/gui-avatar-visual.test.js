@@ -83,7 +83,8 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
   const footer=page.locator("article > footer");
   const action=name=>footer.getByRole("button",{name,exact:true});
   const hint=name=>footer.locator('[role="tooltip"]').filter({hasText:name});
-  for(const name of ["查看过程","复制原文","从这里分支"]){
+  assert.equal(await action("查看过程").count(),0);
+  for(const name of ["复制原文","从这里分支"]){
     const button=action(name), tooltip=hint(name);
     await button.locator("svg").waitFor();
     assert.equal(await button.textContent(),"");
@@ -93,7 +94,7 @@ test("Team avatars use 巴巴祖 artwork when present and preserve navigation wi
     await page.mouse.move(450,5);
     await tooltip.waitFor({state:"hidden"});
   }
-  await action("查看过程").focus();
+  await page.getByRole("button",{name:"复制消息",exact:true}).focus();
   await page.keyboard.press("Tab");
   await hint("复制原文").waitFor();
   const chat=page.locator("article > header [data-team-avatar]");

@@ -1,0 +1,27 @@
+.icon-action { position:relative; display:inline-flex; }
+.icon-action > button {
+  display:inline-flex; align-items:center; justify-content:center; gap:4px;
+  min-width:32px; height:32px; padding:0 6px;
+  border:0; border-radius:6px; background:transparent; color:var(--muted);
+}
+.icon-action > button:not(:disabled):is(:hover,:focus-visible) {
+  color:var(--ink); background:var(--accent-soft);
+}
+.icon-action > button:disabled { pointer-events:none; }
+.icon-action > .code-toggle {
+  padding-inline:4px 8px; font:500 12px/1.3 ui-monospace,monospace; text-transform:uppercase;
+}
+.code-toggle .ui-icon { width:13px; height:13px; }
+.code-toggle[aria-expanded="true"] .ui-icon { transform:rotate(90deg); }
+.action-hint {
+  visibility:hidden; pointer-events:none; position:absolute; z-index:2; white-space:nowrap;
+  inset-inline-start:0; bottom:calc(100% + 4px);
+  background:var(--ink); color:var(--bg); border-radius:5px; padding:4px 7px;
+  font-family:inherit; font-size:12px; font-weight:400; line-height:1.5;
+}
+.icon-action:has(button:focus-visible) > .action-hint { visibility:visible; }
+@media (hover:hover) { .icon-action:hover > .action-hint { visibility:visible; } }
+.detail-back .action-hint { inset-inline:auto 0; top:calc(100% + 4px); bottom:auto; }
+@media (pointer:coarse) {
+  .icon-action > button { min-width:44px; min-height:44px; }
+}
