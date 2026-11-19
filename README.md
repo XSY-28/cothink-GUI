@@ -41,20 +41,33 @@ CoThink 是接入多种模型 API 的协作 Harness，基于固定 Pi 1.4.0。�
 
 ## 本地桌面候选（统一项目会话）
 
-macOS ARM64 桌面壳位于 `desktop/`。构建时传入 [runtime-manifest.json](desktop/runtime-manifest.json) 锁定的官方 Node 与 Electron 归档，脚本先核对 SHA-256，再组合与 `pack:npm` 相同的后台包。版本取自根 `package.json`；不会在启动时下载安装依赖。
+桌面壳位于 `desktop/`，可在 macOS ARM64、Windows ARM64 或 Windows x64 上构建对应的本地候选。构建时传入 [runtime-manifest.json](desktop/runtime-manifest.json) 锁定的官方 Node 与 Electron 归档，脚本先核对 SHA-256，再组合与 `pack:npm` 相同的后台包。版本取自根 `package.json`；启动使用随包 Node。
 
 ```sh
 npm run test:desktop
 npm run pack:desktop -- --node-archive /path/to/node-v24.22.2-darwin-arm64.tar.gz --electron-archive /path/to/electron-v45.2.3-darwin-arm64.zip --out /path/to/new-candidate.noindex
 ```
 
-测试候选必须位于 `.noindex` 目录，避免被 Spotlight 当作重复应用。正式安装仅保留 `/Applications/CoThink.app`；安装后注销测试副本的 Launch Services 登记，并核对系统搜索只出现正式版。旧候选可保留在隔离目录或压缩归档中。
+macOS 测试候选必须位于 `.noindex` 目录，避免被 Spotlight 当作重复应用。正式安装仅保留 `/Applications/CoThink.app`；安装后注销测试副本的 Launch Services 登记，并核对系统搜索只出现正式版。旧候选可保留在隔离目录或压缩归档中。
 
 需要随包离线 PROJECT 执行资源时，构建前设置 `COTHINK_PACK_PLUGIN_RUNTIME` 指向已有核验的运行端目录，沿用原打包校验。构建后使用 `COTHINK_DESKTOP_APP=/absolute/CoThink.app npm run test:desktop-app` 验证真实桌面生命周期；缺少候选路径时明确失败，不跳过。输出 `CoThink-darwin-arm64/CoThink.app` 和 `desktop-build.json`；App 内 `distribution.json` 记录实际资源摘要。双击 App 使用随包 Node，并补充常见 Docker 命令路径。数据仍取 `COTHINK_HOME`，未设置时为 `~/.cothink`；独立测试请先指定临时数据根。文件项目需 Git、本机 Docker 和固定镜像，提交及确认时检查。依赖提前准备，执行断网；失败保留草稿，不回退宿主，选目录不扩大权限。
 
 macOS 关闭窗口会先保存全部已编辑会话的草稿，再隐藏；从 Dock 返回同一宿主。菜单“退出 CoThink”先冻结新操作、保存草稿并停止所属任务，只有停止与保存均确认后才退出。失败时保留窗口和只读查询，不强杀来冒充完成。页面或宿主崩溃只保证已经保存的内容，不自动重发任务；重新打开页面前会说明未保存输入的风险。
 
-这是未签名、未公证的本地候选；当前构建包含统一会话、内置技能和受控上下文整理。桌面设置显示本地版本和更新记录，关于窗口显示完整构建标识。本节及下文的新交互对应 0.8.14-desktop.10，安装与验收进度见 [VALIDATION.md](VALIDATION.md)。Windows 桌面、物理中文输入法、系统强制终止耐久性与公开签名分发仍须单独验证。
+Windows 在 PowerShell 中使用与目标架构匹配的 Node 构建。以下示例假定两个官方 ZIP 都在当前目录。
+
+```powershell
+$arch = node.exe -p process.arch
+npm.cmd ci --ignore-scripts
+npm.cmd run pack:desktop -- --node-archive "node-v24.22.2-win-$arch.zip" --electron-archive "electron-v45.2.3-win32-$arch.zip" --out dist/desktop
+& "dist/desktop/CoThink-win32-$arch/CoThink.exe"
+```
+
+需要离线构建时，可用 npm 的 `npm_config_cache` 和 `npm_config_offline` 指向预先准备的依赖缓存。
+
+移动或解压 Windows 候选时保留整个 `CoThink-win32-<架构>` 文件夹。关闭窗口会保存草稿并退出，重开时沿用原数据根。独立验收可先设置 `$env:COTHINK_HOME` 指向一个新的测试目录。
+
+桌面设置显示本地版本和更新记录，关于窗口显示完整构建标识。候选的签名状态、平台及实际验收范围见 [VALIDATION.md](VALIDATION.md)。
 
 ## 本地浏览器界面
 
