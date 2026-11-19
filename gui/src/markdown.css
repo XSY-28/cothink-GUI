@@ -1,3 +1,5 @@
+@import "./icon-actions.css";
+
 .prose {
   font-size: 16px;
   line-height: 1.8;
@@ -112,11 +114,6 @@
 .markdown-image { display:block; max-width:100%; max-height:min(65dvh,580px); object-fit:contain; }
 .markdown-code-block { margin:1em 0; }
 .prose .markdown-code-block pre { margin:0; }
-.code-actions { display:flex; align-items:center; flex-wrap:wrap; gap:6px; color:var(--muted); font-size:12px; }
+.code-actions { display:flex; align-items:center; flex-wrap:wrap; gap:2px; color:var(--muted); font-size:12px; }
 .code-actions button { font-size:inherit; }
 .code-actions + pre:not([hidden]) { margin-top:5px; }
-.code-toggle::before {
-  content:""; display:inline-block; width:6px; height:6px; margin:0 8px 2px 0;
-  border:solid currentColor; border-width:1.5px 1.5px 0 0; transform:rotate(45deg);
-}
-.code-toggle[aria-expanded="true"]::before { transform:rotate(135deg); }

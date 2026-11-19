@@ -1,5 +1,5 @@
 import {FilePanel} from "./features/files/FilePanel.jsx";
-import {ReplyPreviewFrame} from "./features/conversation/ReplyPreviewFrame.jsx";
+import {DetailHeader, ReplyPreviewFrame} from "./features/conversation/ReplyPreviewFrame.jsx";
 import React, { useEffect, useReducer, useRef, useState } from "react";
 import { createApi, consumeToken, copyText } from "./api.js";
 import { useGuiWorkspace } from "./useGuiWorkspace.js";
@@ -285,7 +285,7 @@ export function App() {
       <button className="detail-scrim" aria-label="关闭任务详情" onClick={closeDetails} inert={modalOpen || navOpen} />
       <aside className="detail-wrapper glass is-open" ref={detail} tabIndex={-1} inert={modalOpen || navOpen}
         role={compact ? "dialog" : "complementary"} aria-modal={compact ? true : undefined} aria-label="阅读面板">
-        <div className="detail-back">{preview && <strong>网页预览</strong>}<button onClick={closeDetails}>{preview?"关闭预览":"← 返回对话"}</button></div>
+        <DetailHeader preview={preview} onClose={closeDetails}/>
         {preview ? <ReplyPreviewFrame key={selection.taskId+":"+preview.offset} source={preview.source}/> : selection.tab === "files" ? <FilePanel task={state.tasksById[selection.taskId] || null} sessionId={session?.id}
           selection={view.filesBySession[selectedSessionId]} commands={commands}
           onRecords={()=>openDetails(selection.taskId,"collaboration")}

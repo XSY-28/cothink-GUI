@@ -38,16 +38,6 @@
   .messageActions { opacity:0; }
   .userMessage:hover .messageActions, .userMessage:focus-within .messageActions { opacity:1; }
 }
-.replyAction { position:relative; display:inline-flex; }
-.replyAction > button { display:grid; place-items:center; width:32px; height:32px; padding:0; }
-.replyAction > button:disabled { pointer-events:none; }
-.replyTooltip {
-  visibility:hidden; pointer-events:none; position:absolute; z-index:2;
-  inset-inline-start:0; bottom:calc(100% + 5px); white-space:nowrap;
-  background:var(--ink); color:var(--bg); border-radius:6px; padding:5px 8px; font-size:12px;
-}
-.replyAction:hover .replyTooltip, .replyAction:has(button:focus-visible) .replyTooltip { visibility:visible; }
-@media (pointer:coarse) { .replyAction > button { width:44px; height:44px; } }
 .incompleteAnswer { font-size:14px; color:var(--muted); line-height:1.75; padding:7px 0; }
 .composerArea { flex:none; width:100%; padding-top:10px; padding-bottom:26px; }
 .composerGreeting { font-size:24px; font-weight:500; line-height:1.45; margin:0 0 25px; letter-spacing:-.02em; }

@@ -1800,6 +1800,6 @@ test("markdown never requests a remote image until the reader chooses to load it
     assert.equal(container.querySelectorAll("img").length,1);
     assert.equal(container.querySelector("img").getAttribute("referrerpolicy"),"no-referrer");
     assert.equal(container.querySelector("img").getAttribute("src"),"https://example.test/image.png");
-    assert.ok([...container.querySelectorAll("button")].find(button=>button.textContent==="复制代码"));
+    assert.ok(container.querySelector('button[aria-label="复制代码"]'));
   });
 });

@@ -30,8 +30,14 @@ test("saved replies open the selected HTML or SVG in the reader and keep the cha
   await buttons.first().waitFor();
   assert.equal(await buttons.count(),2);
   assert.equal(page.frames().length,1);
+  const preview=buttons.first();
+  assert.equal(await preview.innerText(),"");
+  await page.getByRole("button",{name:/展开代码.*html/i}).focus();
+  await page.keyboard.press("Tab");
+  assert.equal(await preview.evaluate(el=>document.activeElement===el),true);
+  await preview.locator("..").getByText("预览",{exact:true}).waitFor();
   const loaded=page.waitForResponse(response=>response.url()===host.origin+"/reply-preview.html");
-  await buttons.first().click();
+  await preview.press("Enter");
   const response=await loaded;
   assert.match(response.headers()["content-security-policy"],/default-src 'none'/);
   const panel=page.getByRole("complementary",{name:"阅读面板"});
@@ -51,7 +57,11 @@ test("saved replies open the selected HTML or SVG in the reader and keep the cha
   await buttons.nth(1).click();
   await frame.locator("svg circle").waitFor();
   assert.equal(await frame.getByRole("button").count(),0);
-  await page.getByRole("button",{name:"关闭预览"}).click();
+  const close=panel.getByRole("button",{name:"关闭预览"});
+  assert.equal(await close.innerText(),"");
+  await close.hover();
+  await close.locator("..").getByText("关闭预览",{exact:true}).waitFor();
+  await close.click();
   await panel.waitFor({state:"detached"});
   assert.equal(await editor.inputValue(),"继续修改颜色");
   assert.equal(page.frames().length,1);

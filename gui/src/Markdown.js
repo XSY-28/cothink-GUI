@@ -3,6 +3,7 @@ import ReactMarkdown, {defaultUrlTransform} from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import {IconAction} from "./Icon.js";
 import {copyText} from "./api.js";
 
 const h=React.createElement;
@@ -71,10 +72,10 @@ function MarkdownCodeBlock({children, node, foldable = false}) {
   }
   return h("div",{className:"markdown-code-block"},
     h("div",{className:"code-actions"},
-      foldable&&h("button",{type:"button",className:"code-toggle","aria-expanded":expanded,"aria-controls":blockId,
-        onClick:()=>setExpanded(!expanded)},expanded?"收起代码":"展开代码",language&&" · "+language),
-      previewable&&h("button",{type:"button",onClick:event=>onPreview({source,offset:node.position.start.offset},event)},"预览"),
-      h("button",{type:"button",onClick:copy},"复制代码"),status&&h("span",{role:"status"},status)),
+      foldable&&h(IconAction,{icon:"chevron",className:"code-toggle",label:(expanded?"收起代码":"展开代码")+(language?" · "+language:""),
+        "aria-expanded":expanded,"aria-controls":blockId,onClick:()=>setExpanded(!expanded)},language||"代码"),
+      previewable&&h(IconAction,{icon:"preview",label:"预览",onClick:event=>onPreview({source,offset:node.position.start.offset},event)}),
+      h(IconAction,{icon:"copy",label:"复制代码",onClick:copy}),status&&h("span",{role:"status"},status)),
     h("pre",{id:blockId,ref:block,hidden:foldable&&!expanded},children));
 }
 

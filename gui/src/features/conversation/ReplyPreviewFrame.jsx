@@ -1,5 +1,13 @@
 import React, {useRef} from "react";
 
+import {IconAction} from "../../Icon.js";
+
+export function DetailHeader({preview, onClose}) {
+  return <div className="detail-back">{preview
+    ? <><strong>网页预览</strong><IconAction icon="close" label="关闭预览" onClick={onClose}/></>
+    : <button onClick={onClose}>← 返回对话</button>}</div>;
+}
+
 export function ReplyPreviewFrame({source}) {
   const sent=useRef(false);
   function load(event) {

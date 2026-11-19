@@ -1,6 +1,6 @@
 {
   "name": "cothink-v2",
-  "version": "0.8.14-desktop.32",
+  "version": "0.8.14-desktop.33",
   "files": [
     "bin/cothink.js",
     "src/cli.js",
