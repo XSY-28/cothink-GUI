@@ -16,4 +16,4 @@ CoThink 想探索的是，怎样**用算力换智力**。一项任务要经过�
 
 ## 下载
 
-公开预览包提供 macOS Apple Silicon、Windows x64 和 Windows ARM64 三个版本，需要 Node.js 22.19 或更新版本。按系统下载对应的 `.tgz`，安装或更新命令见 [GitHub 下载页](https://github.com/XSY-28/Cothink-release/releases/tag/v0.8.14-desktop.33)。
+预览包提供 macOS Apple Silicon、Windows x64 和 Windows ARM64 三个版本，需要 Node.js 22.19 或更新版本。按系统下载对应的 `.tgz`，安装或更新命令见 [GUI 仓库下载页](https://github.com/XSY-28/cothink-gui-workspace/releases/tag/v0.8.14-desktop.34)。

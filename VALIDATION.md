@@ -2,6 +2,10 @@
 
 本地模拟模型通过统一对话入口显式选择 `web-design-engineer`，收到技能正文，并通过 `read_skill` 读取冻结副本中的 `references/style-recipes/linear.md`。本项验证技能交付与读取，网页设计质量未经真实模型评测。
 
+## 2026-11-19 Windows 打包兼容
+
+Windows 打包修复先在 `0.8.14-desktop.33` 验证，再合入 `0.8.14-desktop.34` 的发行源码。原版 CLI 的 74 项 Windows 专项测试通过。两种架构的本地桌面候选分别完成模拟回复、HTML 预览、原生剪贴板复制、正常退出和重开恢复。ARM64 在 Windows 11 虚拟机原生运行，x64 使用 Windows on Arm 模拟。分平台 npm 包的构建来源、摘要和安装验收见 GUI 仓库对应 Release 的 `release-provenance.json`。
+
 ## 2026-11-19 预览工具栏图标
 
 代码块使用箭头、语言名和无边框的预览与复制图标，预览面板右上角使用关闭图标。44 项相关组件和浏览器测试通过。键盘可以从展开代码移到预览图标，看到说明并按 Enter 打开页面。悬停关闭图标显示说明，关闭后回到原草稿。覆盖 HTML、SVG 和既有回复复制入口。

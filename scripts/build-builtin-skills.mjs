@@ -24,7 +24,7 @@ try {
  for(const file of inventory(prepared))if(source.files.find(x=>x.path===file.path)?.sha256!==file.sha256)throw Error('Fixed checker source changed: '+file.path);
  const lock=JSON.parse(readFileSync(join(prepared,'npm-shrinkwrap.json')));
  for(const name of ['user.npmrc','global.npmrc'])writeFileSync(join(scratch,name),'');
- const npmArgs=['ci','--ignore-scripts','--no-audit','--no-fund','--registry=https://registry.npmjs.org/','--cache',join(scratch,'cache'),'--userconfig='+join(scratch,'user.npmrc'),'--globalconfig='+join(scratch,'global.npmrc')];
+ const npmArgs=['ci','--ignore-scripts','--no-audit','--no-fund','--registry=https://registry.npmjs.org/','--cache',process.env.npm_config_cache||join(scratch,'cache'),'--userconfig='+join(scratch,'user.npmrc'),'--globalconfig='+join(scratch,'global.npmrc')];
  if(process.env.npm_execpath)execFileSync(process.execPath,[process.env.npm_execpath,...npmArgs],{cwd:prepared,stdio:['ignore','pipe','pipe']});
  else execFileSync(process.platform==='win32'?'npm.cmd':'npm',npmArgs,{cwd:prepared,stdio:['ignore','pipe','pipe'],shell:process.platform==='win32'});
  const dependencies=[],licenses=join(doc,'assets/licenses');rmSync(licenses,{recursive:true,force:true});mkdirSync(licenses,{recursive:true});

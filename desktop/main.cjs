@@ -186,7 +186,8 @@ else {
     const backendEnv={...process.env,COTHINK_DESKTOP_NONCE:nonce,COTHINK_NO_UPDATE_CHECK:'1'};
     if(process.platform==='darwin')backendEnv.PATH=[process.env.PATH||'/usr/bin:/bin:/usr/sbin:/sbin',join(app.getPath('home'),'.docker/bin'),
       '/usr/local/bin','/opt/homebrew/bin','/Applications/Docker.app/Contents/Resources/bin'].filter(Boolean).join(':');
-    child=spawn(join(process.resourcesPath,'node/bin/node'),[join(__dirname,'host.mjs')],{
+    const nodeExecutable=process.platform==='win32'?'node.exe':'node';
+    child=spawn(join(process.resourcesPath,'node','bin',nodeExecutable),[join(__dirname,'host.mjs')],{
       cwd:__dirname,env:backendEnv,stdio:['ignore','ignore','ignore','ipc'],windowsHide:true,
     });
     const startupTimer=setTimeout(()=>{if(!ready){startupFailure('后台未完成启动。请检查 App 资源是否完整；退出后重新打开，不会重发任务。');requestQuit();}},30000);

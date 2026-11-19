@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync, rmSync, existsSync, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {basename,join} from 'node:path';
 import {fork,spawnSync} from 'node:child_process';
 import {EventEmitter, once} from 'node:events';
 import {runInNewContext} from 'node:vm';
@@ -175,7 +175,7 @@ async function desktopShell(profile, port = 32123, {env={},platform="darwin"}={}
    if(name==='node:child_process')return {spawn:(executable,args,options)=>{state.spawn={executable,args,options};return child;}};
    if(name==='node:crypto')return {randomUUID:()=>{if(!firstUUID)return randomUUID();firstUUID=false;return nonce;}};
    if(name==='node:fs')return {...nativeRequire(name),readFileSync(path,...args){
-    return String(path).endsWith('/build.json') ? JSON.stringify(buildFixture) : readFileSync(path,...args);
+    return basename(path)==='build.json' ? JSON.stringify(buildFixture) : readFileSync(path,...args);
    }};
    return nativeRequire(name);
   },
@@ -260,22 +260,25 @@ test('desktop backend appends standard macOS tool directories without changing i
  const profile=home(t),env={PATH:'/custom/approved/bin:/usr/bin:/bin',KEEP_FIXTURE:'retained'};
  const f=await desktopShell(profile,32123,{env});
  assert.ok(f.state.spawn,'normal desktop startup must spawn the backend');
- assert.deepEqual(f.state.spawn.options.env.PATH.split(':'),[
+ assert.equal(f.state.spawn.options.env.PATH,[
   '/custom/approved/bin','/usr/bin','/bin',join(profile,'.docker/bin'),
   '/usr/local/bin','/opt/homebrew/bin','/Applications/Docker.app/Contents/Resources/bin',
- ]);
+ ].join(':'));
  assert.equal(f.state.spawn.options.env.KEEP_FIXTURE,'retained');
  assert.deepEqual(env,{PATH:'/custom/approved/bin:/usr/bin:/bin',KEEP_FIXTURE:'retained'});
  for(const inherited of [{},{PATH:''}]){
   const original={...inherited},clean=await desktopShell(profile,32125,{env:inherited});
   const backendEnv=clean.state.spawn.options.env;
   assert.ok(backendEnv.PATH.startsWith('/usr/bin:/bin:/usr/sbin:/sbin:'),'missing or empty PATH must preserve system tools');
-  const systemTool=spawnSync('true',[],{env:backendEnv});
-  assert.equal(systemTool.error,undefined);
-  assert.equal(systemTool.status,0,'a real system executable must remain discoverable');
+  if(process.platform==='darwin'){
+   const systemTool=spawnSync('true',[],{env:backendEnv});
+   assert.equal(systemTool.error,undefined);
+   assert.equal(systemTool.status,0,'a real system executable must remain discoverable');
+  }
   assert.deepEqual(inherited,original);
  }
  const windows=await desktopShell(profile,32124,{env:{PATH:'C:\\fixture'},platform:'win32'});
+ assert.equal(windows.state.spawn.executable,join(profile,'node','bin','node.exe'));
  assert.equal(windows.state.spawn.options.env.PATH,'C:\\fixture');
 });
 
