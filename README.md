@@ -1,10 +1,16 @@
 # CoThink
 
-CoThink 是接入多种模型 API 的协作 Harness，基于固定 Pi 1.4.0。目前为预览版，既有发行支持 macOS 和 Windows x64／ARM64。版本验证见 [VALIDATION.md](VALIDATION.md)，问题可通过 [Issues](https://github.com/XSY-28/Cothink-release/issues) 反馈。
+**CoThink 让你把不同的 AI 模型组成一支团队，一起为你做事。**
+
+在 CoThink 里，你的阵容由一个主模型和至少一个副模型组成。你直接和主模型对话。简单问题，它自己回答。遇到复杂任务，它就当项目经理，把目标拆成几项工作，再根据各个模型的长处安排分工。它可以亲自做其中的一部分，也可以让其他模型负责一个子项目。团队工作时，有模型负责执行，也有模型检查进度、指出哪里跑偏了。最后，由主模型把成果交给你。
+
+CoThink 想探索的是，怎样**用算力换智力**。一项任务要经过很多步才能完成时，多出来的算力可以用来尝试另一条思路，检查前一步的错误，或者把有问题的部分重新做好。我们希望通过这样的协作，让模型团队能完成单个模型难以独立完成的长程任务。
+
+CoThink 基于固定 Pi 1.4.0。目前为预览版，既有发行支持 macOS 和 Windows x64／ARM64。版本验证见 [VALIDATION.md](VALIDATION.md)，问题可通过 [Issues](https://github.com/XSY-28/Cothink-release/issues) 反馈。
 
 ## 当前协作设计
 
-每个项目 Team 可有多条对话，各自选择一主、至少一副的阵容。用户与担任经理的主模型交流。它独立处理简单任务，复杂任务按能力组织岗位，最后交付成果。岗位使用各自的会话、权限和获准技能。CoThink 负责调度，agent-sync 负责文件范围、版本、检查与接纳。层级、定时检查、会话接续等设计以 [当前设计基线](DESIGN_BASELINE.md) 为准。旧版行为和验收范围见 [VALIDATION.md](VALIDATION.md)。
+每个项目 Team 可有多条对话，各自选择模型阵容。岗位使用各自的会话、权限和获准技能。CoThink 负责调度，agent-sync 负责文件范围、版本、检查与接纳。层级、定时检查、会话接续等设计以 [当前设计基线](DESIGN_BASELINE.md) 为准。旧版行为和验收范围见 [VALIDATION.md](VALIDATION.md)。
 
 开发工作树支持同一评审对同候选的显式撤回协议；须指明原拒绝请求与理由，普通通过意见不会覆盖旧反例。尚未安装。
 
