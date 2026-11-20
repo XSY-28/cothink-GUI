@@ -250,3 +250,23 @@ export function readCreations() {
     return new Map(rows.filter(([key,row])=>typeof key==="string"&&typeof row?.sessionId==="string"));
   }catch{return new Map();}
 }
+
+export function readingFactSaved(view, field, wanted) {
+  if (!view) return false;
+  if (field === "opened") return !!view.lastOpenedAt && view.lastOpenedAt !== wanted;
+  if (field === "anchor") return JSON.stringify(wanted) === JSON.stringify(view.anchor);
+  return view.seenResults[wanted.taskId] === wanted.resultRevision;
+}
+
+export function mergeReadingView(views, value, confirmed = []) {
+  const id = value.sessionId ?? value.id;
+  const known = views.get(id);
+  if (Number.isSafeInteger(value.viewRevision) && (!known || value.viewRevision >= known.viewRevision)) {
+    const failures = known?.failures ?? new Map();
+    for (const [key, {field,wanted}] of failures)
+      if (confirmed.includes(key) || (!value.viewError && readingFactSaved(value.view,field,wanted))) failures.delete(key);
+    views.set(id, {viewRevision:value.viewRevision, view:value.view, viewError:value.viewError, failures});
+  }
+  return known && Number.isSafeInteger(value.viewRevision) && value.viewRevision < known.viewRevision
+    ? {...value,viewRevision:known.viewRevision,view:known.view} : value;
+}

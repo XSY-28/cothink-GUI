@@ -19,8 +19,10 @@ export async function saveWorkspaceChange(api, action, args, readWorkspaces) {
       throw Object.assign(Error("原目录变更尚未确认。可查询原操作，当前目录以最新记录为准。"),{unknown:true,operation});
     }
     if (error.unknown || error.code==="WORKSPACE_CONFLICT") {
-      const workspaces=await readWorkspaces().catch(()=>[]);
-      const found=workspaces.find(row=>row.id===workspaceId);
+      const workspaces=await readWorkspaces().catch(()=>null);
+      if (action==="workspace.delete" && error.unknown && Array.isArray(workspaces) &&
+          !workspaces.some(row=>row.id===workspaceId)) return {workspaceId,deleted:true};
+      const found=workspaces?.find(row=>row.id===workspaceId);
       if (error.unknown && found && (action==="workspace.create" ||
           action==="workspace.update" && Object.entries(args.change).every(([key,value])=>found[key]===value))) return found;
       if (error.unknown) throw Object.assign(Error("Team 操作结果尚未确认。请查询原记录。"),{

@@ -3,7 +3,7 @@ import {useEditorPersistence} from "./useEditorPersistence.js";
 import {defaultTurnOptions,editorTurnInput,GUI_INPUT_VERSION,retiredReviewOption} from "../../src/gui-turn-options.js";
 import {materialType} from "../../src/gui-material-types.js";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createDraftBook, readPending, readCreations, writeGuiStorage } from "./view.js";
+import { readingFactSaved, mergeReadingView, createDraftBook, readPending, readCreations, writeGuiStorage } from "./view.js";
 import { saveWorkspaceChange } from "./api.js";
 import { useSessionSearch } from "./features/navigation/useSessionSearch.js";
 
@@ -241,29 +241,15 @@ export function useGuiWorkspace(api) {
       return null;
     }
   }, [api]);
-  function readingFactSaved(view, field, wanted) {
-    if (!view) return false;
-    if (field === "opened") return !!view.lastOpenedAt && view.lastOpenedAt !== wanted;
-    if (field === "anchor") return JSON.stringify(wanted) === JSON.stringify(view.anchor);
-    return view.seenResults[wanted.taskId] === wanted.resultRevision;
-  }
   function showReadingFailure(id) {
     if (!mounted.current || selected.current !== id) return;
     const failure = views.current.get(id)?.failures.values().next().value;
     setReadingError(failure ? "阅读状态未确认保存：" + failure.message : null);
   }
-  function rememberView(value, confirmed = []) {
-    const id = value.sessionId ?? value.id;
-    const known = views.current.get(id);
-    if (Number.isSafeInteger(value.viewRevision) && (!known || value.viewRevision >= known.viewRevision)) {
-      const failures = known?.failures ?? new Map();
-      for (const [key, {field,wanted}] of failures)
-        if (confirmed.includes(key) || (!value.viewError && readingFactSaved(value.view,field,wanted))) failures.delete(key);
-      views.current.set(id, {viewRevision:value.viewRevision, view:value.view, viewError:value.viewError, failures});
-    }
-    showReadingFailure(id);
-    return known && Number.isSafeInteger(value.viewRevision) && value.viewRevision < known.viewRevision
-      ? {...value,viewRevision:known.viewRevision,view:known.view} : value;
+  function rememberView(value, confirmed) {
+    const merged = mergeReadingView(views.current,value,confirmed);
+    showReadingFailure(value.sessionId ?? value.id);
+    return merged;
   }
   function applyView(saved, confirmed) {
     rememberView(saved, confirmed);
@@ -410,11 +396,18 @@ export function useGuiWorkspace(api) {
   async function manageWorkspace(action, args, open = false) {
     const request = selectionRequest.current;
     const {workspaceId:id} = args;
-    if (args.change?.archived) {
+    if (args.change?.archived || action === "workspace.delete") {
       for (const [sessionId, owner] of editorWorkspaces.current)
         if (owner === id) await flushDraft(sessionId);
     }
     const saved = await saveWorkspaceChange(api,action,args,readWorkspaces);
+    if (action === "workspace.delete") {
+      const rows = await readWorkspaces();
+      if (request === selectionRequest.current && workspaceRef.current === id)
+        await selectWorkspace(rows.find(row=>!row.archived) ?? null);
+      else await refresh();
+      return saved;
+    }
     if (mounted.current) setBootstrap(current => {
       if (!Array.isArray(current.workspaces)) return current;
       const prior=current.workspaces.find(row=>row.id===id);
@@ -443,7 +436,8 @@ export function useGuiWorkspace(api) {
   async function readWorkspaces() {
     const current=await readBootstrap();
     if (mounted.current) acceptBootstrap(current);
-    return current.workspaces??[];
+    if (!Array.isArray(current.workspaces)) throw Error("Team 列表暂不可用，请刷新。");
+    return current.workspaces;
   }
   async function setSessionNavigation({sessionId, expectedRevision, change}) {
     const selection = selectionRequest.current;
@@ -503,6 +497,11 @@ export function useGuiWorkspace(api) {
         reconcileEditor(HOME,{editor:b.homeDraft?.editor,draft:"",draftRevision:b.homeDraft?.revision??null},homeEditor);
       }
       acceptBootstrap(b);
+      if (observedSelection === selectionRequest.current && workspaceRef.current &&
+          Array.isArray(b.workspaces) && !b.workspaces.some(row=>row.id===workspaceRef.current)) {
+        await selectWorkspace(b.workspaces.find(row=>!row.archived) ?? null);
+        return;
+      }
       await loadSessions();
       const id = selected.current, taskId = selectedTask.current;
       const selection = selectionRequest.current, taskSelection = taskRequest.current;
@@ -1206,6 +1205,7 @@ export function useGuiWorkspace(api) {
       pendingStatus, submitting, connection, ready, errors: error ? [error] : []},
     commands: {flushAllDrafts, querySessions, loadSessions, searchSessions, selectProject, selectWorkspace, openWorkspaceAttention, setSessionNavigation, closeSession,
       createWorkspace: args => manageWorkspace("workspace.create",{workspaceId:crypto.randomUUID(),...args},true),
+      deleteWorkspace: workspace => manageWorkspace("workspace.delete",{workspaceId:workspace.id,expectedRevision:workspace.revision}),
       updateWorkspace: (workspace,change) => manageWorkspace("workspace.update",{workspaceId:workspace.id,expectedRevision:workspace.revision,change}),
       bindWorkspace: (workspace,path) => manageWorkspace("workspace.rebind",{workspaceId:workspace.id,expectedRevision:workspace.revision,path,operationId:crypto.randomUUID()}),
       queryWorkspaceRebind: args => api.action("workspace.rebind.query",args),

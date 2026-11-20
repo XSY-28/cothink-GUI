@@ -18,9 +18,11 @@ CoThink 想探索的是，怎样**用算力换智力**。一项任务要经过�
 
 **0.8.14-desktop.36** 配置阵容时先显示常用型号，可按服务商浏览或搜索完整目录。选好主、副模型后，可以在对应席位保存或更换 API Key；同一服务商的席位共用认证。离线目录补入 GPT-6.2 Sol、GPT-6.2 Astra 和 Claude Fable 5.2 的官方或网关条目。
 
+**0.8.14-desktop.37** 在侧栏右键单击 Team 头像，选择「删除 Team」并确认。该 Team 及其全部对话将从 CoThink 移除，磁盘上的项目文件会保留。
+
 ## 下载
 
-- **Windows 桌面 App**：关闭 CoThink，从 [Windows 发行页](https://github.com/XSY-28/cothink-GUI/releases/tag/v0.8.14-desktop.36) 下载相应的安装器。Intel、AMD 电脑选 x64，骁龙电脑选 ARM64。双击可安装或更新，运行时和动态 Team 头像已内置。
+- **Windows 桌面 App**：关闭 CoThink，从 [Windows .36 发行页](https://github.com/XSY-28/cothink-GUI/releases/tag/v0.8.14-desktop.36) 下载相应的安装器。Intel、AMD 电脑选 x64，骁龙电脑选 ARM64。双击可安装或更新，运行时和动态 Team 头像已内置。
 - **npm 版**：需要 Node.js 22.19 或更新版本。运行 `npm install -g cothink-v2@latest`，Windows PowerShell 可用 `npm.cmd`。运行 `cothink gui` 打开浏览器界面。[npm 包页面](https://www.npmjs.com/package/cothink-v2)
-- **下载 npm 安装包**：从同一发行页下载 `cothink-v2-0.8.14-desktop.36.tgz`，在下载目录运行 `npm install -g ./cothink-v2-0.8.14-desktop.36.tgz`。
+- **下载 npm 安装包**：从 [npm 下载 .tgz](https://registry.npmjs.org/cothink-v2/-/cothink-v2-0.8.14-desktop.37.tgz)，在下载目录运行 `npm install -g ./cothink-v2-0.8.14-desktop.37.tgz`。
 - **历史分平台 npm 包**：[0.8.14-desktop.34 发行页](https://github.com/XSY-28/cothink-GUI/releases/tag/v0.8.14-desktop.34) 提供 macOS Apple Silicon、Windows x64 和 Windows ARM64 归档。

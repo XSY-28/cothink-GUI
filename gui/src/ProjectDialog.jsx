@@ -187,3 +187,28 @@ export function ProjectDialog({commands, workspace, projects = [], rosters = [],
     </form>
   </Modal>;
 }
+
+export function WorkspaceDialog({overlay,workspace,workspaceId,workspaceError,onClose,onRename,onBind,onChange}) {
+  if (overlay.kind === "delete-team") return <Modal title="删除 Team" onClose={onClose} returnFocusTo={()=>overlay.trigger}>
+    <p>确定删除「{overlay.row.name}」及其全部对话？此操作无法撤销。磁盘上的项目文件会保留。</p>
+    {overlay.row.project && <p className="workspace-directory">{overlay.row.project}</p>}
+    {overlay.error && <p role="alert" className="error-text">{overlay.error}</p>}
+    <div className="form-actions">
+      <button disabled={overlay.busy} onClick={onClose}>取消</button>
+      <button disabled={overlay.busy} onClick={()=>onChange()}>确认删除</button>
+    </div>
+  </Modal>;
+  return <Modal title={workspace?.name || (workspaceId === null ? "未分组对话" : "归属待核对")} onClose={onClose}>
+      {!workspace ? <p>{workspaceId === null ? "这里保存不属于项目的历史和随手提问。" :
+        workspaceError || "Team 归属暂时无法确认，仍可阅读已保存的历史。"}</p> : <>
+        <p className="workspace-directory">{workspace.project || "未关联文件夹。"}</p>
+        {workspace.project && workspace.projectAvailable === false && <p className="error-text">目录不可用。仍可阅读历史。</p>}
+        <div className="form-actions">
+          {!workspace.archived && <button onClick={onRename}>重命名</button>}
+          {!workspace.archived && !workspace.project && <button onClick={onBind}>选择 Team 文件夹</button>}
+          <button disabled={overlay.busy} onClick={()=>onChange({archived:!workspace.archived})}>{workspace.archived ? "恢复" : "归档"}</button>
+        </div>
+        {overlay.error && <p className="error-text" role="alert">{overlay.error}</p>}
+      </>}
+    </Modal>;
+}

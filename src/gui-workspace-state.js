@@ -43,7 +43,7 @@ function readSnapshot(home) {
   try {
     const bytes = readFileSync(path);
     const state = JSON.parse(bytes.toString("utf8"));
-    if (!record(state) || ![1,2].includes(state.schemaVersion) || !revision(state.revision) || !Array.isArray(state.workspaces))
+    if (!record(state) || ![1,2,3].includes(state.schemaVersion) || !revision(state.revision) || !Array.isArray(state.workspaces))
       throw unavailable();
     const ids = new Set(), projects = new Set(), names = new Set();
     for (const w of state.workspaces) {
@@ -51,7 +51,7 @@ function readSnapshot(home) {
           !validName(w.name) || !(w.project === null || isWorkspaceProject(w.project)) ||
           !rosterId(w.defaultRosterId) || typeof w.archived !== "boolean" ||
           typeof w.createdAt !== "string" || !Number.isFinite(Date.parse(w.createdAt)) ||
-          (w.mutationId !== undefined && (state.schemaVersion !== 2 || !isWorkspaceId(w.mutationId))))
+          (w.mutationId !== undefined && (state.schemaVersion < 2 || !isWorkspaceId(w.mutationId))))
         throw unavailable();
       const key = w.project === null ? nameKey(w.name) : projectKey(w.project);
       const unique = w.project === null ? names : projects;
@@ -59,7 +59,15 @@ function readSnapshot(home) {
       ids.add(w.id);
       unique.add(key);
     }
-    if (state.schemaVersion === 2) {
+    if (state.schemaVersion === 3) {
+      if (!Array.isArray(state.deletedWorkspaceIds) || !Array.isArray(state.deletedSessionIds) ||
+          !state.deletedSessionIds.every(isWorkspaceId)) throw unavailable();
+      for (const id of state.deletedWorkspaceIds) {
+        if (!isWorkspaceId(id) || ids.has(id)) throw unavailable();
+        ids.add(id);
+      }
+    }
+    if (state.schemaVersion >= 2) {
       if (!record(state.legacyMembership)) throw unavailable();
       for (const [sessionId, branches] of Object.entries(state.legacyMembership)) {
         if (!isWorkspaceId(sessionId) || !record(branches)) throw unavailable();
@@ -75,6 +83,15 @@ function readSnapshot(home) {
 
 export function readGuiWorkspaces(home) {
   return readSnapshot(home).state;
+}
+
+// History remains readable when an unrelated workspace table is unavailable.
+export function readableWorkspaceTable(home) {
+  try { return readGuiWorkspaces(home); } catch { return null; }
+}
+
+export function taskTeamWasDeleted(state, task) {
+  return state?.deletedSessionIds?.includes(task.sessionId) || state?.deletedWorkspaceIds?.includes(task.workspace?.id);
 }
 
 function backupV1(home, bytes, beforeCommit) {
@@ -117,7 +134,7 @@ function write(home, update) {
         if (verify) verify();
       };
       beforeCommit();
-      if (bytes && oldVersion === 1 && state.schemaVersion === 2) backupV1(home, bytes, beforeCommit);
+      if (bytes && oldVersion === 1 && state.schemaVersion >= 2) backupV1(home, bytes, beforeCommit);
       writePrivateJson(pathFor(home), {...state, revision:state.revision + 1}, beforeCommit);
     }
     return result;
@@ -142,6 +159,7 @@ function workspace(id, name, project, defaultRosterId) {
 export function validateWorkspaceAction(name, args) {
   const keys = name === "workspace.create" ? ["workspaceId","name","project","defaultRosterId"] :
     name === "workspace.rebind" ? ["workspaceId","expectedRevision","path","operationId"] :
+    name === "workspace.delete" ? ["workspaceId","expectedRevision"] :
     name === "workspace.bind" ? ["workspaceId","expectedRevision","path"] : ["workspaceId","expectedRevision","change"];
   if (name === "workspace.create" && args && Object.hasOwn(args,"avatarId")) keys.push("avatarId");
   if (!args || Object.keys(args).length !== keys.length || !keys.every(key => Object.hasOwn(args,key)) ||
@@ -154,6 +172,7 @@ export function createGuiWorkspace(home, {workspaceId, name, project, defaultRos
     throw Error("请选择列表中的 Team 头像。");
   return write(home, state => {
     const existing = state.workspaces.find(w => w.id === workspaceId);
+    if (state.deletedWorkspaceIds?.includes(workspaceId)) throw workspaceError("WORKSPACE_CONFLICT", "这个 Team 已删除，请重新创建。");
     if (existing) throw workspaceError("WORKSPACE_CONFLICT", "该 Team 标识已存在；请打开已保存的 Team。", existing);
     const result = workspace(workspaceId,name,project,defaultRosterId);
     if (avatarId !== undefined) result.avatarId = avatarId;
@@ -183,7 +202,7 @@ export function updateGuiWorkspace(home, {workspaceId, expectedRevision, change}
     } else if (key === "archived") {
       if (typeof value !== "boolean") throw Error("归档状态无效。");
     } else if (key === "project") {
-      if (state.schemaVersion === 2 || current.project !== null)
+      if (state.schemaVersion >= 2 || current.project !== null)
         throw workspaceError("WORKSPACE_CONFLICT", "该 Team 已绑定目录；如需另一目录请新建 Team。", current);
       if (!isWorkspaceProject(value)) throw Error("项目目录无效。");
     } else throw Error("项目 Team 变更参数无效。");
@@ -200,26 +219,47 @@ export function workspaceForProject(state, path) {
   return state.workspaces.find(w => sameDirectory(w.project,path));
 }
 
-function mappedWorkspace(state, sessionId, project) {
-  if (!isWorkspaceId(sessionId) || !isWorkspaceProject(project)) return null;
-  const id = state.legacyMembership?.[sessionId]?.[project];
-  return id ? state.workspaces.find(w => w.id === id) : null;
+// Retain only deleted IDs to distinguish a deliberately removed Team from damaged history.
+export function deleteGuiWorkspace(home, {workspaceId, expectedRevision}, sessionIds = [], verify) {
+  if (!isWorkspaceId(workspaceId) || !revision(expectedRevision) || !Array.isArray(sessionIds) || !sessionIds.every(isWorkspaceId))
+    throw Error("项目 Team 删除参数无效。");
+  return write(home, state => {
+    const at = state.workspaces.findIndex(row => row.id === workspaceId);
+    if (at < 0) throw workspaceError("WORKSPACE_UNAVAILABLE", "项目 Team 不存在，请刷新。");
+    const current = state.workspaces[at];
+    if (current.revision !== expectedRevision)
+      throw workspaceError("WORKSPACE_CONFLICT", "项目 Team 已变化，请重新确认删除。", current);
+    state.workspaces.splice(at, 1);
+    state.schemaVersion = 3;
+    state.legacyMembership ??= {};
+    (state.deletedWorkspaceIds ??= []).push(workspaceId);
+    state.deletedSessionIds = [...new Set([...(state.deletedSessionIds ?? []), ...sessionIds])];
+    return {changed:true, result:{workspaceId, deleted:true}, verify};
+  });
+}
+
+function mappedId(state, sessionId, project) {
+  return state.legacyMembership?.[sessionId]?.[project];
 }
 
 export function workspaceForSession(state, sessionId, project, workspaceId) {
-  if (workspaceId != null) return state.workspaces.find(w => w.id === workspaceId);
-  return mappedWorkspace(state, sessionId, project) ?? workspaceForProject(state, project ?? null);
+  const id = workspaceId ?? mappedId(state,sessionId,project);
+  return id ? state.workspaces.find(w => w.id === id) : workspaceForProject(state, project ?? null);
+}
+
+export function sessionTeamWasDeleted(state, sessionId, project, marker) {
+  return state?.deletedWorkspaceIds?.includes(marker ?? mappedId(state,sessionId,project));
 }
 
 function remember(state, sessionId, project, workspaceId) {
-  state.schemaVersion = 2;
+  state.schemaVersion = Math.max(2,state.schemaVersion);
   state.legacyMembership ??= {};
   const branches = state.legacyMembership[sessionId] ??= {};
   branches[project] = workspaceId;
 }
 
 function discoverLegacyBinding(state, {sessionId, project}) {
-  if (sessionId && mappedWorkspace(state,sessionId,project)) return false;
+  if (sessionId && mappedId(state,sessionId,project)) return false;
   let target = workspaceForProject(state,project);
   if (!target) {
     const aliases = state.workspaces.filter(item => sameWorkspaceDirectory(item.project,project));
@@ -272,13 +312,13 @@ export function rebindGuiWorkspace(home, input, verifyLegacyBindings) {
     const result = {...current, project:path, mutationId:operationId, revision:current.revision + 1};
     assertUnique(state,result);
 
-    state.schemaVersion = 2;
+    state.schemaVersion = Math.max(2,state.schemaVersion);
     state.legacyMembership ??= {};
     // Discover against the old directory table. A destination with new
     // legacy history needs its own Team before it can participate in rebind.
     for (const binding of legacyBindings) {
       if (sameWorkspaceDirectory(binding.project,path) &&
-          !mappedWorkspace(state,binding.sessionId,binding.project) &&
+          !mappedId(state,binding.sessionId,binding.project) &&
           !state.workspaces.some(item=>sameWorkspaceDirectory(item.project,binding.project)))
         throw workspaceError("WORKSPACE_CONFLICT", "目标目录有尚未归属的旧对话。请刷新历史后查看该目录的 Team。");
       discoverLegacyBinding(state,binding);
@@ -301,7 +341,7 @@ export function importGuiWorkspaceProjects(home, paths) {
     return [];
   });
   const missing = (state, {sessionId, project}) => sessionId
-    ? !mappedWorkspace(state, sessionId, project)
+    ? !mappedId(state, sessionId, project)
     : !workspaceForProject(state, project);
   const state = readGuiWorkspaces(home);
   if (!candidates.some(item => missing(state,item))) return state;

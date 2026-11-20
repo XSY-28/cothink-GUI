@@ -10,10 +10,10 @@ import {projectMcpSummary} from "./project-mcp-work.js";
 import {taskSkillDirectory} from './skill-resources.js';
 import {resolvePackageResources} from './packages.js';
 import {
-  createGuiWorkspace, validateWorkspaceAction, importGuiWorkspaceProjects, isWorkspaceId, isWorkspaceProject,
-  readGuiWorkspaces, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError, workspaceForSession,
+  createGuiWorkspace, validateWorkspaceAction, importGuiWorkspaceProjects, isWorkspaceId,
+  readGuiWorkspaces, readableWorkspaceTable, taskTeamWasDeleted, updateGuiWorkspace, rebindGuiWorkspace, queryGuiWorkspaceRebind, workspaceError,
 } from "./gui-workspace-state.js";
-import {persistNewGuiSession, assertNewGuiSessionId, scopeAfterTruncatedTail, freezeWorkspaceHistory} from "./gui-session-persistence.js";
+import {persistNewGuiSession, assertNewGuiSessionId, scopeAfterTruncatedTail, freezeWorkspaceHistory, workspaceFacts, projectMembership, branchFacts, deleteTeamConversations} from "./gui-session-persistence.js";
 import {guiFiles, guiFile, guiFileDiff} from "./gui-files.js";
 import {readSessionUiState, writeSessionUiState, writeSessionViewState, initializeSessionView, readHomeDraft, writeHomeDraft, sessionStateError} from "./session-ui-state.js";
 import {createUpdateService, formatUpdateStatus, updateInstructions} from "./updates.js";
@@ -263,46 +263,6 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     return {records, errors};
   }
   const taskRecords = () => taskIndex().records;
-  function workspaceFacts(manager) {
-    let project;
-    try {
-      project = readSessionProject(manager);
-      if (project !== null && !isWorkspaceProject(project))
-        return {associationError:"会话的项目路径无法确认；原记录保留。"};
-      const forkOf = manager.getBranch().findLast(entry =>
-        entry.type === "custom" && entry.customType === "cothink-fork")?.data ?? null;
-      return {sessionId:manager.getSessionId(),marker:readSessionWorkspace(manager), project, forkOf,
-        branched: !!forkOf || !!manager.getHeader()?.parentSession};
-    } catch (error) {
-      return {project, associationError:error.message};
-    }
-  }
-  function projectMembership(facts, table) {
-    const {marker, project, associationError, sessionId} = facts ?? {};
-    const unknown = (message = "会话的 Team 归属无法确认；原记录保留。") => ({workspaceError:message});
-    if (!facts || associationError) return unknown(associationError);
-    if (marker === null) return project === null ? {workspaceId:null, workspaceArchived:false} : unknown();
-    if (marker === undefined && project === null) return {workspaceId:null, workspaceArchived:false};
-    const workspace = table && workspaceForSession(table,sessionId,project,marker);
-    if (!workspace) return unknown();
-    return {workspaceId:workspace.id, workspaceArchived:workspace.archived};
-  }
-  function branchFacts(manager) {
-    const entries = manager.getEntries();
-    const seen = new Set(), parents = new Set();
-    for (const {id,parentId} of entries) {
-      if (typeof id !== "string" || seen.has(id) || (parentId !== null && !seen.has(parentId)))
-        throw Error("会话分支关系损坏。");
-      seen.add(id);
-      if (parentId !== null) parents.add(parentId);
-    }
-    const leaves = entries.filter(entry=>!parents.has(entry.id)).map(entry=>entry.id);
-    if (!leaves.length) return [workspaceFacts(manager)];
-    return leaves.map(id=>workspaceFacts({
-      getBranch:()=>manager.getBranch(id), getCwd:()=>manager.getCwd(),
-      getHeader:()=>manager.getHeader(), getSessionId:()=>manager.getSessionId(),
-    }));
-  }
   function discoverWorkspaces(infos) {
     return importGuiWorkspaceProjects(home, infos.flatMap(info =>
       info.error ? [] : (info.branches ?? []).flatMap(branch =>
@@ -333,7 +293,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     const latest = projectMembership(facts,readGuiWorkspaces(home));
     if (latest.workspaceError) throw workspaceError("WORKSPACE_UNAVAILABLE",latest.workspaceError);
     if (latest.workspaceArchived) throw workspaceError("WORKSPACE_ARCHIVED","此 Team 已归档，请先恢复。");
-    return membership;
+    return latest;
   }
   function requireActiveTeam(table,id) {
     const workspace=isWorkspaceId(id) && table.workspaces.find(row=>row.id===id);
@@ -379,6 +339,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     return entries;
   }
   async function reader(id,summary) {
+    const table = readableWorkspaceTable(home);
+    if (table?.deletedSessionIds?.includes(id)) throw workspaceError("WORKSPACE_DELETED","所属 Team 和对话已删除。");
     if (holders.has(id)) {
       const manager = holders.get(id).sessionManager;
       // New GUI empty sessions are durable too. Never let a cached holder hide
@@ -512,14 +474,13 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
     return opening;
   }
   function rawTask(id) {
-    return (
-      (active?.taskId === id ? live.get(id) : null) ?? {
-        record: readTask(home, id),
-        requests() {
-          return readRequests(home, this.record);
-        },
-      }
-    );
+    const task = (active?.taskId === id ? live.get(id) : null) ?? {
+      record: readTask(home, id),
+      requests() { return readRequests(home, this.record); },
+    };
+    if (taskTeamWasDeleted(readableWorkspaceTable(home),task.record))
+      throw workspaceError("WORKSPACE_DELETED","所属 Team 和对话已删除。");
+    return task;
   }
   const eligibleResults = turns => Object.fromEntries(turns.filter(turn =>
     turn.resultRevision && turn.endedAt && turn.status !== "stop_unknown" && turn.id !== active?.taskId)
@@ -603,6 +564,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       try { table = discoverWorkspaces(infos); } catch { /* A damaged table cannot make history unreadable. */ }
       const association = facts.associationError ? facts : info?.branch ?? facts;
       const membership = projectMembership(association,table);
+      if (membership.workspaceDeleted || table?.deletedSessionIds?.includes(id))
+        throw workspaceError("WORKSPACE_DELETED", "所属 Team 和对话已删除。");
       const reading = readingView(navigation,association,info,ids.map(taskId => records.find(r=>r.id===taskId)).filter(Boolean));
       if (viewFailure) reading.viewError = viewFailure;
       if (reading.view.anchor && !turns.some(turn => turn.taskId === reading.view.anchor.taskId &&
@@ -641,7 +604,8 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
           !!membership.workspaceArchived || membership.workspaceId===null || !!navigation.navigation?.archived,
         selectionError,
       });
-    } catch {
+    } catch (error) {
+      if (error.code === "WORKSPACE_DELETED") throw error;
       const info = (await summaries()).find((s) => s.id === id);
       if (!info && !holders.has(id)) throw Error("会话不存在，请刷新历史。");
       // Retain a cached, previously accepted mode only as a read-only selection.
@@ -704,6 +668,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       // Keep live turns from the holder, but never let its cached marker hide disk damage.
       const association = info?.branch ?? branch;
       const nav = navigationFor(id), membership = projectMembership(association,table);
+      if (membership.workspaceDeleted || table?.deletedSessionIds?.includes(id)) continue;
       const reading = readingView(nav,error ? null : association,info,turns);
       const lastOpenedAt = reading.view.lastOpenedAt;
       if (membership.workspaceId && !nav.navigation?.archived) {
@@ -1296,6 +1261,13 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         if (current.revision !== args.expectedRevision)
           throw workspaceError("WORKSPACE_CONFLICT","项目 Team 已变化，请读取最新状态。",current);
         let change;
+        if (name === "workspace.delete") {
+          const removed = await deleteTeamConversations(home,args,infos,table,current,{
+            holders, busySessions:[active?.sessionId,extensionCommand?.sessionId], signature, releaseHolder,
+          });
+          emit();
+          return removed;
+        }
         if (name === "workspace.bind" || name === "workspace.rebind") {
           if (name === "workspace.bind")
             throw workspaceError("WORKSPACE_CONFLICT","请通过 Team 的目录选择入口绑定目录。",current);
@@ -1501,7 +1473,7 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
       });
     }
     if (name === "workspace.rebind.query") return queryGuiWorkspaceRebind(home,args);
-    if (["workspace.create","workspace.update","workspace.bind","workspace.rebind"].includes(name))
+    if (["workspace.create","workspace.update","workspace.delete","workspace.bind","workspace.rebind"].includes(name))
       return manageWorkspace(name,args);
     if (name === "session.view") {
       const {sessionId,expectedViewRevision,opened,anchor,seen} = args;
@@ -1646,7 +1618,9 @@ export async function createGuiController({ home, cwd = process.cwd(), suggested
         let holder, folder;
         try {
           assertNewGuiSessionId(directory,id);
-          const workspace=requireActiveTeam(discoverWorkspaces(await summaries()),args.workspaceId);
+          const table = discoverWorkspaces(await summaries());
+          if (table.deletedSessionIds?.includes(id)) throw sessionStateError("SESSION_STATE_CONFLICT","原对话已删除，请使用新的对话 ID。");
+          const workspace=requireActiveTeam(table,args.workspaceId);
           const project=requireTeamFolder(home,workspace.project);
           const checkHomeIdentity=()=>{
             const row=readHomeDraft(home);

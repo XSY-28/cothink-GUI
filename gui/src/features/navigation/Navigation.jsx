@@ -72,7 +72,7 @@ function workspaceDirectoryHint(row, rows) {
 }
 
 export function Navigation({workspaces, workspaceId, ready, mobileOpen, onOpenWorkspace, onSearch, onCreate, onNewConversation,
-  onSettings, connection, updateLabel, inert}) {
+  onSettings, onDeleteWorkspace, connection, updateLabel, inert}) {
   const active = workspaces?.filter(item=>!item.archived) ?? [];
   const currentTeam=active.find(row=>row.id===workspaceId);
   const newScope=currentTeam?.name||"未分组";
@@ -81,6 +81,26 @@ export function Navigation({workspaces, workspaceId, ready, mobileOpen, onOpenWo
   const createId = useId();
   const createArea = useRef(null), createButton = useRef(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const contextMenu = useRef(null);
+  const contextTarget = useRef(null);
+  function showTeamMenu(event, row) {
+    event.preventDefault();
+    const trigger = event.currentTarget;
+    stopHover();
+    setCreateOpen(false);
+    contextTarget.current = {row, trigger};
+    const menu = contextMenu.current;
+    const rect = trigger.getBoundingClientRect();
+    menu.showPopover();
+    const x = event.clientX || rect.right, y = event.clientY || rect.top;
+    menu.style.left = Math.max(0, Math.min(x, window.innerWidth - menu.offsetWidth)) + "px";
+    menu.style.top = Math.max(0, Math.min(y, window.innerHeight - menu.offsetHeight)) + "px";
+    menu.firstElementChild.focus();
+  }
+  useEffect(() => {
+    if (inert || !workspaces?.some(row => row.id === contextTarget.current?.row.id && !row.archived))
+      contextMenu.current?.hidePopover?.();
+  }, [inert, workspaces]);
   const hover = useRef(null);
   const [hovered, setHovered] = useState(null);
   const labeledTeam = hovered?.labelTop != null && !inert
@@ -197,7 +217,15 @@ export function Navigation({workspaces, workspaceId, ready, mobileOpen, onOpenWo
           <button className={styles.teamRow} aria-label={row.name}
             aria-description={[attention,hint && (row.project ?? hint)].filter(Boolean).join(" · ") || undefined}
             aria-current={workspaceId === row.id ? "page" : undefined}
-            onClick={()=>{stopHover();onOpenWorkspace(row);}}>
+            aria-haspopup="menu"
+            onContextMenu={event=>showTeamMenu(event,row)}
+            onKeyDown={event=>{
+              if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) showTeamMenu(event,row);
+            }}
+            onClick={event=>{
+              if (event.ctrlKey && /Mac/.test(navigator.platform)) showTeamMenu(event,row);
+              else {stopHover();onOpenWorkspace(row);}
+            }}>
             <span className={styles.avatarTrigger} aria-hidden="true" data-team-avatar-trigger=""
               onPointerEnter={event=>startHover(event,row.id)} onPointerMove={moveOverAvatar}
               onPointerLeave={leaveAvatar} onPointerCancel={leaveAvatar}>
@@ -207,6 +235,21 @@ export function Navigation({workspaces, workspaceId, ready, mobileOpen, onOpenWo
           </button>
         </div>;
       })}
+    </div>
+    <div ref={contextMenu} popover="auto" role="menu" aria-label="Team 操作" className={styles.teamMenu}
+      onKeyDown={event=>{
+        if (event.key === "Escape") {
+          event.preventDefault();
+          contextMenu.current.hidePopover();
+          contextTarget.current?.trigger.focus();
+        }
+      }}>
+      <button type="button" role="menuitem" onClick={()=>{
+        const {row, trigger} = contextTarget.current;
+        contextMenu.current.hidePopover();
+        trigger.focus();
+        onDeleteWorkspace(row, trigger);
+      }}>删除 Team</button>
     </div>
     {labeledTeam && <div className={styles.teamLabel} style={{top:hovered.labelTop}} role="tooltip" aria-hidden="true">
       <span>{labeledTeam.name}</span>
