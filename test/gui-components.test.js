@@ -1480,7 +1480,7 @@ test("roster search and row actions keep conversation selection separate from th
     await input("搜索主模型","r-321");
     const select=labeled("主模型");
     assert.equal([...select.options].some(option=>option.textContent.includes("Reviewer")),false);
-    assert.match([...select.options].find(option=>option.value==='["r","r-321"]').textContent,/Unconfigured.*缺少认证/);
+    assert.equal([...select.options].find(option=>option.value==='["r","r-321"]').textContent,"Unconfigured");
     await act(()=>root.render(React.createElement(TeamPanel,{...props,key:"only",session:{id:"chat"},teams:[first]})));
     await click("管理 原组合");
     assert.equal(labeled("删除 原组合").disabled,true);
