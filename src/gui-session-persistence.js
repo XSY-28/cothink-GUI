@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, unlinkSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { SessionManager, CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
-import { writePrivateBytes } from "./storage.js";
+import { acquireSessionWriter, sessionWriterBusy, writePrivateBytes } from "./storage.js";
 import { sessionStateError } from "./session-ui-state.js";
-import { existingNeutralDirectory } from "./conversation.js";
-import { isWorkspaceId, isWorkspaceProject, sameWorkspaceDirectory, workspaceError } from "./gui-workspace-state.js";
+import { existingNeutralDirectory, readSessionProject, readSessionWorkspace } from "./conversation.js";
+import { isWorkspaceId, isWorkspaceProject, sameWorkspaceDirectory, workspaceError, deleteGuiWorkspace, sessionTeamWasDeleted, workspaceForSession } from "./gui-workspace-state.js";
 
 // Summaries deliberately omit unidentifiable histories. Creation must also inspect
 // UUID-bearing filenames, so a damaged header cannot make an occupied ID look free.
@@ -112,4 +112,89 @@ export function freezeWorkspaceHistory(directory,infos,table,current,nextPath,{s
       throw workspaceError("WORKSPACE_CONFLICT","新目录在核对期间改变。",current);
   };
   return {legacyBindings,verify};
+}
+
+export function workspaceFacts(manager) {
+  let project;
+  try {
+    project = readSessionProject(manager);
+    if (project !== null && !isWorkspaceProject(project))
+      return {associationError:"会话的项目路径无法确认；原记录保留。"};
+    const forkOf = manager.getBranch().findLast(entry =>
+      entry.type === "custom" && entry.customType === "cothink-fork")?.data ?? null;
+    return {sessionId:manager.getSessionId(),marker:readSessionWorkspace(manager), project, forkOf,
+      branched: !!forkOf || !!manager.getHeader()?.parentSession};
+  } catch (error) {
+    return {project, associationError:error.message};
+  }
+}
+export function projectMembership(facts, table) {
+  const {marker, project, associationError, sessionId} = facts ?? {};
+  const unknown = (message = "会话的 Team 归属无法确认；原记录保留。") => ({workspaceError:message});
+  if (!facts || associationError) return unknown(associationError);
+  if (marker === null) return project === null ? {workspaceId:null, workspaceArchived:false} : unknown();
+  if (marker === undefined && project === null) return {workspaceId:null, workspaceArchived:false};
+  const workspace = table && workspaceForSession(table,sessionId,project,marker);
+  if (!workspace && sessionTeamWasDeleted(table,sessionId,project,marker)) return {workspaceDeleted:true, workspaceError:"所属 Team 和对话已删除。"};
+  if (!workspace) return unknown();
+  return {workspaceId:workspace.id, workspaceArchived:workspace.archived};
+}
+export function branchFacts(manager) {
+  const entries = manager.getEntries();
+  const seen = new Set(), parents = new Set();
+  for (const {id,parentId} of entries) {
+    if (typeof id !== "string" || seen.has(id) || (parentId !== null && !seen.has(parentId)))
+      throw Error("会话分支关系损坏。");
+    seen.add(id);
+    if (parentId !== null) parents.add(parentId);
+  }
+  const leaves = entries.filter(entry=>!parents.has(entry.id)).map(entry=>entry.id);
+  if (!leaves.length) return [workspaceFacts(manager)];
+  return leaves.map(id=>workspaceFacts({
+    getBranch:()=>manager.getBranch(id), getCwd:()=>manager.getCwd(),
+    getHeader:()=>manager.getHeader(), getSessionId:()=>manager.getSessionId(),
+  }));
+}
+
+export async function deleteTeamConversations(home,args,infos,table,current,{holders,busySessions,signature,releaseHolder}) {
+  const related = new Set(infos.filter(info =>
+    (info.branches ?? []).some(branch => projectMembership(branch,table).workspaceId === current.id)).map(info => info.id));
+  for (const [id,holder] of holders)
+    if (projectMembership(workspaceFacts(holder.sessionManager),table).workspaceId === current.id) related.add(id);
+  const verify = () => {
+    if (busySessions.some(id => related.has(id)))
+      throw workspaceError("WORKSPACE_CONFLICT","此 Team 正在执行任务或插件命令，请结束后再删除。",current);
+    if ([...related].some(id => !holders.has(id) && sessionWriterBusy(join(home,"pi"),id)))
+      throw workspaceError("WORKSPACE_CONFLICT","此 Team 的对话正被另一窗口占用，请先关闭该窗口。",current);
+  };
+  // A legacy Pi file can contain branches owned by different Teams.
+  // Remove the whole file only when every branch belongs to this Team.
+  const files = infos.filter(info => related.has(info.id) && info.branches?.length &&
+    info.branches.every(branch => projectMembership(branch,table).workspaceId === current.id));
+  const locks = [];
+  try {
+    verify();
+    for (const info of files) {
+      if (!holders.has(info.id)) locks.push(acquireSessionWriter(join(home,"pi"),info.id));
+    }
+    const removed = deleteGuiWorkspace(home,args,files.map(info=>info.id),()=>{
+      for (const lock of locks) lock.assertOwned();
+      for (const info of files) {
+        holders.get(info.id)?.assertOwned();
+        if (signature(info.path) !== info.stamp)
+          throw workspaceError("WORKSPACE_CONFLICT","对话已变化，请重新确认删除。",current);
+      }
+    });
+    // The table commit already removed these conversations from CoThink.
+    // File cleanup on Windows can be delayed by an open OS handle.
+    for (const info of files) {
+      try { unlinkSync(info.path); }
+      catch (error) {
+        if (error.code !== "ENOENT") removed.warning = "Team 已删除，部分本地历史文件未能清理。";
+      }
+      try { await releaseHolder(info.id); }
+      catch { removed.warning = "Team 已删除，部分对话资源仍被占用。"; }
+    }
+    return removed;
+  } finally { for (const lock of locks) lock.release(); }
 }

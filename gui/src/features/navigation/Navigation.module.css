@@ -54,3 +54,7 @@
 
 @media (pointer:coarse) { .workspaceRow { min-width:44px; min-height:44px; } }
 @media (forced-colors:active) { .teamRow[aria-current="page"] { border:1px solid ButtonText; } }
+
+.teamMenu { position:fixed; inset:auto; margin:0; padding:4px; min-width:132px; background:var(--raised); border:1px solid var(--control-line); border-radius:8px; box-shadow:var(--shadow); }
+.teamMenu button { display:block; width:100%; text-align:left; color:var(--error); background:transparent; border:0; }
+.teamMenu button:hover, .teamMenu button:focus-visible { background:var(--accent-soft); }

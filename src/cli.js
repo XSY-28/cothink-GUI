@@ -7,6 +7,7 @@ import { setupModels, migrateTeamConfig, importLegacyConfig, parseTurnInput } fr
 import { resolveTeamConfig } from "./teams.js";
 import { parsePackageCommand, runPackageCommand, formatPackageResult } from "./packages.js";
 import { runTurn } from "./discussion.js";
+import {readableWorkspaceTable,taskTeamWasDeleted} from "./gui-workspace-state.js";
 import { listTasks, readTask } from "./task.js";
 import { listRuns, readRun } from "./storage.js";
 import {
@@ -176,7 +177,8 @@ export async function main(args = process.argv.slice(2), {projectHandoff} = {}) 
       return 0;
     }
     if (command === "history") {
-      const rows = [...listTasks(home), ...listRuns(home)].sort((a, b) =>
+      const table = readableWorkspaceTable(home);
+      const rows = [...listTasks(home).filter(task=>!taskTeamWasDeleted(table,task)), ...listRuns(home)].sort((a, b) =>
         b.createdAt.localeCompare(a.createdAt),
       );
       process.stdout.write(
@@ -201,6 +203,7 @@ export async function main(args = process.argv.slice(2), {projectHandoff} = {}) 
       const id = positionals[0];
       if (existsSync(join(home, "tasks", id + ".json"))) {
         const record = readTask(home, id);
+        if (taskTeamWasDeleted(readableWorkspaceTable(home),record)) throw Error("所属 Team 和对话已删除。");
         if (record.work)
           record.workFacts = await inspectWork(home, record, {
             includeOutputs: values.all || values.json,

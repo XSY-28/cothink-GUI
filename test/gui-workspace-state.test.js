@@ -125,3 +125,19 @@ test("rebind resolves newly found history against the directory table before the
   assert.equal(state.workspaceForSession(rebound,anotherSession,another).project,another);
   assert.ok(rebound.legacyMembership[anotherSession][another]);
 });
+
+test("deleting a Team frees its directory and preserves the ownership of older conversations", t => {
+  const home = temp(t), workspaceId = randomUUID(), sessionId = randomUUID();
+  const project = join(home, "shared-folder");
+  state.createGuiWorkspace(home, args(workspaceId, "Original", project));
+  state.importGuiWorkspaceProjects(home, [{sessionId, project}]);
+  const remove = revision => state.deleteGuiWorkspace(home, {workspaceId, expectedRevision:revision});
+  assert.throws(() => remove(1), {code:"WORKSPACE_CONFLICT"});
+  remove(0);
+  const replacement = state.createGuiWorkspace(home, args(randomUUID(), "Replacement", project));
+  const disk = state.importGuiWorkspaceProjects(home, [{sessionId, project}]);
+  assert.deepEqual(disk.workspaces.map(row => row.id), [replacement.id]);
+  assert.equal(state.workspaceForSession(disk,sessionId,project), undefined);
+  assert.equal(state.workspaceForSession(disk,sessionId,project,workspaceId), undefined);
+  assert.throws(() => state.createGuiWorkspace(home,args(workspaceId,"Reuse")), {code:"WORKSPACE_CONFLICT"});
+});

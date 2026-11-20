@@ -9,7 +9,7 @@ import { Conversation } from "./features/conversation/Conversation.jsx";
 import { ConversationActionDialogs, useConversationActions } from "./features/conversation/ConversationMenu.jsx";
 import { Collaboration } from "./Collaboration.jsx";
 import { Settings } from "./Settings.jsx";
-import { ProjectDialog } from "./ProjectDialog.jsx";
+import { ProjectDialog, WorkspaceDialog } from "./ProjectDialog.jsx";
 import { TeamPanel } from "./features/teams/TeamPanel.jsx";
 import { Modal } from "./Modal.jsx";
 import { MaterialPicker, MaterialPreview } from "./MaterialPicker.jsx";
@@ -242,11 +242,15 @@ export function App() {
     return {...overlay,busy:false,error:error.message};
   }
   async function updateWorkspace(change) {
-    if (!workspace || overlayRef.current?.busy) return;
+    const deleting = overlay?.kind === "delete-team";
+    if ((!deleting && !workspace) || overlayRef.current !== overlay || overlay.busy) return;
     const saving = {...overlay,busy:true,error:null};
     setOverlay(saving);
     try {
-      await commands.updateWorkspace(workspace,change);
+      if (deleting) {
+        const result = await commands.deleteWorkspace(overlay.row);
+        setToast(result.warning || "Team 已删除");
+      } else await commands.updateWorkspace(workspace,change);
       if (overlayRef.current === saving) setOverlay(null);
     } catch (error) {
       if (overlayRef.current === saving) setOverlay(currentOverlayError(error));
@@ -261,6 +265,7 @@ export function App() {
     {navOpen && <button className="nav-scrim" aria-label="关闭导航" onClick={dismissNavigation} />}
     <Navigation workspaces={boot.workspaces} workspaceId={state.workspaceId} ready={state.ready} mobileOpen={navOpen}
       onOpenWorkspace={openWorkspace} onNewConversation={createConversation} onSearch={()=>openPicker("all")} onCreate={openCreateTeam}
+      onDeleteWorkspace={(row,trigger)=>setOverlay({kind:"delete-team",row,trigger})}
       onSettings={()=>setOverlay({kind:"settings"})} connection={state.connection}
       updateLabel={boot.updates?.status === "available" ? "有新版本" : boot.releaseNotes?.unread ? "更新记录未读" : null}
       inert={modalOpen || (mobile && !navOpen) || (compact && detailOpen && !navOpen)} />
@@ -369,19 +374,10 @@ export function App() {
       onOpenExisting={row=>{setOverlay(null);openWorkspace(boot.workspaces?.find(item=>item.id === row.id) ?? row);}}
       onSaved={projectSaved}
       onClose={closeOverlay} />}
-    {overlay?.kind === "workspace" && <Modal title={workspace?.name || (state.workspaceId === null ? "未分组对话" : "归属待核对")} onClose={closeOverlay}>
-      {!workspace ? <p>{state.workspaceId === null ? "这里保存不属于项目的历史和随手提问。" :
-        session?.workspaceError || "Team 归属暂时无法确认，仍可阅读已保存的历史。"}</p> : <>
-        <p className="workspace-directory">{workspace.project || "未关联文件夹。"}</p>
-        {workspace.project && workspace.projectAvailable === false && <p className="error-text">目录不可用。仍可阅读历史。</p>}
-        <div className="form-actions">
-          {!workspace.archived && <button onClick={()=>{setTitle(workspace.name);setOverlay({kind:"rename-team"});}}>重命名</button>}
-          {!workspace.archived && !workspace.project && <button onClick={()=>setOverlay({kind:"bind-team"})}>选择 Team 文件夹</button>}
-          <button disabled={overlay.busy} onClick={()=>updateWorkspace({archived:!workspace.archived})}>{workspace.archived ? "恢复" : "归档"}</button>
-        </div>
-        {overlay.error && <p className="error-text" role="alert">{overlay.error}</p>}
-      </>}
-    </Modal>}
+    {["workspace","delete-team"].includes(overlay?.kind) && <WorkspaceDialog overlay={overlay} workspace={workspace}
+      workspaceId={state.workspaceId} workspaceError={session?.workspaceError} onClose={closeOverlay}
+      onRename={()=>{setTitle(workspace.name);setOverlay({kind:"rename-team"});}}
+      onBind={()=>setOverlay({kind:"bind-team"})} onChange={updateWorkspace}/>}
     {overlay?.kind === "rename-team" && <Modal title="重命名" onClose={closeOverlay}>
       <form onSubmit={event=>{event.preventDefault();void updateWorkspace({name:title.trim()});}}>
         <label>名称<input required maxLength={160} value={title} onChange={event=>setTitle(event.target.value)}/></label>

@@ -15,7 +15,7 @@ const actions = new Set([
   "home.draft", "home.reserve", "home.transfer", "home.clearReservation",
   "session.create", "session.fork", "session.archive", "session.pin", "session.close", "session.name", "session.draft", "session.mode",
   "session.team", "session.thinking", "session.view", "team.save", "team.remove",
-  "workspace.create", "workspace.update", "workspace.bind", "workspace.rebind", "workspace.rebind.query",
+  "workspace.create", "workspace.update", "workspace.delete", "workspace.bind", "workspace.rebind", "workspace.rebind.query",
   "provider.save", "provider.inspectMetadata", "settings.work", "settings.builtinSkills", "releaseNotes.ack", "project.inspect", "project.browse", "project.mkdir", "project.prepare",
   "extension.commands", "extension.command", "extension.reload", "extension.respond",
   "context.organize", "task.submit", "task.continuePrepared", "task.confirmWork", "task.inspectContinuation", "task.continueWork", "work.exportDraft", "task.cancel", "task.reveal", "updates.check", "updates.configure",
@@ -83,7 +83,7 @@ export async function startGuiServer({ home, cwd = process.cwd(), port = 0, open
     try { return await controller[method](...args); }
     catch (error) {
       // The controller's public methods redact credentials, including newly entered keys.
-      const codes = ["HOST_SHUTTING_DOWN", "SHUTDOWN_UNSETTLED", "SESSION_STATE_CONFLICT", "SESSION_BUSY", "SESSION_NOT_PERSISTED", "SESSION_STATE_UNAVAILABLE", "CURSOR_EXPIRED", "WORKSPACE_CONFLICT", "WORKSPACE_UNAVAILABLE", "WORKSPACE_ARCHIVED", "DRAFT_CONFLICT", "VIEW_CONFLICT"];
+      const codes = ["HOST_SHUTTING_DOWN", "SHUTDOWN_UNSETTLED", "SESSION_STATE_CONFLICT", "SESSION_BUSY", "SESSION_NOT_PERSISTED", "SESSION_STATE_UNAVAILABLE", "CURSOR_EXPIRED", "WORKSPACE_CONFLICT", "WORKSPACE_UNAVAILABLE", "WORKSPACE_ARCHIVED", "WORKSPACE_DELETED", "DRAFT_CONFLICT", "VIEW_CONFLICT"];
       const fileCodes = ["FILE_UNSUPPORTED", "FILE_UNAVAILABLE", "FILE_PATH_INVALID", "FILE_IDENTITY_MISMATCH", "FILE_TOO_LARGE", "FILE_ENCODING_UNSUPPORTED", "FILE_TYPE_MISMATCH", "FILE_DIFF_UNSUPPORTED", "FILE_VERSION_MISMATCH", "FILE_NOT_FOUND", "FILE_DELETED", "FILE_PREVIEW_UNSUPPORTED", "FILE_PURPOSE_INVALID", "STATIC_PREVIEW_UNSUPPORTED"];
       const pluginCodes = ["EXTENSION_COMMAND", "EXTENSION_UI_UNSUPPORTED", "COMMAND_UNAVAILABLE", "UNADAPTED_PLUGIN"];
       const extraCodes=["SUBMISSION_CONFLICT","CONTEXT_BUSY","READ_SCOPE","READ_VERSION","PROJECT_SCOPE","PROJECT_PREPARATION_CHANGED","PROJECT_NOT_PREPARED","PROJECT_EXECUTION_REQUIRED","NETWORK_POLICY","PROPOSAL_BLOCKED","GUI_INPUT_UPGRADE","TURN_CONSTRAINTS"];
