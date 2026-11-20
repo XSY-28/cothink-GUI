@@ -10,6 +10,9 @@ import { privateDirectory } from "./storage.js";
 import { DEFAULT_THINKING_LEVEL, validateModelThinking } from "./thinking.js";
 import { workModelIdentity } from "./model-roster.js";
 
+// Offline Pi provider records from https://pi.dev/api/models/providers/{provider}, 2026-11-19.
+import catalogAdditions from "./pi-catalog-additions.json" with {type:"json"};
+
 const capabilityFields = ["contextWindow", "maxTokens", "input"];
 function publicModelRoute(model) {
   try {
@@ -250,6 +253,18 @@ export async function createModelRuntime(home) {
     // imported reasoning:false declarations. Explicit user modelOverrides still apply last.
     for (let provider of runtime.getProviders()) {
       let models = [...(provider.getAllModels?.() ?? provider.getModels())], changed = false;
+      const additions=(catalogAdditions[provider.id] ?? []).filter(model=>
+        provider.baseUrl === model.baseUrl && !models.some(row=>row.id===model.id));
+      if (additions.length) {
+        models.push(...additions);
+        if (!catalog.providers[provider.id]) {
+          const chat=models.filter(row=>!row.type || row.type==="chat");
+          runtime.registerNativeProvider({...provider,getModels:()=>chat,getAllModels:()=>models});
+          managedProviders.add(provider.id);
+          continue;
+        }
+        changed=true;
+      }
       const moonshot = ["moonshotai-cn", "moonshotai"].includes(provider.id);
       const canAddPro = (moonshot || (officialEndpoint(provider.baseUrl) === "moonshot" && !builtinIds.has(provider.id))) &&
         models.some(model => (!model.type || model.type === "chat") && model.api === "openai-completions");

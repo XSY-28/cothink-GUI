@@ -1,6 +1,6 @@
 {
   "name": "cothink-v2",
-  "version": "0.8.14-desktop.35",
+  "version": "0.8.14-desktop.36",
   "files": [
     "bin/cothink.js",
     "src/cli.js",
@@ -79,6 +79,7 @@
     "src/transport-diagnostics.js",
     "src/pi-runtime.js",
     "src/pi-model-runtime.js",
+    "src/pi-catalog-additions.json",
     "src/setup.js",
     "src/presentation.js",
     "src/extensions",

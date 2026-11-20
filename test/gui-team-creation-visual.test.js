@@ -60,7 +60,31 @@ for (const [scenario, title] of [
     }
     if(reuseRoster)await panel.getByRole("button",{name:"选择 已有阵容",exact:true}).click();
     else {
-      await panel.getByLabel("主模型",{exact:true}).selectOption('["fixture","main"]');
+      const main=panel.getByLabel("主模型",{exact:true});
+      assert.ok(await main.locator("option").count() <= 13,"start with a short model list");
+      await panel.getByLabel("搜索主模型",{exact:true}).fill("GPT6.2");
+      await main.selectOption('["openai","gpt-6.2-sol"]');
+      const openaiKey=panel.getByLabel("openai API key",{exact:true});
+      if(!await openaiKey.count())await panel.getByRole("button",{name:/更换 OpenAI API Key/}).click();
+      assert.equal(await openaiKey.count(),1);
+      await panel.getByLabel("搜索主模型",{exact:true}).fill("Fable5.2");
+      await main.selectOption('["anthropic","claude-fable-5-2"]');
+      await panel.getByLabel("搜索主模型",{exact:true}).fill("vercel gpt6.2");
+      await main.selectOption('["vercel-ai-gateway","openai/gpt-6.2-astra"]');
+      const gatewayKey=panel.getByLabel("vercel-ai-gateway API key",{exact:true});
+      if(!await gatewayKey.count())await panel.getByRole("button",{name:/更换 Vercel AI Gateway API Key/}).click();
+      assert.equal(await gatewayKey.count(),1);
+      assert.ok(await gatewayKey.evaluate(el=>el.compareDocumentPosition(el.form.querySelector('[aria-label="副模型 1"]')) & Node.DOCUMENT_POSITION_FOLLOWING));
+      await gatewayKey.fill("local-vercel-test-key");
+      await panel.getByRole("button",{name:"保存 vercel-ai-gateway 认证",exact:true}).click();
+      await gatewayKey.waitFor({state:"hidden"});
+      const credentials=JSON.parse(readFileSync(join(f.home,"pi/auth.json"),"utf8"));
+      assert.equal(credentials["vercel-ai-gateway"].key,"local-vercel-test-key");
+      assert.equal(credentials.openai,undefined);
+      assert.equal(f.calls.length,0);
+      await panel.getByLabel("搜索主模型",{exact:true}).fill("fixture main");
+      await main.selectOption('["fixture","main"]');
+      await panel.getByLabel("搜索副模型 1",{exact:true}).fill("fixture r1");
       await panel.getByLabel("副模型 1",{exact:true}).selectOption('["fixture","r1"]');
     }
     const start=panel.getByRole("button",{name:"开始对话",exact:true});
@@ -197,4 +221,25 @@ test("first Team recovers a lost create response with the complete home draft an
   assert.equal(await editor.inputValue(),text);
   assert.equal(state.homeDraft,null);
   assert.equal(f.calls.length,0);
+});
+
+test("built-in provider routes remain available after an offline catalog refresh", async t => {
+  const f = await fixture(t);
+  const {createModelRuntime} = await load("src/pi-model-runtime.js");
+  const runtime = await createModelRuntime(f.home);
+  await runtime.refresh({allowNetwork:false});
+  const expected = {
+    openai: ["gpt-6.2-sol", "gpt-6.2-astra"],
+    anthropic: ["claude-fable-5-2"],
+    "openai-codex": ["gpt-6.2-sol", "gpt-6.2-astra"],
+    "vercel-ai-gateway": ["openai/gpt-6.2-sol", "openai/gpt-6.2-astra", "anthropic/claude-fable-5.2"],
+  };
+  for (const [provider, ids] of Object.entries(expected)) {
+    for (const id of ids) {
+      const row = runtime.getModel(provider, id);
+      assert.equal(row?.id, id, provider + "/" + id);
+      assert.equal(row.provider, provider);
+    }
+  }
+  assert.equal(f.calls.length, 0);
 });

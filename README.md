@@ -14,12 +14,13 @@ CoThink 想探索的是，怎样**用算力换智力**。一项任务要经过�
 
 **0.8.14-desktop.34** 桌面对话内置 Web Design Engineer，可输入 `/skill:web-design-engineer` 并附上设计需求。开关在「设置 → 技能与能力」。
 
-**0.8.14-desktop.35（当前源码）** 新建 Team 时可从九个角色中选头像（含小狗洛丽塔），点击“创建”保存。侧栏和该 Team 的回复都使用所选头像。旧 Team 默认使用巴巴祖。公开 npm 包使用占位图，角色名称和选择仍会保存。
+**0.8.14-desktop.35** 新建 Team 时可从九个角色中选头像（含小狗洛丽塔），点击“创建”保存。侧栏和该 Team 的回复都使用所选头像。旧 Team 默认使用巴巴祖。公开 npm 包使用占位图，角色名称和选择仍会保存。
+
+**0.8.14-desktop.36** 配置阵容时先显示常用型号，可按服务商浏览或搜索完整目录。选好主、副模型后，可以在对应席位保存或更换 API Key；同一服务商的席位共用认证。离线目录补入 GPT-6.2 Sol、GPT-6.2 Astra 和 Claude Fable 5.2 的官方或网关条目。
 
 ## 下载
 
-需要 Node.js 22.19 或更新版本。
-
-- **从 npm 安装或更新**。运行 `npm install -g cothink-v2@latest`。Windows PowerShell 可用 `npm.cmd install -g cothink-v2@latest`。[npm 包页面](https://www.npmjs.com/package/cothink-v2)
-- **下载 npm 安装包**。下载 `cothink-v2-0.8.14-desktop.35.tgz` 后运行 `npm install -g ./cothink-v2-0.8.14-desktop.35.tgz`。GitHub 附件需要仓库权限，npm 下载链接可直接访问。[GitHub Release 附件](https://github.com/XSY-28/cothink-gui-workspace/releases/tag/v0.8.14-desktop.35) · [从 npm 下载 .tgz](https://registry.npmjs.org/cothink-v2/-/cothink-v2-0.8.14-desktop.35.tgz)
-- **历史分平台预览包**。可下载 macOS Apple Silicon、Windows x64 和 Windows ARM64 的 `0.8.14-desktop.34` 安装包。[历史预览包](https://github.com/XSY-28/cothink-gui-workspace/releases/tag/v0.8.14-desktop.34)
+- **Windows 桌面 App**：关闭 CoThink，从 [Windows 发行页](https://github.com/XSY-28/cothink-GUI/releases/tag/v0.8.14-desktop.36) 下载相应的安装器。Intel、AMD 电脑选 x64，骁龙电脑选 ARM64。双击可安装或更新，运行时和动态 Team 头像已内置。
+- **npm 版**：需要 Node.js 22.19 或更新版本。运行 `npm install -g cothink-v2@latest`，Windows PowerShell 可用 `npm.cmd`。运行 `cothink gui` 打开浏览器界面。[npm 包页面](https://www.npmjs.com/package/cothink-v2)
+- **下载 npm 安装包**：从同一发行页下载 `cothink-v2-0.8.14-desktop.36.tgz`，在下载目录运行 `npm install -g ./cothink-v2-0.8.14-desktop.36.tgz`。
+- **历史分平台 npm 包**：[0.8.14-desktop.34 发行页](https://github.com/XSY-28/cothink-GUI/releases/tag/v0.8.14-desktop.34) 提供 macOS Apple Silicon、Windows x64 和 Windows ARM64 归档。

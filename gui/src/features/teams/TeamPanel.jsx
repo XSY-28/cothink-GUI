@@ -10,7 +10,6 @@ function parameterText(ref) {
   const preference=thinkingPreferenceView(ref.thinkingLevel);
   return `${modelName(ref)} · 思考 ${preference.level??`无效（${String(ref.thinkingLevel)}）`} · ${ref.maxOutputTokens == null ? "未设输出额度" : ref.maxOutputTokens+" tokens"}`;
 }
-/** Feature-local edits; the caller owns the modal and focus restoration. */
 export const TeamPanel = forwardRef(function TeamPanel({session, workspace, teams=[], models=[], providers=[], busy,
   onboarding, commands, onProviderSettings, onClose, onStart}, ref) {
   const [draft,setDraft]=useState(()=>onboarding && !teams.length ? newRoster("日常协作") : null);
@@ -179,7 +178,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
       }
     });
   }
-  const authFields=<RosterAuthFields authProviders={authProviders} providers={providers} keys={keys} setKeys={setKeys}
+  const authFields=ids=><RosterAuthFields authProviders={ids} providers={providers} keys={keys} setKeys={setKeys}
     authUnknown={authUnknown} onboarding={onboarding} hasProviderSettings={!!onProviderSettings}
     disabled={disabled || !!unknown} pending={pending} onSaveKey={saveKey} onRefresh={()=>run(refreshUnknown)}/>;
   const onboardingActions=onboarding && <div className={styles.onboardingActions}>
@@ -234,8 +233,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
       {(!onboarding || teams.length>0) && <button type="button" disabled={pending} onClick={()=>requestLeave(home)}>← 返回已保存阵容</button>}
       <form onSubmit={e=>{e.preventDefault();if(onboarding ? canStart : !unknown)run(()=>save(false));}}>
         <RosterFields draft={draft} setDraft={setDraft} models={models} providers={providers} onboarding={onboarding}
-          disabled={disabled || !!unknown} actualThinking={actualThinking}/>
-        {authFields}
+          disabled={disabled || !!unknown} actualThinking={actualThinking} authFields={authFields}/>
         {unknown && <section className={styles.confirm}>
           <p>保存结果未知，表单保留。找到同名阵容也不会自动使用或再次创建。</p>
           <button type="button" disabled={pending} onClick={()=>run(refreshUnknown)}>读取阵容列表核对</button>
@@ -305,7 +303,7 @@ export const TeamPanel = forwardRef(function TeamPanel({session, workspace, team
         <button type="button" disabled={disabled} onClick={()=>begin(current)}>基于当前阵容调整</button>
       </>}
       {onboarding ? <>
-        {authFields}
+        {authFields(authProviders)}
         {chosen && !current && refs.some(ref=>routeIssue(ref,models,providers,false)) &&
           <button type="button" disabled={disabled} onClick={()=>begin(chosen)}>调整并另存阵容</button>}
         {onboardingActions}
